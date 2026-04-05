@@ -1,14 +1,17 @@
 <div align="center">
 
-<img src="assets/preview.webp" alt="ClipFinder" width="800"/>
+<img src="assets/logo.png" alt="ClipFinder Logo" width="120"/>
 
 # ClipFinder — AI Drama Clip Extractor
 
 **Find, cut, and caption viral moments from any stream or video — automatically.**
 
-[![Release](https://img.shields.io/github/v/release/thatspeedykid/clipfinder?color=FF6B1A&label=Download&style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
+[![Version](https://img.shields.io/badge/Version-1.0-FF6B1A?style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
+[![Download](https://img.shields.io/github/v/release/thatspeedykid/clipfinder?color=FF6B1A&label=Download&style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-orange?style=for-the-badge)](LICENSE)
 [![Twitter](https://img.shields.io/badge/@MarsScumbags-000000?style=for-the-badge&logo=x)](https://x.com/MarsScumbags)
+
+<img src="assets/preview.webp" alt="ClipFinder Preview" width="900"/>
 
 </div>
 
@@ -38,9 +41,9 @@ Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
 
 ## Download
 
-**[⬇ Download ClipFinder_Setup.exe](https://github.com/thatspeedykid/clipfinder/releases/latest)**
+**[⬇ Download ClipFinder_Setup.exe — Latest Release](https://github.com/thatspeedykid/clipfinder/releases/latest)**
 
-- Windows 10/11 64-bit
+- Windows 10/11 64-bit only
 - No Python required — everything included
 - ~200MB installer
 
@@ -54,10 +57,10 @@ Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
    - [Groq (Free)](https://console.groq.com) — fastest, best for tweets
    - [Google Gemini (Free)](https://aistudio.google.com/apikey) — best for long videos
    - [OpenRouter (Free models)](https://openrouter.ai) — extra fallback
-4. Settings auto-saves — you're ready
+4. Settings auto-save — you're ready
 
-### Optional but recommended:
-- **Settings → Core Dependencies → Install ffmpeg** (auto-downloads)
+### Optional but recommended
+- **Settings → Core Dependencies → Install ffmpeg** (auto-downloads ~90MB)
 - **Settings → Core Dependencies → Install whisper.cpp (GPU)** (AMD/Intel GPU transcription)
 
 ---
@@ -68,7 +71,7 @@ Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
 1. Paste a URL or browse to a video file
 2. Add context (who's in it, what's the drama)
 3. Hit **▶ FIND CLIPS**
-4. Review the AI suggestions, adjust timestamps if needed
+4. Review AI suggestions, adjust timestamps if needed
 5. Select clips → **✂ EXPORT SELECTED**
 
 ### Generate Tweet
@@ -80,7 +83,7 @@ Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
 ### Censor Audio
 - Toggle **🔇 Censor** in the export bar
 - Choose Beep, Silence, or custom MP3
-- Words managed in **🔇 Censor** tab
+- Manage word list in the **🔇 Censor** tab
 
 ---
 
@@ -88,11 +91,11 @@ Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
 
 All providers have free tiers — no credit card needed:
 
-| Provider | Best For | Rate Limit |
+| Provider | Best For | Free Limit |
 |----------|----------|------------|
-| [Groq](https://console.groq.com) | Tweets, fast inference | 30 req/min free |
-| [Google Gemini](https://aistudio.google.com/apikey) | Long videos, clip finding | 15 req/min free |
-| [OpenRouter](https://openrouter.ai) | Fallback, extra models | Varies by model |
+| [Groq](https://console.groq.com) | Tweets, fast inference | 30 req/min |
+| [Google Gemini](https://aistudio.google.com/apikey) | Long videos, clip finding | 15 req/min |
+| [OpenRouter](https://openrouter.ai) | Fallback, extra models | Varies |
 
 ClipFinder tries all providers automatically and falls back if one fails.
 
@@ -105,7 +108,7 @@ ClipFinder tries all providers automatically and falls back if one fails.
 | AMD (RX 5000+) | whisper.cpp + Vulkan | ~10x realtime |
 | Intel Arc / iGPU | whisper.cpp + Vulkan | ~5x realtime |
 | NVIDIA | faster-whisper + CUDA | ~15x realtime |
-| Any | faster-whisper CPU | ~3x realtime |
+| Any CPU | faster-whisper int8 | ~3x realtime |
 
 Install via **Settings → Core Dependencies**.
 
@@ -122,9 +125,8 @@ pip install -r requirements.txt
 python clipfinder.py
 ```
 
-To build the installer:
+To build the installer (requires Python 3.12 + [NSIS](https://nsis.sourceforge.io)):
 ```bash
-# Requires Python 3.12 + NSIS (nsis.sourceforge.io)
 build_installer.bat
 "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
 ```
@@ -133,21 +135,23 @@ build_installer.bat
 
 ## Changelog
 
-### v1.0 — Initial Release
+### v1.0 — April 2026 — Initial Release
 - AI clip detection with Gemini, Groq, OpenRouter
 - GPU transcription (AMD/Intel Vulkan, NVIDIA CUDA)
 - 16:9 and 9:16 export with face tracking
 - Built-in downloader (Kick, Twitch, YouTube, Twitter/X)
 - Tweet generator with tone selection
 - Auto-censor with custom word lists
-- Thumbnail finder
-- Censor tab with bleep/silence/MP3
+- Thumbnail finder, Studio tab, Interview mode
+- One-click dependency installer
 
 ---
 
 ## Support
 
-[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue?style=for-the-badge&logo=paypal)](https://www.paypal.com/donate/?business=networkchasemedia%40gmail.com&currency_code=USD)
+If ClipFinder helps your channel, consider buying me a coffee!
+
+[![Donate](https://img.shields.io/badge/Donate-PayPal-blue?style=for-the-badge&logo=paypal)](https://www.paypal.com/donate/?business=networkchasemedia%40gmail.com&currency_code=USD)
 
 Follow for clips and updates: [@MarsScumbags](https://x.com/MarsScumbags)
 
