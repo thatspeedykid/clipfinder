@@ -1,0 +1,62 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # triggers on v1.0, v1.1, etc.
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install NSIS
+        run: |
+          choco install nsis --yes
+        shell: cmd
+
+      - name: Build installer
+        run: build_installer.bat
+        shell: cmd
+
+      - name: Compile NSIS installer
+        run: |
+          "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+        shell: cmd
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ClipFinder ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## ClipFinder ${{ steps.version.outputs.VERSION }}
+
+            ### Install
+            Download `ClipFinder_Setup.exe` below and run it.
+            - Installs to Program Files
+            - Desktop + Start Menu shortcuts created
+            - No Python required
+
+            ### First time?
+            After installing, go to **⚙ Settings → API Keys** and add a free Groq or Gemini key.
+
+            ### Updating?
+            Your settings, API keys, and downloaded models are preserved automatically.
+          files: ClipFinder_Setup.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

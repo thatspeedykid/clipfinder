@@ -1,0 +1,158 @@
+<div align="center">
+
+<img src="assets/preview.webp" alt="ClipFinder" width="800"/>
+
+# ClipFinder — AI Drama Clip Extractor
+
+**Find, cut, and caption viral moments from any stream or video — automatically.**
+
+[![Release](https://img.shields.io/github/v/release/thatspeedykid/clipfinder?color=FF6B1A&label=Download&style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
+[![License](https://img.shields.io/badge/License-MIT-orange?style=for-the-badge)](LICENSE)
+[![Twitter](https://img.shields.io/badge/@MarsScumbags-000000?style=for-the-badge&logo=x)](https://x.com/MarsScumbags)
+
+</div>
+
+---
+
+## What is ClipFinder?
+
+ClipFinder is a Windows desktop app that uses AI to automatically find the best drama, tea, and highlight moments in stream VODs and videos. Point it at any video, hit Find Clips, and get timestamped clips scored for virality — ready to export as 16:9 or 9:16 vertical for TikTok/Reels.
+
+Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
+
+---
+
+## Features
+
+- 🤖 **AI Clip Detection** — Gemini, Groq, and OpenRouter find the best moments automatically
+- ✂️ **Smart Export** — 16:9, 9:16 vertical, or both simultaneously with GPU acceleration
+- 🎙️ **GPU Transcription** — whisper.cpp with Vulkan for AMD/Intel, CUDA for NVIDIA
+- 🔇 **Auto Censor** — beep, silence, or custom MP3 over banned words
+- ⬇️ **Built-in Downloader** — Kick, Twitch, YouTube, Twitter/X via yt-dlp
+- 🖼️ **Thumbnail Finder** — search and download thumbnails via Unsplash
+- 🐦 **Tweet Generator** — AI-written viral tweets from your transcript
+- 🎬 **Studio** — trim, preview, and manage clips before export
+- 📺 **Interview Mode** — tracks who's speaking for multi-person interviews
+
+---
+
+## Download
+
+**[⬇ Download ClipFinder_Setup.exe](https://github.com/thatspeedykid/clipfinder/releases/latest)**
+
+- Windows 10/11 64-bit
+- No Python required — everything included
+- ~200MB installer
+
+---
+
+## First Time Setup
+
+1. Run `ClipFinder_Setup.exe` → installs to Program Files + Desktop shortcut
+2. Open ClipFinder
+3. Go to **⚙ Settings → API Keys** and add at least one free key:
+   - [Groq (Free)](https://console.groq.com) — fastest, best for tweets
+   - [Google Gemini (Free)](https://aistudio.google.com/apikey) — best for long videos
+   - [OpenRouter (Free models)](https://openrouter.ai) — extra fallback
+4. Settings auto-saves — you're ready
+
+### Optional but recommended:
+- **Settings → Core Dependencies → Install ffmpeg** (auto-downloads)
+- **Settings → Core Dependencies → Install whisper.cpp (GPU)** (AMD/Intel GPU transcription)
+
+---
+
+## How to Use
+
+### Find Clips
+1. Paste a URL or browse to a video file
+2. Add context (who's in it, what's the drama)
+3. Hit **▶ FIND CLIPS**
+4. Review the AI suggestions, adjust timestamps if needed
+5. Select clips → **✂ EXPORT SELECTED**
+
+### Generate Tweet
+1. Transcribe your video first
+2. Go to **📝 Transcript** tab
+3. Add context, pick a tone (Drama / Tea / Breaking / Hype)
+4. Hit **⚡ GENERATE TWEET**
+
+### Censor Audio
+- Toggle **🔇 Censor** in the export bar
+- Choose Beep, Silence, or custom MP3
+- Words managed in **🔇 Censor** tab
+
+---
+
+## AI Providers
+
+All providers have free tiers — no credit card needed:
+
+| Provider | Best For | Rate Limit |
+|----------|----------|------------|
+| [Groq](https://console.groq.com) | Tweets, fast inference | 30 req/min free |
+| [Google Gemini](https://aistudio.google.com/apikey) | Long videos, clip finding | 15 req/min free |
+| [OpenRouter](https://openrouter.ai) | Fallback, extra models | Varies by model |
+
+ClipFinder tries all providers automatically and falls back if one fails.
+
+---
+
+## GPU Transcription
+
+| GPU | Method | Speed |
+|-----|--------|-------|
+| AMD (RX 5000+) | whisper.cpp + Vulkan | ~10x realtime |
+| Intel Arc / iGPU | whisper.cpp + Vulkan | ~5x realtime |
+| NVIDIA | faster-whisper + CUDA | ~15x realtime |
+| Any | faster-whisper CPU | ~3x realtime |
+
+Install via **Settings → Core Dependencies**.
+
+---
+
+## Building from Source
+
+Requires Python 3.12.
+
+```bash
+git clone https://github.com/thatspeedykid/clipfinder
+cd clipfinder
+pip install -r requirements.txt
+python clipfinder.py
+```
+
+To build the installer:
+```bash
+# Requires Python 3.12 + NSIS (nsis.sourceforge.io)
+build_installer.bat
+"C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+```
+
+---
+
+## Changelog
+
+### v1.0 — Initial Release
+- AI clip detection with Gemini, Groq, OpenRouter
+- GPU transcription (AMD/Intel Vulkan, NVIDIA CUDA)
+- 16:9 and 9:16 export with face tracking
+- Built-in downloader (Kick, Twitch, YouTube, Twitter/X)
+- Tweet generator with tone selection
+- Auto-censor with custom word lists
+- Thumbnail finder
+- Censor tab with bleep/silence/MP3
+
+---
+
+## Support
+
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue?style=for-the-badge&logo=paypal)](https://www.paypal.com/donate/?business=networkchasemedia%40gmail.com&currency_code=USD)
+
+Follow for clips and updates: [@MarsScumbags](https://x.com/MarsScumbags)
+
+---
+
+## License
+
+MIT — free to use, modify, and distribute. Credit appreciated.
