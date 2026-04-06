@@ -175,7 +175,7 @@ build_installer.bat
 
 ## Changelog
 
-### v1.1 — April 2026 — Initial Release
+### v1.0 — April 2026 — Initial Release
 - AI clip detection with Gemini, Groq, OpenRouter
 - GPU transcription (AMD/Intel Vulkan, NVIDIA CUDA)
 - 16:9 and 9:16 export with face tracking
