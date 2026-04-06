@@ -1,0 +1,29 @@
+# Build outputs
+dist/
+build/
+ClipFinder_dist/
+_launcher_build/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+
+# User data (never commit)
+clipfinder_config.json
+pkgs/
+ffmpeg_bin/
+whisper_cpp/
+whisper_models/
+
+# NSIS build artifacts
+*.nsi.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

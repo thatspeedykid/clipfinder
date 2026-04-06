@@ -1,0 +1,33 @@
+# ClipFinder — Python dependencies
+# Install: pip install -r requirements.txt
+
+# Core UI
+# tkinter is built into Python — no pip install needed
+
+# Downloader
+yt-dlp
+curl-cffi
+
+# Images
+Pillow
+imagehash
+
+# AI Providers
+google-genai
+groq
+openai
+
+# Transcription
+faster-whisper
+openai-whisper
+
+# Video/Audio processing
+opencv-python
+soundfile
+numpy
+
+# Network
+requests
+
+# Optional — face tracking for vertical crop
+# mediapipe

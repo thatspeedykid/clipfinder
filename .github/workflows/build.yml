@@ -1,0 +1,91 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install NSIS
+        run: choco install nsis --yes
+        shell: cmd
+
+      - name: Get version
+        id: version
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
+          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
+          echo "VER=$ver" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Update version in README
+        run: |
+          $ver = "${{ steps.version.outputs.VER }}"
+          $readme = Get-Content README.md -Raw
+          $readme = $readme -replace 'Version-\d+\.\d+-FF6B1A', "Version-$ver-FF6B1A"
+          $readme = $readme -replace '### v\d+\.\d+ —', "### v$ver —"
+          Set-Content README.md $readme
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --staged --quiet || git commit -m "chore: bump README version to v$ver [skip ci]"
+          git push origin HEAD:main
+        shell: pwsh
+
+      - name: Update version in NSIS script
+        run: |
+          $ver = "${{ steps.version.outputs.VER }}"
+          $nsi = Get-Content installer.nsi -Raw
+          $nsi = $nsi -replace '!define APP_VERSION "\d+\.\d+"', "!define APP_VERSION `"$ver`""
+          Set-Content installer.nsi $nsi
+        shell: pwsh
+
+      - name: Build installer
+        run: build_installer.bat
+        shell: cmd
+
+      - name: Compile NSIS
+        run: |
+          & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+        shell: pwsh
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ClipFinder v${{ steps.version.outputs.VER }}
+          body: |
+            ## ClipFinder v${{ steps.version.outputs.VER }}
+
+            ### Install
+            Download `ClipFinder_Setup.exe` below and run it.
+            - Installs to Program Files + Desktop shortcut
+            - No Python required — everything included
+
+            ### Updating from older version?
+            Just run the new installer — your API keys and settings are preserved automatically.
+
+            ### First time?
+            After installing, go to **⚙ Settings → API Keys** and add a free Groq or Gemini key.
+
+            ---
+            Built by [@MarsScumbags](https://x.com/MarsScumbags)
+          files: ClipFinder_Setup.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
