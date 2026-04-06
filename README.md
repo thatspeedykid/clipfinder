@@ -6,7 +6,7 @@
 
 **Find, cut, and caption viral moments from any stream or video — automatically.**
 
-[![Version](https://img.shields.io/badge/Version-1.0-FF6B1A?style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
+[![Version](https://img.shields.io/badge/Version-1.1-FF6B1A?style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
 [![Download](https://img.shields.io/github/v/release/thatspeedykid/clipfinder?color=FF6B1A&label=Download&style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-orange?style=for-the-badge)](LICENSE)
 [![Twitter](https://img.shields.io/badge/@MarsScumbags-000000?style=for-the-badge&logo=x)](https://x.com/MarsScumbags)
@@ -213,3 +213,4 @@ Follow for clips and updates: [@MarsScumbags](https://x.com/MarsScumbags)
 ## License
 
 MIT — free to use, modify, and distribute. Credit appreciated.
+
