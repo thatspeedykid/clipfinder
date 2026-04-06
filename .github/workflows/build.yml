@@ -36,20 +36,6 @@ jobs:
           echo "VER=$ver" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
-      - name: Update version in README
-        run: |
-          $ver = "${{ steps.version.outputs.VER }}"
-          $readme = Get-Content README.md -Raw
-          $readme = $readme -replace 'Version-[\d\.]+[^-"]*-FF6B1A', "Version-$ver-FF6B1A"
-          $readme = $readme -replace '### v[\d\.]+[\w-]* —', "### v$ver —"
-          Set-Content README.md $readme
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git diff --staged --quiet || git commit -m "chore: bump README version to v$ver [skip ci]"
-          git push origin HEAD:main --force
-        shell: pwsh
-
       - name: Update version in NSIS script
         run: |
           $ver = "${{ steps.version.outputs.VER }}"
