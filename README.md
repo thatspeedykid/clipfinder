@@ -53,15 +53,69 @@ Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
 
 1. Run `ClipFinder_Setup.exe` → installs to Program Files + Desktop shortcut
 2. Open ClipFinder
-3. Go to **⚙ Settings → API Keys** and add at least one free key:
-   - [Groq (Free)](https://console.groq.com) — fastest, best for tweets
-   - [Google Gemini (Free)](https://aistudio.google.com/apikey) — best for long videos
-   - [OpenRouter (Free models)](https://openrouter.ai) — extra fallback
-4. Settings auto-save — you're ready
+3. Go to **⚙ Settings → API Keys** and add your keys (all free):
+
+| Provider | What It's For | Free Tier | Get Key |
+|----------|--------------|-----------|---------|
+| **Gemini** | Clip finding — best for long videos | 15 req/min | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| **Groq** | Tweets + fast inference | 30 req/min | [console.groq.com](https://console.groq.com) |
+| **OpenRouter** | Fallback + extra free models | Varies | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| **Unsplash** | Thumbnail search | 50 req/hr | [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) |
+
+> **You only need one AI key to get started.** Groq or Gemini recommended. Unsplash is optional — only needed for the Thumbnails tab.
+
+4. Click **Save & Apply** — no restart needed
+
+### How to get each API key
+
+<details>
+<summary><b>🔑 Gemini (Google) — Best for clip finding</b></summary>
+
+1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. Sign in with your Google account
+3. Click **Create API Key**
+4. Copy the key and paste it into ClipFinder → Settings → Gemini
+
+Free tier: 15 requests/min, 1500 requests/day — plenty for daily use.
+</details>
+
+<details>
+<summary><b>🔑 Groq — Best for tweets and fast responses</b></summary>
+
+1. Go to [console.groq.com](https://console.groq.com)
+2. Sign up for a free account
+3. Go to **API Keys** → **Create API Key**
+4. Copy the key and paste it into ClipFinder → Settings → Groq
+
+Free tier: 30 requests/min — fastest inference available.
+</details>
+
+<details>
+<summary><b>🔑 OpenRouter — Free models fallback</b></summary>
+
+1. Go to [openrouter.ai](https://openrouter.ai)
+2. Sign up and go to **Keys** → **Create Key**
+3. Copy the key and paste it into ClipFinder → Settings → OpenRouter
+
+Free tier: multiple free models available, no credit card needed.
+</details>
+
+<details>
+<summary><b>🔑 Unsplash — Thumbnail search (optional)</b></summary>
+
+1. Go to [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications)
+2. Sign in or create a free account
+3. Click **New Application** → accept terms
+4. Fill in app name (e.g. "ClipFinder") and description
+5. Scroll down and copy your **Access Key**
+6. Paste it into ClipFinder → Settings → Unsplash
+
+Free tier: 50 requests/hour — more than enough for thumbnail searching.
+</details>
 
 ### Optional but recommended
 - **Settings → Core Dependencies → Install ffmpeg** (auto-downloads ~90MB)
-- **Settings → Core Dependencies → Install whisper.cpp (GPU)** (AMD/Intel GPU transcription)
+- **Settings → Core Dependencies → Install whisper.cpp (GPU)** — AMD/Intel GPU transcription
 
 ---
 
@@ -84,20 +138,6 @@ Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
 - Toggle **🔇 Censor** in the export bar
 - Choose Beep, Silence, or custom MP3
 - Manage word list in the **🔇 Censor** tab
-
----
-
-## AI Providers
-
-All providers have free tiers — no credit card needed:
-
-| Provider | Best For | Free Limit |
-|----------|----------|------------|
-| [Groq](https://console.groq.com) | Tweets, fast inference | 30 req/min |
-| [Google Gemini](https://aistudio.google.com/apikey) | Long videos, clip finding | 15 req/min |
-| [OpenRouter](https://openrouter.ai) | Fallback, extra models | Varies |
-
-ClipFinder tries all providers automatically and falls back if one fails.
 
 ---
 
@@ -142,8 +182,13 @@ build_installer.bat
 - Built-in downloader (Kick, Twitch, YouTube, Twitter/X)
 - Tweet generator with tone selection
 - Auto-censor with custom word lists
-- Thumbnail finder, Studio tab, Interview mode
+- Thumbnail finder via Unsplash
+- Studio tab, Interview mode
 - One-click dependency installer
+
+### v1.1 — Coming Soon
+- In-app update notifications
+- UI improvements and bug fixes
 
 ---
 
