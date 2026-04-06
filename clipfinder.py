@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.1 Beta"
+APP_VERSION = "1.2 Beta"
 
 import subprocess
 import sys
@@ -1716,7 +1716,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.1 Beta — AI Clip Extractor')
+        self.title('ClipFinder 1.2 Beta — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon from embedded ICO
         try:
@@ -1735,6 +1735,7 @@ class App(tk.Tk):
 
         self.v_video    = tk.StringVar()
         self.v_outdir   = tk.StringVar(value=self.cfg.get('outdir', ''))
+        self.v_outdir.trace_add('write', lambda *_: self.cfg.update({'outdir': self.v_outdir.get()}) or save_cfg(self.cfg))
         self.v_key      = tk.StringVar()
         self.v_provider = tk.StringVar(value=self.cfg.get('provider', list(PROVIDERS.keys())[0]))
         # Per-provider key storage
@@ -2462,10 +2463,11 @@ class App(tk.Tk):
         if self._log_panel.winfo_ismapped():
             self._log_panel.pack_forget()
         else:
-            # Pack before status bar so it appears above it
-            self._log_panel.pack(fill='x', before=self._bot_bar if hasattr(self,'_bot_bar') else None)
+            # Ensure it packs at the bottom of the main window above status bar
+            self._log_panel.pack(side='bottom', fill='x')
             self._log_panel.lift()
-            self.log_box.see('end')
+            try: self.log_box.see('end')
+            except: pass
 
     def _switch_nb(self, key):
         for k, f in self.nb_frames.items():
@@ -2908,6 +2910,9 @@ class App(tk.Tk):
         tk.Button(hdr, text='Copy', font=FONT_SMALL, bg=BG3, fg=FG2,
                   relief='flat', bd=0, cursor='hand2', padx=8, pady=2,
                   command=self._copy_transcript).pack(side='right')
+        tk.Button(hdr, text='📋 Log', font=FONT_SMALL, bg=BG3, fg=FG2,
+                  relief='flat', bd=0, cursor='hand2', padx=8, pady=2,
+                  command=self._toggle_log).pack(side='right', padx=4)
 
         trans_wrap = tk.Frame(left, bg=BG3)
         trans_wrap.pack(fill='both', expand=True)
@@ -3243,7 +3248,7 @@ class App(tk.Tk):
             'model':             self.v_model.get(),
             'whisper':           self.v_whisper.get(),
             'tweet_context': self.tweet_context.get('1.0','end').strip() if hasattr(self,'tweet_context') else '',
-            'outdir':            self.v_outdir.get(),
+            'outdir':            self.v_outdir.get().strip(),
             'key_gemini':        self._keys.get('Google Gemini (Free)', ''),
             'key_groq':          self._keys.get('Groq (Free)', ''),
             'key_openrouter':    self._keys.get('OpenRouter (Free models)', ''),
@@ -3365,7 +3370,7 @@ class App(tk.Tk):
         else: self.after(0, _do)
 
     # ── Validation ────────────────────────────────────────────────────────────
-    def validate(self, need_ai=True):
+    def validate(self, need_ai=True, need_outdir=True):
         # Ensure pkgs/ is on path then check for whisper
         _ensure_pkgs_on_path()
         import importlib as _ilv
@@ -3411,7 +3416,7 @@ class App(tk.Tk):
         if need_ai and not self.v_key.get().strip():
             messagebox.showerror('No API key', 'Enter your API key.')
             return False
-        if not self.v_outdir.get().strip():
+        if need_outdir and not self.v_outdir.get().strip():
             messagebox.showerror('No output folder', 'Select an output folder.')
             return False
         return True
@@ -3478,7 +3483,7 @@ class App(tk.Tk):
 
     def _transcribe_only(self):
         if self.running: return
-        if not self.validate(need_ai=False): return
+        if not self.validate(need_ai=False, need_outdir=False): return
         self.running = True
         self.set_busy(True)
         self.log('Starting transcription...')
@@ -3496,7 +3501,8 @@ class App(tk.Tk):
             self.running = True
             self.set_busy(True)
             self._show_empty()
-            self.log('Auto Edit mode not available in this version', YELLOW)
+            self.log('🎬 Auto Edit — finding best clips automatically...', ACCENT2)
+            threading.Thread(target=self._run_auto_edit_v2, daemon=True).start()
             return
         self.running = True
         self.set_busy(True)
@@ -3504,12 +3510,118 @@ class App(tk.Tk):
         self.log('Starting...')
         threading.Thread(target=self._run_transcribe, args=(True,), daemon=True).start()
 
+
+    def _run_auto_edit_v2(self):
+        """CapCut-style auto edit — silence removal + energy peaks + AI selection."""
+        try:
+            vid = self.v_video.get()
+            if not vid or not Path(vid).exists():
+                self.after(0, lambda: self.log('No video loaded', RED))
+                return
+
+            ff = ensure_ffmpeg()
+            if not ff:
+                self.after(0, lambda: self.log('ffmpeg required for Auto Edit', RED))
+                return
+
+            # Step 1: Get video duration
+            import subprocess as _sp_ae, re as _re_ae, json as _js_ae
+            self.set_progress('Auto Edit: analyzing video...', pct=5)
+
+            _dur_r = _sp_ae.run([ff, '-v', 'error', '-show_entries', 'format=duration',
+                                  '-of', 'default=noprint_wrappers=1:nokey=1', vid],
+                                 capture_output=True, text=True, timeout=30)
+            duration = float(_dur_r.stdout.strip() or 0)
+            self.log(f'[Auto Edit] Video: {duration:.0f}s ({duration/60:.1f}min)', FG2)
+
+            # Step 2: Detect silence gaps — find non-silent segments
+            self.set_progress('Auto Edit: detecting silence...', pct=15)
+            _sil_r = _sp_ae.run([ff, '-i', vid, '-af',
+                                  'silencedetect=noise=-35dB:d=0.8', '-f', 'null', '-'],
+                                 capture_output=True, text=True, timeout=300)
+            sil_output = _sil_r.stderr
+
+            # Parse silence periods
+            silence_starts = [float(m) for m in _re_ae.findall(r'silence_start: ([\d.]+)', sil_output)]
+            silence_ends   = [float(m) for m in _re_ae.findall(r'silence_end: ([\d.]+)', sil_output)]
+            self.log(f'[Auto Edit] Found {len(silence_starts)} silence gaps', FG2)
+
+            # Step 3: Audio energy peaks
+            self.set_progress('Auto Edit: finding reaction moments...', pct=30)
+            energy_peaks = _analyze_audio_energy(vid, ff, num_peaks=15)
+            if energy_peaks:
+                self.log(f'[Auto Edit] {len(energy_peaks)} energy peaks detected', FG2)
+
+            # Step 4: Transcribe for AI context
+            self.set_progress('Auto Edit: transcribing...', pct=40)
+            _wm = self.v_whisper.get()
+            if _wm in ('auto', ''):
+                _wm = 'base' if duration < 1800 else 'small'
+            try:
+                result = _do_transcribe(vid, _wm, ffmpeg_path=ff)
+                transcript = result.get('text', '')
+                _segs = result.get("segments", [])
+                self.transcript = "\n".join(
+                    "[" + _fmt_ts(s["start"]) + " -> " + _fmt_ts(s["end"]) + "] " + s["text"].strip()
+                    for s in _segs)
+                self.log(f'[Auto Edit] Transcribed: {len(transcript.split())} words', FG2)
+            except Exception as te:
+                transcript = ''
+                self.log(f'[Auto Edit] Transcription skipped: {te}', YELLOW)
+
+            # Step 5: Ask AI to pick the best clips using all the data
+            self.set_progress('Auto Edit: AI selecting clips...', pct=60)
+            self._current_energy_peaks = energy_peaks
+            if transcript:
+                threading.Thread(target=self._run_ai, daemon=True).start()
+                self.log('[Auto Edit] AI clip selection running...', FG2)
+            else:
+                # No transcript — just use energy peaks as clip candidates
+                clips = []
+                for i, peak in enumerate(energy_peaks[:6]):
+                    start = max(0, peak - 30)
+                    end   = min(duration, peak + 60)
+                    clips.append({
+                        'start': _fmt_ts(start), 'end': _fmt_ts(end),
+                        'title': f'Energy Peak {i+1}',
+                        'score': 8, 'reason': 'High audio energy moment'
+                    })
+                self.after(0, lambda c=clips: self._show_clips(c))
+                self.set_progress(f'Auto Edit: {len(clips)} clips found!', pct=100)
+                self.log(f'[Auto Edit] Done: {len(clips)} clips from energy peaks', GREEN)
+
+        except Exception:
+            import traceback as _tb
+            self.after(0, lambda: self.log(f'Auto Edit error:\n{_tb.format_exc()}', RED))
+        finally:
+            self.running = False
+            self.set_busy(False)
+
     def _run_transcribe(self, then_ai):
         try:
             vid = self.v_video.get()
             model_size = self.v_whisper.get()
             if model_size in ('auto', '', None):
-                model_size = 'base'  # 'auto' is not a real whisper model
+                # Smart auto: pick model based on video duration + GPU
+                try:
+                    import subprocess as _ffp
+                    _ff_dur = ensure_ffmpeg()
+                    _dur_r = _ffp.run([_ff_dur, '-v', 'error', '-show_entries',
+                                       'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', vid],
+                                      capture_output=True, text=True, timeout=10)
+                    _duration = float(_dur_r.stdout.strip() or 0)
+                except Exception:
+                    _duration = 0
+                _has_gpu = getattr(self, '_gpu_type', 'CPU') not in ('CPU', '', None)
+                if _duration < 300:          # under 5 min
+                    model_size = 'tiny' if not _has_gpu else 'base'
+                elif _duration < 1200:       # 5-20 min
+                    model_size = 'base'
+                elif _duration < 3600:       # 20-60 min
+                    model_size = 'small'
+                else:                        # 60+ min VOD
+                    model_size = 'medium' if _has_gpu else 'small'
+                self.log(f'[Auto] Video {_duration:.0f}s → whisper {model_size} (GPU={_has_gpu})', FG2)
             self.log(f'Transcribing: {Path(vid).name}  [{model_size}]')
 
 
@@ -3776,9 +3888,10 @@ class App(tk.Tk):
             _energy_peaks = []
             try:
                 _ff2 = ensure_ffmpeg()
-                if _ff2 and Path(vid).exists():
+                _vid_path = self.v_video.get()
+                if _ff2 and _vid_path and Path(_vid_path).exists():
                     self.set_progress('Hybrid: analyzing audio energy peaks...', pct=28)
-                    _energy_peaks = _analyze_audio_energy(vid, _ff2, num_peaks=12)
+                    _energy_peaks = _analyze_audio_energy(_vid_path, _ff2, num_peaks=12)
                     if _energy_peaks:
                         self.log(f'[Hybrid] {len(_energy_peaks)} energy peaks: '
                                  + ', '.join(f'{t:.0f}s' for t in _energy_peaks[:8])
@@ -4138,8 +4251,12 @@ class App(tk.Tk):
             fps   = cap.get(_cv.CAP_PROP_FPS) or 30
             w     = int(cap.get(_cv.CAP_PROP_FRAME_WIDTH))
             h     = int(cap.get(_cv.CAP_PROP_FRAME_HEIGHT))
-            face_det = _mp.solutions.face_detection.FaceDetection(
-                model_selection=0, min_detection_confidence=0.5)
+            # mediapipe 0.10+ changed API — try both
+            try:
+                face_det = _mp.solutions.face_detection.FaceDetection(
+                    model_selection=0, min_detection_confidence=0.5)
+            except AttributeError:
+                raise ImportError("mediapipe solutions API not available in this version")
             # Sample every ~5 seconds
             sample_frames = range(0, total, max(1, int(fps * 5)))
             x_positions = []
@@ -4924,6 +5041,29 @@ class App(tk.Tk):
                   command=self._dl_pick_folder).pack(side='right', padx=(6,0))
         div()
 
+        # VOD Mode toggle
+        sec('MODE')
+        vod_row = tk.Frame(p, bg=BG); vod_row.pack(fill='x', padx=20, pady=(4,0))
+        self.v_vod_mode = tk.BooleanVar(value=self.cfg.get('vod_mode', False))
+        def _toggle_vod(*_):
+            self.cfg['vod_mode'] = self.v_vod_mode.get()
+            save_cfg(self.cfg)
+            _vod_lbl.config(
+                text='📼  VOD Mode ON — saves to vod/ folder, 8x parallel download',
+                fg=GREEN) if self.v_vod_mode.get() else _vod_lbl.config(
+                text='📼  VOD Mode OFF — auto-detects Twitch/Kick VODs',
+                fg=FG2)
+        tk.Checkbutton(vod_row, text='📼  VOD Mode', variable=self.v_vod_mode,
+                      font=('Segoe UI',9,'bold'), fg=FG, bg=BG,
+                      activebackground=BG, selectcolor=BG3,
+                      command=_toggle_vod, cursor='hand2').pack(side='left')
+        _vod_lbl = tk.Label(vod_row,
+            text='📼  VOD Mode OFF — auto-detects Twitch/Kick VODs',
+            font=FONT_SMALL, fg=FG2, bg=BG)
+        _vod_lbl.pack(side='left', padx=8)
+        if self.v_vod_mode.get(): _toggle_vod()
+        div()
+
         # Quality
         sec('QUALITY')
         q_row = tk.Frame(p, bg=BG); q_row.pack(fill='x', padx=20, pady=(6,0))
@@ -5041,6 +5181,16 @@ class App(tk.Tk):
         try:
             import yt_dlp, shutil as _sh, re as _re, urllib.request as _ur, json as _json
 
+            # ── VOD detection — manual toggle OR auto-detect ──────────────
+            _manual_vod = getattr(self, 'v_vod_mode', None)
+            _manual_vod = _manual_vod.get() if _manual_vod else False
+            _is_vod_url = _manual_vod or any(p in url.lower() for p in [
+                'twitch.tv/videos/', 'kick.com/video/',
+            ])
+            # For YouTube/generic we detect after getting info
+            _vod_folder = str(Path(folder) / 'vod')
+            _clip_folder = folder
+
             quality = self.v_dl_quality.get()
             if quality == 'audio':
                 fmt = 'bestaudio/best'
@@ -5065,15 +5215,23 @@ class App(tk.Tk):
             if not ffmpeg_loc and _sh.which('ffmpeg'):
                 ffmpeg_loc = str(Path(_sh.which('ffmpeg')).parent)
 
+            # VOD mode: use vod subfolder + max concurrent fragments for speed
+            _out_folder = _vod_folder if _is_vod_url else _clip_folder
+            Path(_out_folder).mkdir(parents=True, exist_ok=True)
+            if _is_vod_url:
+                self._dl_log_write('📼  VOD detected — saving to vod/ folder', ACCENT2)
+                self._dl_log_write('⚡  Concurrent fragment download enabled', FG2)
+
             ydl_opts = {
                 'format': fmt,
-                'outtmpl': str(Path(folder) / '%(uploader)s - %(title)s.%(ext)s'),
+                'outtmpl': str(Path(_out_folder) / '%(uploader)s - %(title)s.%(ext)s'),
                 'postprocessors': pp,
                 'quiet': False,
                 'no_warnings': False,
-                'noplaylist': True,   # never download full playlist, just the video
-                'playlist_items': '1', # safety net
+                'noplaylist': True,
+                'playlist_items': '1',
                 'progress_hooks': [self._dl_progress_hook],
+                'concurrent_fragment_downloads': 8,  # parallel fragments = much faster for VODs
                 # YouTube n-challenge workarounds
                 # Use ios client — doesn't need JS runtime for n-challenge
                 # ios works with cookies and doesn't require po_token
