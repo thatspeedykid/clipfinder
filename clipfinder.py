@@ -1849,25 +1849,47 @@ class App(tk.Tk):
                 with _ur.urlopen(_req, timeout=5) as _resp:
                     _data = _js2.loads(_resp.read())
                 _latest = _data.get('tag_name','').lstrip('v')
-                _current = APP_VERSION.replace(' Beta','').replace(' ','')
-                if _latest and _latest != _current:
+                # Normalize both versions to comparable tuples
+                # e.g. "1.2-beta" -> (1, 2, 0), "1.1" -> (1, 1, 0)
+                def _ver_tuple(v):
+                    import re as _re
+                    nums = _re.findall(r'\d+', v)
+                    return tuple(int(n) for n in nums[:3]) + (0,) * (3 - len(nums[:3]))
+                _latest_t  = _ver_tuple(_latest)
+                _current_t = _ver_tuple(APP_VERSION)
+                if _latest and _latest_t > _current_t:
                     def _show_update():
-                        # Non-intrusive bar at bottom
-                        _ub = tk.Frame(self, bg='#1a2a1a', height=26)
-                        _ub.pack(side='bottom', fill='x', before=self._bot_bar if hasattr(self,'_bot_bar') else None)
-                        _ub.pack_propagate(False)
-                        tk.Label(_ub, text=f'⬆  ClipFinder v{_latest} available',
-                                font=('Segoe UI',8,'bold'), fg='#7fff7f', bg='#1a2a1a').pack(side='left',padx=10)
-                        tk.Button(_ub, text='Download →', font=('Segoe UI',8,'bold'),
-                                 bg='#2a4a2a', fg='#7fff7f', relief='flat', bd=0,
-                                 cursor='hand2', padx=8,
+                        # Floating update banner — always visible, over everything
+                        _uw = tk.Toplevel(self)
+                        _uw.overrideredirect(True)
+                        _uw.attributes('-topmost', True)
+                        _uw.configure(bg='#1e3a1e')
+                        _bar_h = 36
+                        def _pos_update(*_):
+                            try:
+                                x = self.winfo_x()
+                                y = self.winfo_y()
+                                w = self.winfo_width()
+                                wh = self.winfo_height()
+                                _uw.geometry(f'{w}x{_bar_h}+{x}+{y+wh-_bar_h-30}')
+                            except: pass
+                        tk.Label(_uw,
+                                text=f'⬆  ClipFinder v{_latest} available  —  you have v{APP_VERSION}',
+                                font=('Segoe UI',9,'bold'), fg='#00ff88', bg='#1e3a1e'
+                                ).pack(side='left', padx=14)
+                        tk.Button(_uw, text='⬇ Download Now', font=('Segoe UI',8,'bold'),
+                                 bg=ACCENT, fg='#000', relief='flat', bd=0,
+                                 cursor='hand2', padx=10, pady=6,
                                  command=lambda: __import__('webbrowser').open(
                                      'https://github.com/thatspeedykid/clipfinder/releases/latest')
-                                 ).pack(side='left')
-                        tk.Button(_ub, text='✕', font=('Segoe UI',8), fg='#7fff7f',
-                                 bg='#1a2a1a', relief='flat', bd=0, cursor='hand2',
-                                 command=_ub.destroy).pack(side='right', padx=8)
-                    self.after(0, _show_update)
+                                 ).pack(side='left', padx=6)
+                        tk.Button(_uw, text='✕', font=('Segoe UI',10,'bold'),
+                                 fg='#00ff88', bg='#1e3a1e', relief='flat', bd=0,
+                                 cursor='hand2', padx=12,
+                                 command=_uw.destroy).pack(side='right', padx=8)
+                        _pos_update()
+                        self.bind('<Configure>', _pos_update)
+                    self.after(2000, _show_update)
             except Exception:
                 pass  # Silent fail — no internet or API down
 
@@ -1968,6 +1990,7 @@ class App(tk.Tk):
         # ── Main content ──────────────────────────────────────────────────────
         body = tk.Frame(self, bg=BG)
         body.pack(side='top', fill='both', expand=True)
+        self._body = body  # store reference for update bar etc
 
         content = tk.Frame(body, bg=BG)
         content.pack(fill='both', expand=True)
@@ -1989,16 +2012,6 @@ class App(tk.Tk):
                   command=self._toggle_log).pack(side='right')
         tk.Label(bot, text=f'ClipFinder {APP_VERSION}  ·  @MarsScumbags',
                 font=('Segoe UI', 7), fg=FG3, bg=BG2).pack(side='right', padx=8)
-        # Log panel (hidden by default)
-        self._log_panel = tk.Frame(self, bg=BG3)
-        log_inner = tk.Frame(self._log_panel, bg=BG3)
-        log_inner.pack(fill='x', padx=6, pady=4)
-        self.log_box = tk.Text(log_inner, height=5, font=('Consolas', 8),
-                               bg=BG3, fg=FG3, relief='flat', bd=4,
-                               wrap='word', state='disabled',
-                               )
-        self.log_box.pack(fill='x')
-        _make_scrollbar(log_inner, self.log_box)
 
     def _build_sidebar(self, p):
         def section(title):
@@ -2478,14 +2491,59 @@ class App(tk.Tk):
 
 
     def _toggle_log(self):
-        if self._log_panel.winfo_ismapped():
-            self._log_panel.pack_forget()
-        else:
-            # Ensure it packs at the bottom of the main window above status bar
-            self._log_panel.pack(side='bottom', fill='x')
-            self._log_panel.lift()
-            try: self.log_box.see('end')
+        """Show/hide floating log overlay at bottom of window."""
+        if hasattr(self, '_log_win') and self._log_win and self._log_win.winfo_exists():
+            self._log_win.destroy()
+            self._log_win = None
+            return
+        # Create floating overlay window
+        self._log_win = tk.Toplevel(self)
+        self._log_win.overrideredirect(True)  # no title bar
+        self._log_win.attributes('-topmost', True)  # always on top
+        self._log_win.configure(bg=BG3)
+        # Position at bottom of main window
+        def _reposition(*_):
+            try:
+                x = self.winfo_rootx()
+                y = self.winfo_rooty()
+                w = self.winfo_width()
+                h = self.winfo_height()
+                lh = 200
+                # Full width flush with main window, sits just above status bar
+                self._log_win.geometry(f'{w}x{lh}+{x}+{y+h-lh-30}')
             except: pass
+        # Header bar
+        hdr = tk.Frame(self._log_win, bg=BG2, height=24)
+        hdr.pack(fill='x')
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text='📋  Log', font=('Segoe UI',8,'bold'),
+                fg=FG, bg=BG2).pack(side='left', padx=8)
+        tk.Button(hdr, text='✕', font=('Segoe UI',8,'bold'),
+                 fg=FG2, bg=BG2, relief='flat', bd=0, cursor='hand2',
+                 command=self._toggle_log).pack(side='right', padx=6)
+        # Log text
+        inner = tk.Frame(self._log_win, bg=BG3)
+        inner.pack(fill='both', expand=True, padx=2, pady=(0,2))
+        self.log_box = tk.Text(inner, font=('Consolas',8),
+                               bg=BG3, fg=FG3, relief='flat', bd=4,
+                               wrap='word', state='disabled')
+        self.log_box.pack(side='left', fill='both', expand=True)
+        _make_scrollbar(inner, self.log_box)
+        # Repopulate with buffered messages
+        if hasattr(self, '_log_buffer') and self._log_buffer:
+            self.log_box.config(state='normal')
+            for msg, color in self._log_buffer[-200:]:
+                if color:
+                    tag = f'c{color}'
+                    self.log_box.tag_configure(tag, foreground=color)
+                    self.log_box.insert('end', msg+'\n', tag)
+                else:
+                    self.log_box.insert('end', msg+'\n')
+            self.log_box.config(state='disabled')
+            self.log_box.see('end')
+        # Reposition and track main window moves
+        _reposition()
+        self.bind('<Configure>', _reposition)
 
     def _switch_nb(self, key):
         for k, f in self.nb_frames.items():
@@ -3299,17 +3357,29 @@ class App(tk.Tk):
 
     def log(self, msg, color=None):
         print(f'[CF] {msg}')
+        # Buffer all messages so log window can show history when opened
+        if not hasattr(self, '_log_buffer'):
+            self._log_buffer = []
+        self._log_buffer.append((msg, color))
+        if len(self._log_buffer) > 500:
+            self._log_buffer = self._log_buffer[-500:]
         def _do():
-            self.log_box.config(state='normal')
-            if color:
-                tag = f't{id(msg)}'
-                self.log_box.tag_configure(tag, foreground=color)
-                self.log_box.insert('end', msg + '\n', tag)
-            else:
-                self.log_box.insert('end', msg + '\n')
-            self.log_box.see('end')
-            self.log_box.config(state='disabled')
-            self.v_status.set(msg[:90])
+            # Update status bar
+            try: self.v_status.set(msg[:90])
+            except: pass
+            # Update log box if window is open
+            try:
+                if hasattr(self,'log_box') and self.log_box.winfo_exists():
+                    self.log_box.config(state='normal')
+                    if color:
+                        tag = f't{abs(hash(msg))}'
+                        self.log_box.tag_configure(tag, foreground=color)
+                        self.log_box.insert('end', msg + '\n', tag)
+                    else:
+                        self.log_box.insert('end', msg + '\n')
+                    self.log_box.see('end')
+                    self.log_box.config(state='disabled')
+            except: pass
         if threading.current_thread() is threading.main_thread():
             _do()
         else:
@@ -7158,13 +7228,12 @@ class App(tk.Tk):
 
             pr = tk.Frame(s1, bg=BG3); pr.pack(fill='x', pady=3)
 
-            # Left: dot + name (fixed width so entries line up)
-            left = tk.Frame(pr, bg=BG3, width=110); left.pack(side='left')
-            left.pack_propagate(False)
+            # Left: dot + name (min width via label anchor)
+            left = tk.Frame(pr, bg=BG3); left.pack(side='left')
             tk.Label(left, text='● ', font=('Segoe UI', 10),
                     fg=GREEN if _has else FG3, bg=BG3).pack(side='left')
-            tk.Label(left, text=display, font=('Segoe UI', 9, 'bold'),
-                    fg=FG if _has else FG2, bg=BG3).pack(side='left')
+            tk.Label(left, text=f'{display:<12}', font=('Segoe UI', 9, 'bold'),
+                    fg=FG if _has else FG2, bg=BG3, anchor='w').pack(side='left')
 
             # Right: Get key button + hint (fixed width)
             right = tk.Frame(pr, bg=BG3); right.pack(side='right')
