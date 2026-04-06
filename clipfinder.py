@@ -7130,82 +7130,82 @@ class App(tk.Tk):
         s1 = section('🔑  AI Provider API Keys',
                      'Keys are saved locally — never sent anywhere except the AI provider you choose')
 
-        for pname, hint, url in [
-            ('Google Gemini (Free)', 'Free · best for long videos', 'https://aistudio.google.com/app/apikey'),
-            ('Groq (Free)',          'Free · fastest inference',      'https://console.groq.com/keys'),
-            ('OpenRouter (Free models)', 'Free models available',     'https://openrouter.ai/keys'),
-        ]:
-            pr = tk.Frame(s1, bg=BG3); pr.pack(fill='x', pady=4)
-            # Provider name + status dot
-            left = tk.Frame(pr, bg=BG3); left.pack(side='left', padx=(0,8))
-            has_key = bool(self.v_keys.get(pname, tk.StringVar()).get().strip()) or bool(self._keys.get(pname,'').strip())
-            dot_color = GREEN if has_key else FG3
-            # Show full readable name
-            display = {'Google Gemini (Free)': 'Gemini',
-                       'Groq (Free)': 'Groq',
-                       'OpenRouter (Free models)': 'OpenRouter'}.get(pname, pname)
-            tk.Label(left, text='● ', font=('Segoe UI', 10), fg=dot_color, bg=BG3).pack(side='left')
-            tk.Label(left, text=display,
-                    font=('Segoe UI', 9, 'bold'), fg=FG if has_key else FG2, bg=BG3).pack(side='left')
-            # Entry
-            ef = tk.Frame(pr, bg=BG4); ef.pack(side='left', fill='x', expand=True, padx=(8,0))
-            e = tk.Entry(ef, textvariable=self.v_keys[pname], font=('Consolas', 9),
-                        bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='•')
+        # All 4 providers use identical layout — order: Gemini, Unsplash, Groq, OpenRouter
+        _all_providers = [
+            ('Google Gemini (Free)',     'Gemini',      'Free · best for long videos',        'https://aistudio.google.com/app/apikey'),
+            ('_unsplash',               'Unsplash',    'Free · 50 req/hr · thumbnail search', 'https://unsplash.com/oauth/applications'),
+            ('Groq (Free)',             'Groq',        'Free · fastest inference',             'https://console.groq.com/keys'),
+            ('OpenRouter (Free models)','OpenRouter',  'Free models available',                'https://openrouter.ai/keys'),
+        ]
+
+        # Ensure Unsplash var exists
+        if not hasattr(self, 'v_unsplash_key'):
+            self.v_unsplash_key = tk.StringVar(value=self._keys.get('_unsplash',''))
+
+        _provider_entries = {}
+
+        def _make_eye_toggle(entry):
+            def _t(): entry.config(show='' if entry.cget('show')=='•' else '•')
+            return _t
+
+        for pkey, display, hint, url in _all_providers:
+            # Get current value
+            if pkey == '_unsplash':
+                _var = self.v_unsplash_key
+            else:
+                _var = self.v_keys.get(pkey, tk.StringVar())
+            _has = bool(_var.get().strip())
+
+            pr = tk.Frame(s1, bg=BG3); pr.pack(fill='x', pady=3)
+
+            # Left: dot + name (fixed width so entries line up)
+            left = tk.Frame(pr, bg=BG3, width=110); left.pack(side='left')
+            left.pack_propagate(False)
+            tk.Label(left, text='● ', font=('Segoe UI', 10),
+                    fg=GREEN if _has else FG3, bg=BG3).pack(side='left')
+            tk.Label(left, text=display, font=('Segoe UI', 9, 'bold'),
+                    fg=FG if _has else FG2, bg=BG3).pack(side='left')
+
+            # Right: Get key button + hint (fixed width)
+            right = tk.Frame(pr, bg=BG3); right.pack(side='right')
+            tk.Label(right, text=hint, font=('Segoe UI', 7),
+                    fg=FG2, bg=BG3, anchor='e', width=28).pack(side='left')
+            tk.Button(right, text='Get key →', font=('Segoe UI', 7),
+                     bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=6,
+                     command=lambda u=url: __import__('webbrowser').open(u)).pack(side='left', padx=(4,0))
+
+            # Middle: entry field (expands to fill)
+            ef = tk.Frame(pr, bg=BG4); ef.pack(side='left', fill='x', expand=True, padx=6)
+            e = tk.Entry(ef, textvariable=_var, font=('Consolas', 9),
+                        bg=BG4, fg=FG, insertbackground=ACCENT,
+                        relief='flat', bd=4, show='•')
             e.pack(side='left', fill='x', expand=True)
-            # Show/hide toggle
-            def _make_toggle(entry):
-                def _t(): entry.config(show='' if entry.cget('show')=='•' else '•')
-                return _t
             tk.Button(ef, text='👁', font=('Segoe UI', 8), bg=BG4, fg=FG2,
                      relief='flat', bd=0, cursor='hand2', padx=4,
-                     command=_make_toggle(e)).pack(side='right')
-            # Get key link
-            tk.Button(pr, text='Get key →', font=('Segoe UI', 7), bg=BG3, fg=ACCENT2,
-                     relief='flat', bd=0, cursor='hand2', padx=6,
-                     command=lambda u=url: __import__('webbrowser').open(u)).pack(side='right', padx=(8,0))
-            tk.Label(pr, text=hint, font=('Segoe UI', 7), fg=FG2, bg=BG3).pack(side='right', padx=8)
+                     command=_make_eye_toggle(e)).pack(side='right')
+
+            _provider_entries[pkey] = _var
 
         def _save_keys():
-            for pname, var in self.v_keys.items():
-                self._keys[pname] = var.get().strip()
+            for pkey, var in _provider_entries.items():
+                val = var.get().strip()
+                if pkey == '_unsplash':
+                    self._keys['_unsplash'] = val
+                    self.cfg['key_unsplash'] = val
+                    if hasattr(self, 'thumb_unsplash_var'):
+                        self.thumb_unsplash_var.set(val)
+                else:
+                    self._keys[pkey] = val
             self.cfg.update({
-                'key_gemini': self._keys.get('Google Gemini (Free)', ''),
-                'key_groq': self._keys.get('Groq (Free)', ''),
+                'key_gemini':     self._keys.get('Google Gemini (Free)', ''),
+                'key_groq':       self._keys.get('Groq (Free)', ''),
                 'key_openrouter': self._keys.get('OpenRouter (Free models)', ''),
             })
             save_cfg(self.cfg)
             self._auto_select_provider()
             self.log('✅ API keys saved', GREEN)
-            # Rebuild to show updated dots
-            self._build_settings_tab.__func__  # no-op, just rebuild on next open
 
-        # ── Unsplash (inside API keys section) ──
-        tk.Frame(s1, bg=BG4, height=1).pack(fill='x', pady=(8,6))
-        us_pr = tk.Frame(s1, bg=BG3); us_pr.pack(fill='x', pady=4)
-        us_left = tk.Frame(us_pr, bg=BG3); us_left.pack(side='left', padx=(0,8))
-        self.v_unsplash_key = tk.StringVar(value=self._keys.get('_unsplash',''))
-        _us_has = bool(self._keys.get('_unsplash','').strip())
-        tk.Label(us_left, text='● ', font=('Segoe UI', 10), fg=GREEN if _us_has else FG3, bg=BG3).pack(side='left')
-        tk.Label(us_left, text='Unsplash', font=('Segoe UI', 9, 'bold'),
-                fg=FG if _us_has else FG2, bg=BG3).pack(side='left')
-        us_ef = tk.Frame(us_pr, bg=BG4); us_ef.pack(side='left', fill='x', expand=True, padx=(8,0))
-        us_e = tk.Entry(us_ef, textvariable=self.v_unsplash_key, font=('Consolas',9),
-                       bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='•')
-        us_e.pack(side='left', fill='x', expand=True)
-        tk.Button(us_ef, text='👁', font=('Segoe UI',8), bg=BG4, fg=FG2, relief='flat', bd=0,
-                 cursor='hand2', padx=4,
-                 command=lambda: us_e.config(show='' if us_e.cget('show')=='•' else '•')).pack(side='right')
-        tk.Button(us_pr, text='Get key →', font=('Segoe UI',7), bg=BG3, fg=ACCENT2,
-                 relief='flat', bd=0, cursor='hand2', padx=6,
-                 command=lambda: __import__('webbrowser').open('https://unsplash.com/developers')).pack(side='right', padx=(8,0))
-        tk.Label(us_pr, text='Free · 50 req/hr · thumbnail search', font=('Segoe UI',7), fg=FG2, bg=BG3).pack(side='right', padx=8)
-        def _save_us_key(*_):
-            self._keys['_unsplash'] = self.v_unsplash_key.get().strip()
-            self.cfg['key_unsplash'] = self._keys['_unsplash']
-            if hasattr(self, 'thumb_unsplash_var'):
-                self.thumb_unsplash_var.set(self._keys['_unsplash'])
-        self.v_unsplash_key.trace_add('write', _save_us_key)
-
+        # Save & Apply button
         btn_row = tk.Frame(s1, bg=BG3); btn_row.pack(fill='x', pady=(10,0))
         tk.Button(btn_row, text='💾  Save & Apply', font=('Segoe UI', 9, 'bold'),
                  bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
