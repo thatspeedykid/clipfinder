@@ -40,8 +40,8 @@ jobs:
         run: |
           $ver = "${{ steps.version.outputs.VER }}"
           $readme = Get-Content README.md -Raw
-          $readme = $readme -replace 'Version-\d+\.\d+-FF6B1A', "Version-$ver-FF6B1A"
-          $readme = $readme -replace '### v\d+\.\d+ —', "### v$ver —"
+          $readme = $readme -replace 'Version-[\d\.]+[^-"]*-FF6B1A', "Version-$ver-FF6B1A"
+          $readme = $readme -replace '### v[\d\.]+[\w-]* —', "### v$ver —"
           Set-Content README.md $readme
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -54,7 +54,7 @@ jobs:
         run: |
           $ver = "${{ steps.version.outputs.VER }}"
           $nsi = Get-Content installer.nsi -Raw
-          $nsi = $nsi -replace '!define APP_VERSION "\d+\.\d+"', "!define APP_VERSION `"$ver`""
+          $nsi = $nsi -replace '!define APP_VER\s+"[^"]*"', "!define APP_VER `"$ver`""
           Set-Content installer.nsi $nsi
         shell: pwsh
 

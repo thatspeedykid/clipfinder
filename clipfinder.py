@@ -1718,14 +1718,28 @@ class App(tk.Tk):
         super().__init__()
         self.title('ClipFinder 1.2 Beta — AI Clip Extractor')
         self.geometry('1200x800')
-        # Set window + taskbar icon from embedded ICO
+        # Set window + taskbar icon
         try:
-            import base64 as _b64, tempfile as _tf2, os as _os2
-            _ico_data = _b64.b64decode(_ICON_B64)
-            _ico_tmp  = _tf2.NamedTemporaryFile(suffix='.ico', delete=False)
-            _ico_tmp.write(_ico_data); _ico_tmp.close()
-            self.iconbitmap(_ico_tmp.name)
-            _os2.unlink(_ico_tmp.name)
+            # Look for clipfinder.ico next to the script or exe
+            _ico_search = [
+                _PathBase(__file__).parent / 'clipfinder.ico',
+                _PathBase(sys.executable).parent / 'clipfinder.ico',
+                USER_DIR.parent / 'clipfinder.ico',
+            ]
+            for _ico_path in _ico_search:
+                if _ico_path.exists():
+                    self.iconbitmap(str(_ico_path))
+                    break
+            else:
+                # Fallback: use PIL to set icon from any found image
+                from PIL import Image as _PI4, ImageTk as _PT4
+                for _ico_path in _ico_search:
+                    _png = _ico_path.with_suffix('.png')
+                    if _png.exists():
+                        _img = _PI4.open(str(_png))
+                        self._win_icon = _PT4.PhotoImage(_img)
+                        self.iconphoto(True, self._win_icon)
+                        break
         except Exception:
             pass
         self.minsize(1000, 700)
@@ -1936,8 +1950,10 @@ class App(tk.Tk):
         # Right side: GPU badge + channel tag
         _ms_lbl = tk.Label(hdr, text='@MarsScumbags', font=('Segoe UI', 8, 'bold'),
                  fg=ACCENT2, bg=BG2, cursor='hand2')
-        _ms_lbl.pack(side='right', padx=12)
+        _ms_lbl.pack(side='right', padx=(4,12))
         _ms_lbl.bind('<Button-1>', lambda e: __import__('webbrowser').open('https://x.com/MarsScumbags'))
+        tk.Label(hdr, text=f'v{APP_VERSION}', font=('Segoe UI', 7),
+                fg=FG3, bg=BG2).pack(side='right', padx=(0,2))
         self._gpu_badge = tk.Label(hdr, text='⚡ GPU', font=('Segoe UI', 7, 'bold'),
                  fg='#000', bg=ACCENT, padx=6, pady=1)
         self._gpu_badge.pack(side='right', padx=(0,6))
@@ -1971,6 +1987,8 @@ class App(tk.Tk):
                   relief='flat', bd=0, cursor='hand2', padx=8,
                   activebackground=BG3,
                   command=self._toggle_log).pack(side='right')
+        tk.Label(bot, text=f'ClipFinder {APP_VERSION}  ·  @MarsScumbags',
+                font=('Segoe UI', 7), fg=FG3, bg=BG2).pack(side='right', padx=8)
         # Log panel (hidden by default)
         self._log_panel = tk.Frame(self, bg=BG3)
         log_inner = tk.Frame(self._log_panel, bg=BG3)
