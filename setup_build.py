@@ -65,6 +65,12 @@ run([str(PYTHON / 'python.exe'), str(pip_script), '--quiet'])
 pip_script.unlink()
 print('  pip ready.')
 
+# Install setuptools + wheel first — required for building some packages from source
+print('  Installing setuptools + wheel...')
+subprocess.run([str(PYTHON / 'python.exe'), '-m', 'pip', 'install',
+                'setuptools', 'wheel', '--quiet', '--upgrade'], check=False)
+print('  setuptools ready.')
+
 # ── Copy tkinter from system Python 3.12 ──────────────────────────────────────
 step(4, 'Copying tkinter from system Python 3.12...')
 r = subprocess.run(['py', '-3.12', '-c', 'import sys; print(sys.prefix)'],
@@ -111,20 +117,22 @@ PIP = [PY, '-m', 'pip', 'install', '--quiet', '--upgrade',
        '--no-warn-script-location']
 
 pkgs = [
-    ('AI providers',          ['google-genai', 'groq', 'openai']),
-    ('Downloader',            ['yt-dlp', 'curl-cffi', 'requests']),
-    ('Numeric base',          ['numpy', 'scipy']),
-    ('Image/audio',           ['Pillow', 'soundfile', 'imagehash']),
-    ('Video',                 ['opencv-python']),
-    ('Whisper (no-deps)',     ['faster-whisper', '--no-deps']),
-    ('Whisper (with-deps)',   ['faster-whisper', 'openai-whisper']),
-    ('Face tracking',         ['mediapipe', '--no-deps']),
+    ('AI providers',   ['google-genai', 'groq', 'openai', 'requests']),
+    ('Downloader',     ['yt-dlp', 'curl-cffi']),
+    ('Numeric base',   ['numpy', 'scipy']),
+    ('Image/audio',    ['Pillow', 'soundfile', 'imagehash']),
+    ('Video',          ['opencv-python']),
+    ('Whisper',        ['faster-whisper', 'openai-whisper']),
+    ('Face tracking',  ['mediapipe']),
 ]
+
+PIP_BASE = [PY, '-m', 'pip', 'install', '--quiet', '--upgrade', '--no-warn-script-location']
 
 for label, args in pkgs:
     print(f'  {label}...')
-    subprocess.run([PY, '-m', 'pip', 'install', '--quiet', '--upgrade',
-                    '--no-warn-script-location'] + args)
+    r = subprocess.run(PIP_BASE + args)
+    if r.returncode != 0:
+        print(f'  WARNING: {label} had errors (may still work)')
 
 # ── Copy app files ─────────────────────────────────────────────────────────────
 step(6, 'Copying app files...')

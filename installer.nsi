@@ -1,8 +1,8 @@
 ; ClipFinder NSIS Installer
-; Shortcuts call python.exe directly — no launcher EXE needed
+; Shortcuts call pythonw.exe directly
 
 !define APP_NAME    "ClipFinder"
-!define APP_VER     "1.0"
+!define APP_VER     "1.1"
 !define APP_PUB     "@MarsScumbags"
 !define APP_URL     "https://x.com/MarsScumbags"
 !define UNINST_KEY  "Software\Microsoft\Windows\CurrentVersion\Uninstall\ClipFinder"
@@ -41,34 +41,28 @@ Section "ClipFinder" SecMain
     SectionIn RO
     SetOutPath "$INSTDIR"
 
-    ; App files
     File "ClipFinder_dist\clipfinder.py"
     File "clipfinder.ico"
 
-    ; Embedded Python (full folder)
     SetOutPath "$INSTDIR\python"
     File /r "ClipFinder_dist\python\*.*"
 
-    ; Desktop shortcut — calls python.exe directly
+    ; Desktop shortcut
     SetOutPath "$INSTDIR"
     CreateShortcut "$DESKTOP\ClipFinder.lnk" \
         "$INSTDIR\python\pythonw.exe" \
         '"$INSTDIR\clipfinder.py"' \
-        "$INSTDIR\clipfinder.ico" 0 \
-        SW_SHOWNORMAL "$INSTDIR" \
-        "ClipFinder - AI Drama Clip Extractor"
+        "$INSTDIR\clipfinder.ico"
 
     ; Start Menu
     CreateDirectory "$SMPROGRAMS\ClipFinder"
     CreateShortcut "$SMPROGRAMS\ClipFinder\ClipFinder.lnk" \
         "$INSTDIR\python\pythonw.exe" \
         '"$INSTDIR\clipfinder.py"' \
-        "$INSTDIR\clipfinder.ico" 0 \
-        SW_SHOWNORMAL "$INSTDIR"
+        "$INSTDIR\clipfinder.ico"
     CreateShortcut "$SMPROGRAMS\ClipFinder\Uninstall.lnk" \
         "$INSTDIR\Uninstall.exe"
 
-    ; Registry
     WriteRegStr HKCU "${UNINST_KEY}" "DisplayName"     "ClipFinder"
     WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion"  "${APP_VER}"
     WriteRegStr HKCU "${UNINST_KEY}" "Publisher"       "${APP_PUB}"
@@ -82,7 +76,6 @@ Section "ClipFinder" SecMain
 
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-    ; Update notice if upgrading
     IfFileExists "$INSTDIR\clipfinder_config.json" 0 FreshInstall
         MessageBox MB_OK|MB_ICONINFORMATION \
             "ClipFinder updated!$\n$\nYour settings and API keys have been preserved."
