@@ -65,3 +65,29 @@
 - Studio tab — AI upscaling EDSR 4x
 - Interview mode — multi-speaker detection
 - One-click dependency installer in Settings
+
+## v1.3 — April 2026 — Stable Release
+
+### New Features
+- AI Music Removal tab — Demucs separation, keeps vocals, local GPU, no API
+- Segment-aware clip accuracy — verification pass matches descriptions to actual clip content
+- Names field — shared between Normal and Interview mode, AI uses real names in output
+- Rate limit overhaul — sequential tasks, 5s gaps, global RL tracking, retry loop
+- Gemini 1.5 Flash as default — 1500 RPD vs 20 RPD for 2.5 Flash
+- High-limit models added for Groq (llama-3.1-8b-instant) and OpenRouter (mistral-small, phi-3-mini)
+- Settings module status dots — ✅/○ per package
+- Demucs/torch/torchaudio added to Update Modules list
+- Progress bar for Auto Edit sub-tab, Export, Queue, Music Removal
+- Settings tab lazy-loads, pre-builds in background, TTK style cached
+- AutoEdit filename suffix: VideoName - AutoEdit - ClipFinder.mp4
+- Beta → Stable update notifications
+
+### Bug Fixes
+- Censor queue now uses stored vid/out from queue time not current video
+- OpenRouter max_tokens increased to 8192, detects finish_reason=length and retries
+- 503/UNAVAILABLE treated as rate limit — skips to next provider immediately
+- Mistral model updated (old endpoint removed from OpenRouter)
+- Encoder detecting label in top bar now clears when GPU detected
+- Interview names box replaced with shared Names field
+- NA uploader in downloads fixed — extracts from URL
+- torchcodec Windows DLL issue bypassed via soundfile monkey-patch

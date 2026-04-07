@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 
 import subprocess
 import sys
@@ -497,23 +497,30 @@ FONT_MONO_S = ('Consolas', 9)
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'],
+        'models': ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'],
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
     'Groq (Free)': {
         'lib':    'groq',
-        'models': ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-8b-8192'],
+        'models': [
+            'llama-3.1-8b-instant',    # highest free limits, fast
+            'llama3-8b-8192',          # very high limits
+            'llama-3.3-70b-versatile', # smarter but lower daily limit
+            'mixtral-8x7b-32768',      # good context window
+        ],
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
     },
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
         'models': [
-            'meta-llama/llama-3.3-70b-instruct:free',
-            'mistralai/mistral-7b-instruct:free',
-            'qwen/qwen3-8b:free',
-            'google/gemma-3-12b-it:free',
+            'mistralai/mistral-small-3.1-24b-instruct:free',  # updated mistral free model
+            'qwen/qwen3-8b:free',                      # high limits
+            'google/gemma-3-12b-it:free',              # good quality
+            'microsoft/phi-3-mini-128k-instruct:free', # huge context
+            'meta-llama/llama-3.1-8b-instruct:free',   # high limits
+            'meta-llama/llama-3.3-70b-instruct:free',  # smarter, lower limits
         ],
         'url':    'https://openrouter.ai/keys',
         'note':   '50+ free models — no credit card needed',
@@ -553,6 +560,7 @@ TRANSCRIPT:
 
 AI_PROMPT = """You are an expert viral clip editor for a drama/streaming/gaming channel (@MarsScumbags style).
 {context_block}
+{names_block}
 Find the 3-6 BEST moments to clip. Quality over quantity — 3 great clips beats 8 mediocre ones.
 
 ━━━ CLIP LENGTH — NON-NEGOTIABLE ━━━
@@ -1716,7 +1724,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.2 — AI Clip Extractor')
+        self.title('ClipFinder 1.3 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -1854,7 +1862,9 @@ class App(tk.Tk):
                 def _ver_tuple(v):
                     import re as _re
                     nums = _re.findall(r'\d+', v)
-                    return tuple(int(n) for n in nums[:3]) + (0,) * (3 - len(nums[:3]))
+                    t = tuple(int(n) for n in nums[:3]) + (0,) * (3 - len(nums[:3]))
+                    is_pre = any(x in v.lower() for x in ('beta','rc','alpha','pre'))
+                    return (t, 0 if is_pre else 1)
                 _latest_t  = _ver_tuple(_latest)
                 _current_t = _ver_tuple(APP_VERSION)
                 if _latest and _latest_t > _current_t:
@@ -1923,6 +1933,8 @@ class App(tk.Tk):
                     }.get(vcodec, vcodec)
                     def _update_ui(en=enc_label, vc=vcodec):
                         self.v_status.set(f'Ready · Encoder: {en}')
+                        if hasattr(self, 'prog_lbl'):
+                            self.prog_lbl.config(text='Ready')
                         if hasattr(self, '_gpu_badge'):
                             if vc == 'h264_amf':
                                 self._gpu_badge.config(text='⚡ AMD GPU', bg='#E8651A', fg='#000')
@@ -1939,6 +1951,12 @@ class App(tk.Tk):
             except Exception:
                 self.after(0, lambda: self.v_status.set('Ready'))
         threading.Thread(target=_prefetch_ffmpeg, daemon=True).start()
+        # Pre-build settings tab in background so it's instant when clicked
+        def _prebuild_settings():
+            import time as _t_pb
+            _t_pb.sleep(1.5)  # let app fully render first
+            self.after(0, lambda: _ensure_tab_built('settings'))
+        threading.Thread(target=_prebuild_settings, daemon=True).start()
         # GPU whisper auto-install disabled — user installs via Settings → Update Modules
         # (auto-downloading at launch caused unwanted background downloads)
         # whisper.cpp auto-install disabled — user installs via Settings -> Update Modules
@@ -2329,6 +2347,7 @@ class App(tk.Tk):
             ('thumbs',     '🖼',  'Thumbnails'),
             ('studio',     '🔬', 'Studio'),
             ('censor',     '🔇', 'Censor'),
+            ('music',      '🎵', 'Music Removal'),
         ]
         for key, icon, label in TABS:
             b = tk.Button(nb_bar, text=f'{icon}  {label}', font=('Segoe UI', 9),
@@ -2344,34 +2363,46 @@ class App(tk.Tk):
         content = tk.Frame(p, bg=BG)
         content.pack(fill='both', expand=True)
 
+        # Build clips tab immediately (shown on startup)
         clips_frame = tk.Frame(content, bg=BG)
         clips_frame.pack(fill='both', expand=True)
         self.nb_frames['clips'] = clips_frame
         self._build_clips_tab(clips_frame)
 
-        trans_frame = tk.Frame(content, bg=BG)
-        self.nb_frames['transcript'] = trans_frame
-        self._build_trans_tab(trans_frame)
+        # Lazy-build remaining tabs on first visit
+        _lazy_builders = {
+            'transcript': (self._build_trans_tab,),
+            'downloader': (self._build_dl_tab,),
+            'thumbs':     (self._build_thumb_tab,),
+            'studio':     (self._build_studio_tab,),
+            'censor':     (self._build_censor_tab,),
+            'music':      (self._build_music_removal_tab,),
+            'settings':   (self._build_settings_tab,),
+        }
+        self._tab_built = {'clips'}
 
-        dl_frame = tk.Frame(content, bg=BG)
-        self.nb_frames['downloader'] = dl_frame
-        self._build_dl_tab(dl_frame)
+        for key in _lazy_builders:
+            f = tk.Frame(content, bg=BG)
+            self.nb_frames[key] = f
 
-        thumb_frame = tk.Frame(content, bg=BG)
-        self.nb_frames['thumbs'] = thumb_frame
-        self._build_thumb_tab(thumb_frame)
+        def _ensure_tab_built(key):
+            if key not in self._tab_built:
+                builders = _lazy_builders.get(key)
+                if builders:
+                    # Show loading indicator for slow tabs
+                    if key == 'settings':
+                        _lf = tk.Frame(self.nb_frames[key], bg=BG)
+                        _lf.pack(fill='both', expand=True)
+                        tk.Label(_lf, text='⚙ Loading settings...', 
+                                font=('Segoe UI',11), fg=FG2, bg=BG).pack(expand=True)
+                        self.nb_frames[key].update()
+                        _lf.destroy()
+                    builders[0](self.nb_frames[key])
+                    self._tab_built.add(key)
 
-        studio_frame = tk.Frame(content, bg=BG)
-        self.nb_frames['studio'] = studio_frame
-        self._build_studio_tab(studio_frame)
+        self._ensure_tab_built = _ensure_tab_built
 
-        censor_frame = tk.Frame(content, bg=BG)
-        self.nb_frames['censor'] = censor_frame
-        self._build_censor_tab(censor_frame)
 
-        settings_frame = tk.Frame(content, bg=BG)
-        self.nb_frames['settings'] = settings_frame
-        self._build_settings_tab(settings_frame)
 
         self._switch_nb('clips')
         # First-run welcome — only show if packages genuinely missing
@@ -2538,6 +2569,9 @@ class App(tk.Tk):
         self.bind('<Configure>', _reposition)
 
     def _switch_nb(self, key):
+        # Lazy-build tab on first visit
+        if hasattr(self, '_ensure_tab_built'):
+            self._ensure_tab_built(key)
         for k, f in self.nb_frames.items():
             f.pack_forget()
         self.nb_frames[key].pack(fill='both', expand=True)
@@ -2654,10 +2688,10 @@ class App(tk.Tk):
         tk.Button(of, text='...', font=FONT_SMALL, bg=BG2, fg=FG2, relief='flat', bd=0,
                   cursor='hand2', padx=5, command=self._pick_outdir).pack(side='right')
 
-        # ── Row 2: Context ────────────────────────────────────────────────────
+        # ── Row 2: Context + Names ────────────────────────────────────────────
         r2 = tk.Frame(ctrl, bg=BG2); r2.pack(fill='x', padx=10, pady=2)
         lbl(r2, 'Context:').pack(side='left')
-        cw = tk.Frame(r2, bg=BG3); cw.pack(side='left', fill='x', expand=True, padx=(4,0))
+        cw = tk.Frame(r2, bg=BG3); cw.pack(side='left', fill='x', expand=True, padx=(4,8))
         self.v_context = tk.Text(cw, height=2, font=FONT_SMALL, bg=BG3, fg=FG,
                                  insertbackground=ACCENT, relief='flat', bd=4, wrap='word')
         self.v_context.pack(fill='x')
@@ -2665,19 +2699,43 @@ class App(tk.Tk):
         self.v_context.bind('<FocusOut>', lambda e: (
             self.cfg.update({'video_context': self.v_context.get('1.0','end').strip()}),
             save_cfg(self.cfg)))
+        # Names field — helps AI identify who is who
+        lbl(r2, 'Names:').pack(side='left')
+        nw = tk.Frame(r2, bg=BG3); nw.pack(side='left', fill='x', expand=True, padx=(4,0))
+        self.v_names = tk.Entry(nw, font=FONT_SMALL, bg=BG3, fg=FG,
+                                insertbackground=ACCENT, relief='flat', bd=4)
+        self.v_names.pack(fill='x')
+        self.v_names.insert(0, self.cfg.get('video_names',''))
+        _names_ph = 'Mizkif, xQc, HasanAbi...'
+        if not self.cfg.get('video_names',''):
+            self.v_names.insert(0, _names_ph)
+            self.v_names.config(fg=FG2)
+        def _names_in(e):
+            if self.v_names.get() == _names_ph:
+                self.v_names.delete(0,'end'); self.v_names.config(fg=FG)
+        def _names_out(e):
+            v = self.v_names.get().strip()
+            if not v:
+                self.v_names.insert(0, _names_ph); self.v_names.config(fg=FG2)
+            self.cfg.update({'video_names': v}); save_cfg(self.cfg)
+        self.v_names.bind('<FocusIn>', _names_in)
+        self.v_names.bind('<FocusOut>', _names_out)
 
-        # Row 3 (Provider/Key/Model) moved to Settings tab — stub widgets for compat
-        style = ttk.Style()
-        style.theme_use('clam')
-        for s,v in [('TCombobox',{'fieldbackground':BG3,'background':BG3,'foreground':FG,
-                                   'selectbackground':ACCENT,'selectforeground':'#000',
-                                   'borderwidth':0,'arrowcolor':FG2}),
-                    ('Vertical.TScrollbar',{'background':BG3,'troughcolor':BG2,
-                                            'bordercolor':BG2,'arrowcolor':FG2,
-                                            'relief':'flat','borderwidth':0})]:
-            style.configure(s, **v)
-        style.map('TCombobox', fieldbackground=[('readonly',BG3)],
-                  foreground=[('readonly',FG)], background=[('readonly',BG3)])
+        # ttk style — only configure once globally
+        if not getattr(App, '_ttk_styled', False):
+            style = ttk.Style()
+            try: style.theme_use('clam')
+            except: pass
+            for s,v in [('TCombobox',{'fieldbackground':BG3,'background':BG3,'foreground':FG,
+                                       'selectbackground':ACCENT,'selectforeground':'#000',
+                                       'borderwidth':0,'arrowcolor':FG2}),
+                        ('Vertical.TScrollbar',{'background':BG3,'troughcolor':BG2,
+                                                'bordercolor':BG2,'arrowcolor':FG2,
+                                                'relief':'flat','borderwidth':0})]:
+                style.configure(s, **v)
+            style.map('TCombobox', fieldbackground=[('readonly',BG3)],
+                      foreground=[('readonly',FG)], background=[('readonly',BG3)])
+            App._ttk_styled = True
         style.map('Vertical.TScrollbar', background=[('active',BORDER),('pressed',ACCENT)])
         # Stub widgets needed by _refresh_provider / _refresh_prov_btns
         self._prov_btns = {}
@@ -2740,13 +2798,8 @@ class App(tk.Tk):
         self.interview_frame = tk.Frame(ctrl, bg=BG2)
         self.interview_frame.pack(fill='x', padx=10)
         ir = tk.Frame(self.interview_frame, bg=BG2); ir.pack(fill='x', pady=(0,5))
-        lbl(ir, 'Names (one per line):').pack(side='left')
-        nw = tk.Frame(ir, bg=BG3); nw.pack(side='left', fill='x', expand=True, padx=(6,0))
-        self.interview_names_box = tk.Text(nw, height=2, font=FONT_SMALL, bg=BG3, fg=FG,
-                                           insertbackground=ACCENT, relief='flat', bd=4, wrap='word')
-        self.interview_names_box.pack(fill='x')
-        saved_names = self.cfg.get('interview_names','')
-        if saved_names: self.interview_names_box.insert('1.0', saved_names)
+        tk.Label(ir, text='📝 Names field above — add speaker names in the Names: box',
+                font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left', padx=4)
 
         self.auto_frame = tk.Frame(ctrl, bg=BG2)
         self.auto_frame.pack(fill='x', padx=10)
@@ -2856,10 +2909,7 @@ class App(tk.Tk):
                   bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
                   activebackground=ACCENT2,
                   command=self._export_or_censor).pack(side='right', padx=(6,0))
-        # AUTO EDIT — trims silence from selected clips
-        tk.Button(exp_bar, text='⚡ Auto Edit', font=('Segoe UI', 9,'bold'),
-                  bg='#2a2a2a', fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=12, pady=5,
-                  command=self._auto_edit_selected).pack(side='right', padx=(0,4))
+
 
         # MP3 browse row — shown only when style=mp3 AND censor is on
         self._censor_mp3_row = tk.Frame(p, bg=BG2)
@@ -3074,7 +3124,7 @@ class App(tk.Tk):
 
         Path(out).mkdir(parents=True, exist_ok=True)
         stem = Path(vid).stem
-        out_path = str(Path(out) / f'{stem} - ClipFinder.mp4')
+        out_path = str(Path(out) / f'{stem} - AutoEdit - ClipFinder.mp4')
 
         self.set_busy(True)
         self.ae_status_lbl.config(text='⏳ Processing...', fg=ACCENT2)
@@ -3088,6 +3138,7 @@ class App(tk.Tk):
                 # Step 1: Transcribe to get word timestamps
                 self.log('[Auto Edit] Transcribing for word-level cuts...', FG2)
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Transcribing...', fg=ACCENT2))
+                self.set_progress('Auto Edit: transcribing...', pct=10)
                 _wm = self.v_whisper.get() if hasattr(self,'v_whisper') else 'base'
                 if _wm in ('auto',''):
                     _wm = 'base'
@@ -3105,6 +3156,7 @@ class App(tk.Tk):
 
                 # Step 2: Build keep segments from word timestamps + silence gaps
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Detecting silence...', fg=ACCENT2))
+                self.set_progress('Auto Edit: detecting silence...', pct=35)
                 _sil = _sp.run([ff,'-i',vid,'-af',f'silencedetect=noise={db}dB:d=0.3',
                                 '-f','null','-'], capture_output=True, text=True, timeout=300)
                 sil_starts = [float(m) for m in _re2.findall(r'silence_start: ([\d.]+)', _sil.stderr)]
@@ -3162,6 +3214,7 @@ class App(tk.Tk):
 
                 # Step 3: Extract and concat segments
                 self.after(0, lambda: self.ae_status_lbl.config(text=f'⏳ Cutting {len(keeps)} segments...', fg=ACCENT2))
+                self.set_progress(f'Auto Edit: cutting {len(keeps)} segments...', pct=60)
                 concat_f = str(Path(_tmp2.gettempdir()) / f'ae_concat_{Path(vid).stem}.txt')
                 segs_out = []
                 with open(concat_f, 'w') as cf:
@@ -3175,6 +3228,7 @@ class App(tk.Tk):
 
                 # Step 4: Concat with CRF encode to fix size + AV sync
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Encoding final video...', fg=ACCENT2))
+                self.set_progress('Auto Edit: encoding...', pct=80)
                 _sp.run([ff,'-y','-f','concat','-safe','0','-i',concat_f,
                          '-c:v','libx264','-crf','23','-preset','fast',
                          '-c:a','aac','-b:a','192k', out_path],
@@ -3606,7 +3660,7 @@ class App(tk.Tk):
             'studio_scan_dir':   self.v_scan_folder.get() if hasattr(self, 'studio_scan_dir') else '',
             'studio_upscale_out': self.v_up_out.get() if hasattr(self, 'studio_upscale_out') else '',
             'interview_mode':    self.interview_mode.get() if hasattr(self, 'interview_mode') else False,
-            'interview_names':   self.interview_names_box.get('1.0','end').strip() if hasattr(self, 'interview_names_box') else '',
+            'interview_names':   self.v_names.get().strip() if hasattr(self, 'v_names') else '',
             'app_mode':          self.app_mode.get() if hasattr(self, 'app_mode') else 'normal',
             'video_context':     self.v_context.get('1.0','end').strip() if hasattr(self, 'v_context') else '',
             'auto_length_mode':  self.auto_length_mode.get() if hasattr(self, 'auto_length_mode') else 'short',
@@ -4102,6 +4156,17 @@ class App(tk.Tk):
         # Build context + section note for this chunk
         ctx_raw = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
         context_block = f'VIDEO CONTEXT: {ctx_raw}\n' if ctx_raw else ''
+        # Names block — helps AI identify speakers correctly
+        _names_raw = ''
+        if hasattr(self, 'v_names'):
+            _nv = self.v_names.get().strip()
+            _ph = 'Mizkif, xQc, HasanAbi...'
+            if _nv and _nv != _ph:
+                _names_raw = _nv
+        names_block = (f'PEOPLE IN THIS VIDEO: {_names_raw}\n'
+                      f'Use these names when identifying who is speaking or being talked about. '
+                      f'If you hear a name in the transcript that matches, use it in the title and description.\n'
+                      ) if _names_raw else ''
 
         # Inject energy peaks if available from hybrid analysis
         _ep = getattr(self, '_current_energy_peaks', [])
@@ -4123,15 +4188,24 @@ class App(tk.Tk):
         # Interview or normal prompt
         app_mode = self.app_mode.get() if hasattr(self,'app_mode') else 'normal'
         if app_mode == 'interview':
-            names_raw = getattr(self,'interview_names_box',None)
-            names = names_raw.get('1.0','end').strip() if names_raw else ''
+            # Use shared Names field — same as normal mode
+            _ph = 'Mizkif, xQc, HasanAbi...'
+            names = ''
+            if hasattr(self, 'v_names'):
+                _nv = self.v_names.get().strip()
+                if _nv and _nv != _ph:
+                    names = _nv
+            if not names and hasattr(self, 'interview_names_box'):
+                try: names = self.interview_names_box.get('1.0','end').strip()
+                except: pass
             names_list = ', '.join(n.strip() for n in names.splitlines() if n.strip()) or 'Unknown'
             prompt = INTERVIEW_CLIP_PROMPT.replace('{transcript}', transcript_chunk) \
                                           .replace('{names}', names_list) \
                                           .replace('{context_block}', context_block + section_note)
         else:
             prompt = AI_PROMPT.replace('{transcript}', transcript_chunk) \
-                               .replace('{context_block}', context_block + section_note)
+                               .replace('{context_block}', context_block + section_note) \
+                               .replace('{names_block}', names_block)
         raw = None
 
         if lib == 'gemini':
@@ -4175,12 +4249,22 @@ class App(tk.Tk):
                 from openai import OpenAI as _O
             except ImportError:
                 raise ImportError('openai not installed. Go to Settings → Update Modules to install it.')
-            resp = _O(base_url='https://openrouter.ai/api/v1', api_key=key
-                      ).chat.completions.create(
+            _or_client = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
+            resp = _or_client.chat.completions.create(
                 model=model,
                 messages=[{'role': 'user', 'content': prompt}],
-                temperature=0.3, max_tokens=4096)
-            raw = resp.choices[0].message.content.strip()
+                temperature=0.3, max_tokens=8192)
+            choice = resp.choices[0]
+            raw = choice.message.content.strip()
+            # Detect truncation — if response was cut off, retry with shorter prompt
+            if choice.finish_reason == 'length' and len(raw) > 100:
+                self.log(f'[OpenRouter] Response truncated — retrying with condensed prompt', YELLOW)
+                _short_prompt = prompt[:len(prompt)//2] + '\n\n[Return only the top 3 clips as JSON]'
+                resp2 = _or_client.chat.completions.create(
+                    model=model,
+                    messages=[{'role': 'user', 'content': _short_prompt}],
+                    temperature=0.3, max_tokens=4096)
+                raw = resp2.choices[0].message.content.strip()
 
         # Strip markdown code fences — multiple patterns
         clean = raw.strip()
@@ -4284,22 +4368,43 @@ class App(tk.Tk):
 
             def _is_rate_err(e):
                 s = str(e).lower()
-                return any(x in s for x in ['429','rate','quota','resource_exhausted',
-                                             'rate-limited','temporarily','upstream'])
+                return any(x in s for x in ['429','503','rate','quota','resource_exhausted',
+                                             'rate-limited','temporarily','upstream',
+                                             'unavailable','overloaded','capacity'])
 
-            def _try_chunk(chunk, label, exclude=None):
+            # Track which providers are rate-limited globally
+            _rl_provs = set()
+            _rl_provs_lock = __import__('threading').Lock()
+
+            def _mark_rl(prov):
+                with _rl_provs_lock:
+                    _rl_provs.add(prov)
+
+            def _clear_rl(prov):
+                with _rl_provs_lock:
+                    _rl_provs.discard(prov)
+
+            def _try_chunk(chunk, label, exclude=None, start_prov=None):
                 exclude = exclude or set()
-                for prov in keyed:
-                    if prov in exclude:
-                        continue
+                # Start from assigned provider, skip any currently rate-limited
+                _order = list(keyed)
+                if start_prov and start_prov in _order:
+                    idx = _order.index(start_prov)
+                    _order = _order[idx:] + _order[:idx]
+                # Try non-rate-limited providers first
+                _available = [p for p in _order if p not in _rl_provs and p not in exclude]
+                _fallback  = [p for p in _order if p in _rl_provs and p not in exclude]
+                for prov in _available + _fallback:
                     try:
                         self.log(f'[{label}] → {prov}...')
                         clips = self._call_provider(prov, chunk)
+                        _clear_rl(prov)
                         self.log(f'[{label}] {prov} → {len(clips)} clips', GREEN)
                         return clips, prov
                     except Exception as ex:
                         s = str(ex).lower()
                         if _is_rate_err(ex):
+                            _mark_rl(prov)
                             self.log(f'[{label}] {prov} rate-limited, trying next...', YELLOW)
                             continue
                         elif '403' in s or 'access denied' in s or 'forbidden' in s:
@@ -4372,15 +4477,37 @@ class App(tk.Tk):
 
             task_results  = [None] * total_tasks
             completed     = [0]
+            import threading as _thr, time as _time
+            _rl_lock      = _thr.Lock()
+            _cooling_down = [False]  # shared flag — all threads wait when True
 
             def _task_worker(idx, chunk, prov, label):
-                # Try assigned provider first, then fall back to others
-                exclude = set()
-                clips, used = _try_chunk(chunk, label, exclude=exclude)
+                # Stagger start to avoid thundering herd on free APIs
+                _time.sleep(idx * 0.8)
+
+                # Wait if global cooldown is active
+                while _cooling_down[0]:
+                    _time.sleep(2)
+
+                clips, used = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+
+                # Retry loop — up to 3 times with increasing cooldown
+                _retry = 0
+                while not clips and _retry < 3:
+                    _retry += 1
+                    _wait = 30 * _retry  # 30s, 60s, 90s
+                    with _rl_lock:
+                        if not _cooling_down[0]:
+                            _cooling_down[0] = True
+                            self.log(f'[{label}] All providers rate-limited — waiting {_wait}s (attempt {_retry}/3)...', YELLOW)
+                    _time.sleep(_wait)
+                    with _rl_lock:
+                        _cooling_down[0] = False
+                    clips, used = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+
                 if not clips:
-                    # Rate-limited or failed — try any other provider
-                    exclude.add(prov)
-                    clips, used = _try_chunk(chunk, label, exclude=exclude)
+                    self.log(f'[{label}] Giving up after 3 retries — skipping this section', YELLOW)
+
                 task_results[idx] = clips or []
                 completed[0] += 1
                 pct = int(completed[0] / total_tasks * 100)
@@ -4389,12 +4516,12 @@ class App(tk.Tk):
                         f'AI scanning {l} ({n}/{total_tasks} done)...',
                         step=2, total=3, pct=p))
 
-            with _cf.ThreadPoolExecutor(max_workers=min(total_tasks, 6)) as pool:
-                futs = [
-                    pool.submit(_task_worker, i, ch, pv, lb)
-                    for i, (ch, pv, lb) in enumerate(assignments)
-                ]
-                _cf.wait(futs)
+            # Sequential — one task at a time, 5s gap between each
+            import time as _t_seq
+            for i, (ch, pv, lb) in enumerate(assignments):
+                if i > 0:
+                    _t_seq.sleep(5)
+                _task_worker(i, ch, pv, lb)
 
             # Merge all results, deduplicate by start timestamp
             for result_list in task_results:
@@ -4412,6 +4539,50 @@ class App(tk.Tk):
                 try: return -int(c.get('score', 5))
                 except: return -5
             all_clips.sort(key=_score_key)
+
+            # ── Verification pass: rewrite titles/descriptions from segment text ──
+            # Extract only the transcript lines that fall within each clip's timestamps
+            # so descriptions are guaranteed to match what's actually in the clip
+            if all_clips and self.transcript:
+                self.log('Verifying clip descriptions against transcript...', FG2)
+                self.set_progress('Verifying clip accuracy...', step=3, total=3, pct=80)
+                import re as _re_v
+
+                def _ts_to_secs(t):
+                    try:
+                        parts = str(t).split(':')
+                        if len(parts) == 3: return int(parts[0])*3600+int(parts[1])*60+float(parts[2])
+                        if len(parts) == 2: return int(parts[0])*60+float(parts[1])
+                        return float(t)
+                    except: return 0.0
+
+                def _extract_segment_text(start_t, end_t, transcript):
+                    """Extract transcript lines that fall within clip timestamps."""
+                    s = _ts_to_secs(start_t)
+                    e = _ts_to_secs(end_t)
+                    lines_out = []
+                    for line in transcript.splitlines():
+                        # Match [HH:MM:SS -> HH:MM:SS] format
+                        m = _re_v.match(r'\[([\d:]+)\s*[-\u2192]\s*([\d:]+)\](.+)', line)
+                        if m:
+                            ls = _ts_to_secs(m.group(1))
+                            le = _ts_to_secs(m.group(2))
+                            # Include if overlaps with clip window
+                            if ls < e and le > s:
+                                lines_out.append(m.group(3).strip())
+                    return ' '.join(lines_out)
+
+                for clip in all_clips:
+                    seg_text = _extract_segment_text(
+                        clip.get('start','00:00:00'),
+                        clip.get('end','00:01:00'),
+                        self.transcript
+                    )
+                    if seg_text and len(seg_text) > 20:
+                        clip['_verified_text'] = seg_text
+                        # Rewrite description from actual segment text
+                        clip['reason'] = seg_text[:200]
+
             self.clips = all_clips
             merged = all_clips  # for logging below
 
@@ -5021,14 +5192,27 @@ class App(tk.Tk):
     def _process_queue(self, jobs=None):
         queue = jobs or self._export_queue or []
         total_ok = 0; total_clips = 0
+        ff = find_ffmpeg()
+        if not ff:
+            self.log('Queue error: ffmpeg not found', RED)
+            self.after(0, lambda: self.set_busy(False))
+            return
         for qi, job in enumerate(queue):
-            # job is a list of clips; vid/out come from current video/outdir
-            vid   = self.v_video.get()
-            out   = self.v_outdir.get()
-            clips = job if isinstance(job, list) else job
-            self.log(f'[Queue {qi+1}/{len(queue)}] Processing {len(clips)} clips from: {Path(vid).name}')
-            ff   = find_ffmpeg()
-            base = Path(vid).stem
+            # job is a tuple (vid, out, clips) stored by _add_to_queue
+            if isinstance(job, (tuple, list)) and len(job) == 3 and isinstance(job[2], list):
+                vid, out, clips = job
+            else:
+                vid   = self.v_video.get()
+                out   = self.v_outdir.get()
+                clips = job if isinstance(job, list) else []
+            if not vid or not Path(vid).exists():
+                self.log(f'[Queue {qi+1}] Video not found: {vid}', RED)
+                continue
+            if not out:
+                self.log(f'[Queue {qi+1}] No output folder set', RED)
+                continue
+            self.log(f'[Queue {qi+1}/{len(queue)}] {len(clips)} clips from: {Path(vid).name}')
+            self.set_progress(f'Queue {qi+1}/{len(queue)}: {Path(vid).name}', pct=int(qi/len(queue)*100))
             Path(out).mkdir(parents=True, exist_ok=True)
             for i, clip in enumerate(clips):
                 start  = clip.get('start','00:00:00')
@@ -5037,7 +5221,8 @@ class App(tk.Tk):
                 fname_base = re.sub(r'[\\/:*?"<>|]', '', _raw_title).strip()[:45] or 'Clip'
                 fname  = f'{fname_base} - ClipFinder - Part {i+1}.mp4'
                 dest   = str(Path(out)/fname)
-                self.log(f'  Cutting: {fname}')
+                self.log(f'  Cutting [{start} → {end}]: {fname}')
+                self.set_progress(f'Queue: cutting {fname[:40]}...', pct=int((qi*len(clips)+i+1)/(len(queue)*len(clips))*100))
                 _vcodec, _acodec, _extra = get_encoder(ff)
                 r = subprocess.run([ff,'-y','-ss',start,'-to',end,'-i',vid,
                                    '-c:v',_vcodec,'-c:a',_acodec]+_extra+[dest],
@@ -5046,9 +5231,10 @@ class App(tk.Tk):
                     total_ok += 1
                     self.log(f'  ✅ {fname}', GREEN)
                 else:
-                    self.log(f'  ❌ {(r.stderr or b'').decode(errors='replace')[-100:]}', RED)
+                    self.log(f'  ❌ Export failed for {fname}', RED)
                 total_clips += 1
         self.log(f'Queue done: {total_ok}/{total_clips} clips exported.', GREEN)
+        self.set_progress(f'✅ Queue done: {total_ok}/{total_clips} clips exported', pct=100)
         self.after(0, lambda: self.set_busy(False))
         self.after(0, self._clear_queue)
         self.after(0, lambda: messagebox.showinfo('Queue Done',
@@ -5218,6 +5404,7 @@ class App(tk.Tk):
             fname = f'{title} - ClipFinder - Part {i+1}.mp4'
             dest  = str(Path(out) / fname)
             self.log(f'Cutting [{start} → {end}]: {fname}')
+            self.set_progress(f'✂ Exporting {i+1}/{len(clips)}: {title[:40]}...', pct=int(i/len(clips)*100))
             _vcodec, _acodec, _extra = get_encoder(ff)
             # Add hwaccel input decoding for GPU encoders
             _hw_args = []
@@ -5270,6 +5457,7 @@ class App(tk.Tk):
                 if not ok_n and not ok_v: self.log(f'Both failed: {fname}', RED)
 
         self.log(f'Done: {ok}/{len(clips)} clips saved to {out}', GREEN)
+        self.set_progress(f'✅ Done: {ok}/{len(clips)} clips exported', pct=100)
         self.after(0, lambda: self.set_busy(False))
         self.after(0, lambda: messagebox.showinfo('Done', f'{ok}/{len(clips)} clips saved to:\n{out}'))
 
@@ -5859,7 +6047,30 @@ class App(tk.Tk):
             if not info:
                 raise last_err or Exception('All download attempts failed')
 
-            title = info.get('title', 'video')
+            title    = info.get('title', 'video') or 'video'
+            uploader = info.get('uploader') or info.get('channel') or info.get('uploader_id', '')
+            # Fix NA uploader — extract from URL path
+            if not uploader or uploader.strip().upper() == 'NA':
+                import re as _re_url
+                _url_match = _re_url.search(r'(?:twitch\\.tv|kick\\.com|youtube\\.com/c?|x\\.com)/([^/?&#]+)', url)
+                uploader = _url_match.group(1) if _url_match else ''
+            # Fix generic titles like "master", "index", "playlist"
+            if title.lower() in ('master', 'index', 'playlist', 'na', 'video', ''):
+                title = info.get('description', '')[:60] or info.get('webpage_url_basename','') or title
+            # Rename downloaded file if uploader was NA
+            if uploader and uploader.upper() != 'NA':
+                import re as _re_fn, glob as _gl
+                _safe_up = _re_fn.sub(r'[\/:*?"<>|]', '', uploader).strip()
+                _safe_ti = _re_fn.sub(r'[\/:*?"<>|]', '', title).strip()[:60]
+                _new_name = f'{_safe_up} - {_safe_ti} - ClipFinder.mp4' if _safe_ti else f'{_safe_up} - ClipFinder.mp4'
+                # Find and rename the downloaded file
+                try:
+                    _dl_files = sorted(Path(_out_folder).glob('*NA*ClipFinder*'), key=lambda x: x.stat().st_mtime, reverse=True)
+                    if _dl_files:
+                        _new_path = Path(_out_folder) / _new_name
+                        _dl_files[0].rename(_new_path)
+                        self._dl_log_write(f'✏️  Renamed: {_new_name}', FG2)
+                except Exception as _re: pass
             self._dl_log_write('', FG2)
             self._dl_log_write(f'✅  Done: {title}', GREEN)
             self._dl_log_write(f'📁  Saved to: {folder}', FG2)
@@ -6740,6 +6951,7 @@ class App(tk.Tk):
                  text='\n  Find duplicates or upscale images to see results here.\n',
                  font=FONT_MONO_S, fg=FG2, bg=BG3).pack(pady=30)
 
+
     def _studio_show_empty(self, msg=''):
         for w in self.studio_results_frame.winfo_children(): w.destroy()
         tk.Label(self.studio_results_frame, text=f'\n  {msg}\n',
@@ -7268,7 +7480,8 @@ class App(tk.Tk):
             self.log(f'Auto Edit: asking AI to select segments for {target_min}min edit...')
             def _is_rate(e):
                 s = str(e).lower()
-                return any(x in s for x in ['429','rate','quota','resource_exhausted','temporarily'])
+                return any(x in s for x in ['429','503','rate','quota','resource_exhausted',
+                                             'temporarily','unavailable','overloaded','capacity'])
 
             def _is_access_denied(e):
                 s = str(e).lower()
@@ -7703,7 +7916,8 @@ class App(tk.Tk):
         # ── Smart Provider Status ──
         s2 = section('🤖  AI Provider Status')
         self._prov_status_frame = s2
-        self._refresh_provider_status()
+        # Defer to background — provider status check imports packages (slow)
+        self.after(50, self._refresh_provider_status)
 
         # ── Whisper / Transcription ──
         s3 = section('🎙️  Transcription Settings')
@@ -7784,11 +7998,13 @@ class App(tk.Tk):
             except: return False
 
         # ── "Install All AI Packages" — always visible (works first-run AND re-install) ──
-        _heavy_installed = _check_heavy_installed()
+        # Check quickly — just look for pkgs dir existence, don't scan imports
+        _heavy_installed = bool(list(PKGS_DIR.glob('faster_whisper*'))[:1]) if PKGS_DIR.exists() else False
         _notice_bg = '#1a1200' if not _heavy_installed else BG3
         _notice_border = ACCENT2 if not _heavy_installed else BORDER
         notice = tk.Frame(s6, bg=_notice_bg, highlightbackground=_notice_border, highlightthickness=1)
-        notice.pack(fill='x', pady=(0, 8))
+        if not _heavy_installed:
+            notice.pack(fill='x', pady=(0, 8))
         ni = tk.Frame(notice, bg=_notice_bg); ni.pack(fill='x', padx=10, pady=8)
 
         if not _heavy_installed:
@@ -7797,10 +8013,7 @@ class App(tk.Tk):
             tk.Label(ni, text='Packages install to the app folder and persist across launches.',
                     font=('Segoe UI', 8), fg=FG2, bg=_notice_bg).pack(anchor='w', pady=(2,4))
         else:
-            tk.Label(ni, text='✅  AI packages installed',
-                    font=('Segoe UI', 9, 'bold'), fg=GREEN, bg=_notice_bg).pack(anchor='w')
-            tk.Label(ni, text='Use "Update All Packages" below to refresh.',
-                    font=('Segoe UI', 8), fg=FG2, bg=_notice_bg).pack(anchor='w', pady=(2,2))
+            pass  # Hide the notice entirely when all installed
 
         # Per-package install progress bar (canvas-based)
         _inst_prog_frame = tk.Frame(ni, bg=_notice_bg)
@@ -7834,6 +8047,8 @@ class App(tk.Tk):
             'opencv-python',
             # Optional face tracking
             'mediapipe',
+            # Music removal
+            'torch', 'torchaudio', 'demucs',
         ]
 
         def _install_all_heavy():
@@ -7929,6 +8144,10 @@ class App(tk.Tk):
             ('soundfile',      'soundfile',                 'Audio read/write — required for Censor tab'),
             ('numpy',          'numpy',                     'Numeric processing — required for audio/video'),
             ('requests',       'requests',                  'HTTP requests — required for downloads'),
+            # ── Music Removal ────────────────────────────────────────────────
+            ('demucs',         'demucs',                    'AI music removal — required for Music Removal tab'),
+            ('torch',          'torch',                     'PyTorch — required by Demucs'),
+            ('torchaudio',     'torchaudio',                'Audio processing — required by Demucs'),
         ]
 
         # Packages that need --no-deps to avoid DLL permission conflicts
@@ -8019,15 +8238,52 @@ class App(tk.Tk):
             import threading; threading.Thread(target=_do_all, daemon=True).start()
 
         # Grid of packages
+
+        _dot_updates = []  # deferred package status checks
+
+        def _pkg_installed_check(pkg_name):
+            import importlib as _il
+            _imp_map = {
+                'faster-whisper': 'faster_whisper', 'openai-whisper': 'whisper',
+                'google-genai': 'google.genai', 'opencv-python': 'cv2',
+                'yt-dlp': 'yt_dlp', 'curl-cffi': 'curl_cffi',
+                'mediapipe': 'mediapipe', 'demucs': 'demucs',
+                'imagehash': 'imagehash', 'soundfile': 'soundfile',
+                'Pillow': 'PIL', 'numpy': 'numpy', 'requests': 'requests',
+                'groq': 'groq', 'openai': 'openai',
+                'torch': 'torch', 'torchaudio': 'torchaudio',
+                'torchaudio': 'torchaudio',
+            }
+            mod = _imp_map.get(pkg_name, pkg_name.replace('-','_').lower())
+            try: _il.import_module(mod); return True
+            except: return False
+
         for i, (pkg, pkg_pip, desc) in enumerate(mods):
             mr = tk.Frame(s6, bg=BG3); mr.pack(fill='x', pady=2)
-            tk.Label(mr, text=pkg, font=('Consolas', 8, 'bold'), fg=FG, bg=BG3,
-                    width=18, anchor='w').pack(side='left', padx=(0,8))
+            # Show placeholder dot — update async after UI draws
+            _dot_lbl = tk.Label(mr, text='…',
+                    font=('Segoe UI', 9), fg=FG3, bg=BG3)
+            _dot_lbl.pack(side='left', padx=(8,2))
+            _name_lbl = tk.Label(mr, text=pkg, font=('Consolas', 8, 'bold'),
+                    fg=FG2, bg=BG3, width=18, anchor='w')
+            _name_lbl.pack(side='left', padx=(0,8))
+            def _update_dot(p=pkg, dl=_dot_lbl, nl=_name_lbl):
+                ok = _pkg_installed_check(p)
+                dl.config(text='✅' if ok else '○', fg=GREEN if ok else FG3)
+                nl.config(fg=FG if ok else FG2)
+            _dot_updates.append(_update_dot)
             tk.Label(mr, text=desc, font=('Segoe UI', 8), fg=FG2, bg=BG3).pack(side='left')
             upd_btn = tk.Button(mr, text='↑ Update', font=('Segoe UI', 8),
                                bg=BG4, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=10, pady=2)
             upd_btn.config(command=lambda p=pkg_pip, b=upd_btn: _update_pkg(p, b))
             upd_btn.pack(side='right')
+
+        # Run package status checks in background after UI is drawn
+        def _run_dot_updates():
+            for fn in _dot_updates:
+                try: self.after(0, fn)
+                except: pass
+        threading.Thread(target=_run_dot_updates, daemon=True).start()
 
         upd_all_row = tk.Frame(s6, bg=BG3); upd_all_row.pack(fill='x', pady=(10,0))
         tk.Button(upd_all_row, text='🔄  Update All Packages', font=('Segoe UI', 9, 'bold'),
@@ -8308,7 +8564,7 @@ class App(tk.Tk):
                         self.after(0, lambda: (
                             self.log(f'✅ ggml-{size}.bin ready ({model_path.stat().st_size//1024//1024}MB)', GREEN),
                             self.set_progress(f'✅ ggml-{size} model ready', pct=100),
-                            _refresh_dep_display()
+                            self.after(100, _refresh_dep_display)
                         ))
                     else:
                         self.after(0, lambda: (
@@ -8424,6 +8680,7 @@ class App(tk.Tk):
             tk.Label(r, text='⚠️  No API keys configured — add at least one above to find clips',
                     font=FONT_SMALL, fg=YELLOW, bg=BG2).pack(anchor='w')
 
+
     def _auto_select_provider(self):
         """Auto-select best available provider based on configured keys."""
         priority = ['Google Gemini (Free)', 'Groq (Free)', 'OpenRouter (Free models)']
@@ -8434,6 +8691,355 @@ class App(tk.Tk):
                 self._refresh_prov_btns()
                 self.log(f'Auto-selected provider: {pname}', FG2)
                 return
+
+
+        """AI Music Removal using Demucs — strips background music, keeps vocals."""
+        tk.Label(p, text='🎵  AI MUSIC REMOVAL', font=('Segoe UI', 11, 'bold'),
+                fg=ACCENT, bg=BG).pack(anchor='w', padx=20, pady=(14,2))
+        tk.Label(p, text='Strip copyrighted background music from clips. Keeps vocals and speech.',
+                font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', padx=20, pady=(0,10))
+
+        sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
+        sec.pack(fill='x', padx=16, pady=(0,8))
+        inner = tk.Frame(sec, bg=BG2); inner.pack(fill='x', padx=12, pady=10)
+
+        # Video file
+        tk.Label(inner, text='Video:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        self.v_mr_video = tk.StringVar()
+        vf = tk.Frame(inner, bg=BG3); vf.pack(side='left', fill='x', expand=True)
+        tk.Entry(vf, textvariable=self.v_mr_video, font=FONT_SMALL,
+                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
+                ).pack(side='left', fill='x', expand=True)
+        tk.Button(vf, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
+                 relief='flat', bd=0, cursor='hand2', padx=6,
+                 command=lambda: self.v_mr_video.set(
+                     filedialog.askopenfilename(
+                         filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')]
+                     ) or self.v_mr_video.get())
+                 ).pack(side='right')
+        tk.Button(inner, text='Use Clip Finder video', font=FONT_SMALL,
+                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8,
+                 command=lambda: self.v_mr_video.set(self.v_video.get())
+                 ).pack(side='left', padx=8)
+
+        # Output folder
+        out_row = tk.Frame(sec, bg=BG2); out_row.pack(fill='x', padx=12, pady=(0,8))
+        tk.Label(out_row, text='Output:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        self.v_mr_out = tk.StringVar(value=self.cfg.get('outdir',''))
+        of = tk.Frame(out_row, bg=BG3); of.pack(side='left', fill='x', expand=True)
+        tk.Entry(of, textvariable=self.v_mr_out, font=FONT_SMALL,
+                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
+                ).pack(side='left', fill='x', expand=True)
+        tk.Button(of, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
+                 relief='flat', bd=0, cursor='hand2', padx=6,
+                 command=lambda: self.v_mr_out.set(
+                     filedialog.askdirectory() or self.v_mr_out.get())
+                 ).pack(side='right')
+
+        # Options
+        opt_sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
+        opt_sec.pack(fill='x', padx=16, pady=(0,8))
+        opt_inner = tk.Frame(opt_sec, bg=BG2); opt_inner.pack(fill='x', padx=12, pady=10)
+
+        tk.Label(opt_inner, text='Model:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
+        self.v_mr_model = tk.StringVar(value='htdemucs')
+        for val, lbl, hint in [
+            ('htdemucs',    'HTDemucs',    'Best quality — recommended'),
+            ('mdx_extra',   'MDX Extra',   'Faster, good quality'),
+            ('htdemucs_ft', 'HTDemucs FT', 'Fine-tuned, slower'),
+        ]:
+            f = tk.Frame(opt_inner, bg=BG2); f.pack(side='left', padx=(12,0))
+            tk.Radiobutton(f, text=lbl, variable=self.v_mr_model, value=val,
+                          font=FONT_SMALL, fg=FG, bg=BG2,
+                          selectcolor=BG3, activebackground=BG2,
+                          cursor='hand2').pack(side='left')
+            tk.Label(f, text=hint, font=('Segoe UI',7), fg=FG3, bg=BG2).pack(side='left', padx=(2,0))
+
+        # Keep options
+        keep_row = tk.Frame(opt_sec, bg=BG2); keep_row.pack(fill='x', padx=12, pady=(0,10))
+        tk.Label(keep_row, text='Keep:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
+        self.v_mr_keep_vocals = tk.BooleanVar(value=True)
+        self.v_mr_keep_other  = tk.BooleanVar(value=False)
+        tk.Checkbutton(keep_row, text='Vocals', variable=self.v_mr_keep_vocals,
+                      font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
+                      activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
+        tk.Checkbutton(keep_row, text='Other (SFX/ambience)', variable=self.v_mr_keep_other,
+                      font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
+                      activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
+        tk.Label(keep_row, text='Music (drums/bass/etc) is always removed',
+                font=('Segoe UI',7), fg=FG3, bg=BG2).pack(side='left', padx=8)
+
+        # Run button
+        btn_row = tk.Frame(p, bg=BG); btn_row.pack(fill='x', padx=16, pady=8)
+        tk.Button(btn_row, text='🎵  REMOVE MUSIC',
+                 font=('Segoe UI',10,'bold'), bg=ACCENT, fg='#000',
+                 relief='flat', bd=0, cursor='hand2', padx=20, pady=8,
+                 command=self._run_music_removal).pack(side='left')
+        tk.Label(btn_row, text='Runs locally — no API needed. Requires Demucs (auto-installs).',
+                font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left', padx=12)
+
+        self.mr_status_lbl = tk.Label(p, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
+        self.mr_status_lbl.pack(fill='x', padx=20, pady=4)
+
+    def _run_music_removal(self):
+        """Run Demucs to separate music from vocals — keeps vocals stem, discards music."""
+        vid = self.v_mr_video.get().strip()
+        out = self.v_mr_out.get().strip()
+        if not vid or not Path(vid).exists():
+            messagebox.showerror('No video', 'Select a video file first.'); return
+        if not out:
+            messagebox.showerror('No output', 'Select an output folder first.'); return
+
+        model     = self.v_mr_model.get()
+        keep_vox  = self.v_mr_keep_vocals.get()
+        keep_other= self.v_mr_keep_other.get()
+        ff        = ensure_ffmpeg()
+
+        self.set_busy(True)
+        self.mr_status_lbl.config(text='⏳ Installing Demucs if needed...', fg=ACCENT2)
+        self.log('🎵 Music Removal: starting...', ACCENT2)
+
+        def _run():
+            try:
+                import subprocess as _sp, sys as _sys, tempfile as _tmp
+                _ensure_pkgs_on_path()
+
+                # Check demucs + dependencies installed
+                missing = []
+                for _m in ('demucs', 'torch', 'torchaudio'):
+                    try: __import__(_m)
+                    except ImportError: missing.append(_m)
+                if missing:
+                    self.log(f'❌ Missing: {", ".join(missing)} — install in Settings → Update Modules', RED)
+                    self.after(0, lambda: self.mr_status_lbl.config(
+                        text=f'❌ Missing: {", ".join(missing)} — install in Settings', fg=RED))
+                    return
+                # Patch torchaudio to use soundfile backend — avoids torchcodec DLL issues on Windows
+                try:
+                    import torchaudio as _ta
+                    _ta.set_audio_backend('soundfile')
+                    self.log('[Music] Using soundfile audio backend', FG2)
+                except Exception as _tae:
+                    self.log(f'[Music] torchaudio backend note: {_tae}', FG2)
+
+                # Step 1: Extract audio from video
+                self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Extracting audio...', fg=ACCENT2))
+                self.log('Step 1: Extracting audio...', FG2)
+                self.set_progress('🎵 Music Removal: extracting audio...', pct=10)
+                tmp_dir = Path(_tmp.mkdtemp())
+                audio_path = str(tmp_dir / 'input_audio.wav')
+                _sp.run([ff, '-y', '-i', vid, '-vn', '-ar', '44100',
+                         '-ac', '2', '-f', 'wav', audio_path],
+                        stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+
+                # Step 2: Run Demucs separation
+                self.after(0, lambda: self.mr_status_lbl.config(
+                    text=f'⏳ Separating stems with {model}... (this takes a while)', fg=ACCENT2))
+                self.log(f'Step 2: Running Demucs [{model}]...', FG2)
+                self.set_progress(f'🎵 Music Removal: separating stems [{model}]...', pct=30)
+                sep_out = str(tmp_dir / 'separated')
+                # Demucs command — patch torchaudio via python -c before demucs runs
+                import os as _os_dm
+                _dm_env = dict(_os_dm.environ)
+                # Force torchaudio to use soundfile — avoids torchcodec/DLL issues
+                _dm_env['TORCHAUDIO_BACKEND'] = 'soundfile'
+                _dm_env['TORCH_AUDIO_USE_SOUNDFILE'] = '1'
+                # Write a temp launcher script that patches torchaudio before demucs runs
+                import tempfile as _tmp2
+                _launcher = str(Path(_tmp2.gettempdir()) / 'cf_demucs_launcher.py')
+                with open(_launcher, 'w') as _lf:
+                    _lf.write("""import sys
+import soundfile as sf
+import torch
+import torchaudio
+
+def _sf_load(path, *args, **kwargs):
+    data, sr = sf.read(str(path), dtype='float32', always_2d=True)
+    return torch.tensor(data.T), sr
+
+def _sf_save(path, src, sample_rate, *args, **kwargs):
+    import numpy as np
+    data = src.numpy().T  # (channels, samples) -> (samples, channels)
+    sf.write(str(path), data, sample_rate)
+
+torchaudio.load = _sf_load
+torchaudio.save = _sf_save
+
+from demucs.__main__ import main
+sys.exit(main())
+""")
+                _dm_cmd = [_sys.executable, _launcher,
+                           '-n', model,
+                           '--two-stems', 'vocals',
+                           '--out', sep_out,
+                           audio_path]
+                _dm_r = _sp.run(_dm_cmd, capture_output=True, text=True, env=_dm_env)
+                if _dm_r.returncode != 0:
+                    self.log(f'Demucs error: {_dm_r.stderr[-500:]}', RED)
+                    raise RuntimeError(f'Demucs failed: {_dm_r.stderr[-200:]}')
+
+                # Step 3: Find stems and mix the ones we want
+                self.log('Step 3: Mixing selected stems...', FG2)
+                self.set_progress('🎵 Music Removal: mixing stems...', pct=75)
+                self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Mixing stems...', fg=ACCENT2))
+                # two-stems output: vocals.wav and no_vocals.wav
+                sep_track = Path(sep_out) / model / 'input_audio'
+                # Try .wav first (default), then .mp3
+                def _find_stem(name):
+                    for ext in ('wav','mp3','flac'):
+                        p = sep_track / f'{name}.{ext}'
+                        if p.exists(): return str(p)
+                    return None
+                stems_to_mix = []
+                if keep_vox:
+                    v = _find_stem('vocals')
+                    if v: stems_to_mix.append(v)
+                if keep_other:
+                    o = _find_stem('no_vocals')
+                    if o: stems_to_mix.append(o)
+                if not stems_to_mix:
+                    v = _find_stem('vocals')
+                    if v: stems_to_mix.append(v)
+                if not stems_to_mix:
+                    raise RuntimeError(f'No stems found in {sep_track} — check demucs output')
+
+                # Mix stems back together
+                mixed_audio = str(tmp_dir / 'mixed.mp3')
+                if len(stems_to_mix) == 1:
+                    import shutil as _sh
+                    _sh.copy2(stems_to_mix[0], mixed_audio)
+                else:
+                    # amix all stems
+                    inputs = []
+                    for s in stems_to_mix:
+                        inputs += ['-i', s]
+                    _sp.run([ff, '-y'] + inputs +
+                            ['-filter_complex', f'amix=inputs={len(stems_to_mix)}:duration=longest',
+                             mixed_audio],
+                            stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+
+                # Step 4: Merge cleaned audio back with original video
+                self.log('Step 4: Merging with original video...', FG2)
+                self.set_progress('🎵 Music Removal: merging audio + video...', pct=90)
+                self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Merging audio + video...', fg=ACCENT2))
+                stem = Path(vid).stem
+                out_path = str(Path(out) / f'{stem} - NoMusic - ClipFinder.mp4')
+                _vcodec, _acodec, _extra = get_encoder(ff)
+                _sp.run([ff, '-y',
+                         '-i', vid,
+                         '-i', mixed_audio,
+                         '-c:v', 'copy',
+                         '-c:a', _acodec,
+                         '-map', '0:v:0',
+                         '-map', '1:a:0',
+                         '-shortest',
+                         out_path],
+                        stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+
+                # Cleanup
+                import shutil as _sh2
+                _sh2.rmtree(str(tmp_dir), ignore_errors=True)
+
+                size = Path(out_path).stat().st_size / 1024 / 1024
+                self.log(f'✅ Done: {Path(out_path).name} ({size:.1f}MB)', GREEN)
+                self.after(0, lambda: self.mr_status_lbl.config(
+                    text=f'✅ {Path(out_path).name}', fg=GREEN))
+                self.after(0, lambda: messagebox.showinfo('Music Removed',
+                    f'Saved: {Path(out_path).name}\nLocation: {out}'))
+
+            except Exception as _e:
+                import traceback as _tb
+                self.log(f'Music Removal error: {_tb.format_exc()}', RED)
+                self.after(0, lambda: self.mr_status_lbl.config(text=f'❌ {_e}', fg=RED))
+            finally:
+                self.set_busy(False)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _build_music_removal_tab(self, p):
+        """AI Music Removal using Demucs — strips background music, keeps vocals."""
+        tk.Label(p, text='🎵  AI MUSIC REMOVAL', font=('Segoe UI', 10, 'bold'),
+                fg=ACCENT, bg=BG).pack(anchor='w', padx=16, pady=(12,2))
+        tk.Label(p, text='Strip copyrighted background music. Keeps vocals and speech. Runs locally — no API needed.',
+                font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', padx=16, pady=(0,8))
+
+        sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
+        sec.pack(fill='x', padx=16, pady=(0,6))
+        inner = tk.Frame(sec, bg=BG2); inner.pack(fill='x', padx=12, pady=8)
+
+        tk.Label(inner, text='Video:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        self.v_mr_video = tk.StringVar()
+        vf = tk.Frame(inner, bg=BG3); vf.pack(side='left', fill='x', expand=True)
+        tk.Entry(vf, textvariable=self.v_mr_video, font=FONT_SMALL,
+                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
+                ).pack(side='left', fill='x', expand=True)
+        tk.Button(vf, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
+                 relief='flat', bd=0, cursor='hand2', padx=6,
+                 command=lambda: self.v_mr_video.set(
+                     filedialog.askopenfilename(
+                         filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')]
+                     ) or self.v_mr_video.get())
+                 ).pack(side='right')
+        tk.Button(inner, text='Use Clip Finder video', font=FONT_SMALL,
+                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8,
+                 command=lambda: self.v_mr_video.set(self.v_video.get())
+                 ).pack(side='left', padx=8)
+
+        out_row = tk.Frame(sec, bg=BG2); out_row.pack(fill='x', padx=12, pady=(0,8))
+        tk.Label(out_row, text='Output:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        self.v_mr_out = tk.StringVar(value=self.cfg.get('outdir',''))
+        of = tk.Frame(out_row, bg=BG3); of.pack(side='left', fill='x', expand=True)
+        tk.Entry(of, textvariable=self.v_mr_out, font=FONT_SMALL,
+                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
+                ).pack(side='left', fill='x', expand=True)
+        tk.Button(of, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
+                 relief='flat', bd=0, cursor='hand2', padx=6,
+                 command=lambda: self.v_mr_out.set(
+                     filedialog.askdirectory() or self.v_mr_out.get())
+                 ).pack(side='right')
+
+        opt = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
+        opt.pack(fill='x', padx=16, pady=(0,6))
+        opt_i = tk.Frame(opt, bg=BG2); opt_i.pack(fill='x', padx=12, pady=8)
+        tk.Label(opt_i, text='Model:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
+        self.v_mr_model = tk.StringVar(value='htdemucs')
+        for val, lbl2, hint in [
+            ('htdemucs','HTDemucs','Best quality'),
+            ('mdx_extra','MDX Extra','Faster'),
+            ('htdemucs_ft','HTDemucs FT','Fine-tuned'),
+        ]:
+            tk.Radiobutton(opt_i, text=f'{lbl2} ({hint})', variable=self.v_mr_model, value=val,
+                          font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
+                          activebackground=BG2, cursor='hand2').pack(side='left', padx=(10,0))
+
+        keep_row = tk.Frame(opt, bg=BG2); keep_row.pack(fill='x', padx=12, pady=(0,8))
+        tk.Label(keep_row, text='Keep:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
+        self.v_mr_keep_vocals = tk.BooleanVar(value=True)
+        self.v_mr_keep_other  = tk.BooleanVar(value=False)
+        tk.Checkbutton(keep_row, text='Vocals', variable=self.v_mr_keep_vocals,
+                      font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
+                      activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
+        tk.Checkbutton(keep_row, text='Other (SFX/ambience)', variable=self.v_mr_keep_other,
+                      font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
+                      activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
+        tk.Label(keep_row, text='Drums/bass always removed',
+                font=('Segoe UI',7), fg=FG3, bg=BG2).pack(side='left', padx=8)
+
+        btn_row = tk.Frame(p, bg=BG); btn_row.pack(fill='x', padx=16, pady=6)
+        tk.Button(btn_row, text='🎵  REMOVE MUSIC',
+                 font=('Segoe UI',10,'bold'), bg=ACCENT, fg='#000',
+                 relief='flat', bd=0, cursor='hand2', padx=20, pady=8,
+                 command=self._run_music_removal).pack(side='left')
+        try:
+            import demucs as _dm_chk  # noqa
+            _demucs_ok = True
+        except ImportError:
+            _demucs_ok = False
+        if not _demucs_ok:
+            tk.Label(btn_row, text='⚠ Demucs not installed — go to Settings → Update Modules',
+                    font=FONT_SMALL, fg=YELLOW, bg=BG).pack(side='left', padx=12)
+        self.mr_status_lbl = tk.Label(p, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
+        self.mr_status_lbl.pack(fill='x', padx=16)
 
     def _build_censor_tab(self, p):
         # Load saved word list
