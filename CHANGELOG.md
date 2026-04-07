@@ -46,3 +46,30 @@
 - Settings missing browse buttons for output folders
 - Transcript log button unresponsive
 - Whisper auto model caused 404 error on ggml-auto.bin
+
+## v1.2 — April 2026 — Stable Release
+
+### New Features
+- Auto Edit mode — CapCut-style automatic editing with silence detection + audio energy peaks + AI
+- VOD Mode — 8x concurrent fragment downloads, auto vod/ subfolder for Twitch/Kick
+- Smart Auto whisper — picks model based on video duration + GPU detection
+- Floating log panel — independent overlay window, works on all tabs
+- Floating update notification — proper overlay, only shows when genuinely newer version exists
+
+### Bug Fixes
+- Both export (16:9 + 9:16) fixed for regular and censor export
+- Output folder now persists on restart
+- Transcript tab no longer requires output folder just to transcribe
+- imagehash correctly detected in Core Dependencies
+- Update All permission errors fixed for locked .pyd files
+- Whisper auto model no longer tries ggml-auto.bin (404)
+- mediapipe 0.10+ API updated
+- AI response parsing improved (backtick stripping)
+- Hybrid energy analysis vid scope bug fixed
+- Provider API keys unified layout — Gemini, Unsplash, Groq, OpenRouter
+- Version number shown in header and status bar
+- Window icon fixed (was using deleted temp file)
+
+### Known Issues
+- Censor queue not processing queued videos (fix in v1.3)
+- OpenRouter occasional response truncation on long videos

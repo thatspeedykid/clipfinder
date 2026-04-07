@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.2 Beta"
+APP_VERSION = "1.2"
 
 import subprocess
 import sys
@@ -1716,7 +1716,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.2 Beta — AI Clip Extractor')
+        self.title('ClipFinder 1.2 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
