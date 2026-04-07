@@ -2336,7 +2336,7 @@ class App(tk.Tk):
                           padx=16, pady=8, bg=BG2, fg=FG2,
                           activebackground=BG3, activeforeground=FG,
                           command=lambda k=key: self._switch_nb(k))
-            b.pack(side='left')
+            b.pack(side='left', fill='x', expand=True)
             self.nb_btns[key] = b
 
         tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
@@ -2496,11 +2496,12 @@ class App(tk.Tk):
             self._log_win.destroy()
             self._log_win = None
             return
-        # Create floating overlay window
+        # Create overlay window attached to main window
         self._log_win = tk.Toplevel(self)
-        self._log_win.overrideredirect(True)  # no title bar
-        self._log_win.attributes('-topmost', True)  # always on top
+        self._log_win.transient(self)
         self._log_win.configure(bg=BG3)
+        self._log_win.title('ClipFinder Log')
+        self._log_win.resizable(True, False)
         # Position at bottom of main window
         def _reposition(*_):
             try:
@@ -2512,18 +2513,9 @@ class App(tk.Tk):
                 # Full width flush with main window, sits just above status bar
                 self._log_win.geometry(f'{w}x{lh}+{x}+{y+h-lh-30}')
             except: pass
-        # Header bar
-        hdr = tk.Frame(self._log_win, bg=BG2, height=24)
-        hdr.pack(fill='x')
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text='📋  Log', font=('Segoe UI',8,'bold'),
-                fg=FG, bg=BG2).pack(side='left', padx=8)
-        tk.Button(hdr, text='✕', font=('Segoe UI',8,'bold'),
-                 fg=FG2, bg=BG2, relief='flat', bd=0, cursor='hand2',
-                 command=self._toggle_log).pack(side='right', padx=6)
         # Log text
         inner = tk.Frame(self._log_win, bg=BG3)
-        inner.pack(fill='both', expand=True, padx=2, pady=(0,2))
+        inner.pack(fill='both', expand=True, padx=2, pady=2)
         self.log_box = tk.Text(inner, font=('Consolas',8),
                                bg=BG3, fg=FG3, relief='flat', bd=4,
                                wrap='word', state='disabled')
@@ -2550,8 +2542,10 @@ class App(tk.Tk):
             f.pack_forget()
         self.nb_frames[key].pack(fill='both', expand=True)
         for k, b in self.nb_btns.items():
-            b.config(bg=BG3 if k == key else BG2,
-                     fg=ACCENT if k == key else FG2)
+            if k == key:
+                b.config(bg=ACCENT, fg='#000', font=('Segoe UI', 9, 'bold'))
+            else:
+                b.config(bg=BG2, fg=ACCENT2, font=('Segoe UI', 9))
         self.after(100, lambda: apply_rightclick_to_all(self.nb_frames[key], self))
         self.after(150, self._fix_all_scrollbars)
         # Auto-refresh dep status when opening settings
@@ -2562,6 +2556,46 @@ class App(tk.Tk):
 
         def lbl(parent, text):
             return tk.Label(parent, text=text, font=FONT_SMALL, fg=FG2, bg=BG2)
+
+        # ── Sub-tab bar: AI Clips | Auto Edit ─────────────────────────────────
+        sub_bar = tk.Frame(p, bg=BG3)
+        sub_bar.pack(fill='x')
+        self._clips_sub_frames = {}
+        self._clips_sub_btns = {}
+
+        def _switch_sub(key):
+            for k, f in self._clips_sub_frames.items():
+                f.pack_forget()
+            self._clips_sub_frames[key].pack(fill='both', expand=True)
+            for k, b in self._clips_sub_btns.items():
+                if k == key:
+                    b.config(bg=ACCENT, fg='#000', font=('Segoe UI',8,'bold'))
+                else:
+                    b.config(bg=BG3, fg=ACCENT2, font=('Segoe UI',8))
+
+        for sub_key, sub_lbl in [('ai_clips','✂  AI Clips'), ('auto_edit','⚡  Auto Edit')]:
+            sb = tk.Button(sub_bar, text=sub_lbl, font=('Segoe UI',8),
+                          relief='flat', bd=0, cursor='hand2',
+                          padx=20, pady=6, bg=BG3, fg=FG2,
+                          command=lambda k=sub_key: _switch_sub(k))
+            sb.pack(side='left', fill='x', expand=True)
+            self._clips_sub_btns[sub_key] = sb
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+
+        # AI Clips sub-frame (default)
+        ai_clips_frame = tk.Frame(p, bg=BG)
+        self._clips_sub_frames['ai_clips'] = ai_clips_frame
+
+        # Auto Edit sub-frame
+        ae_frame = tk.Frame(p, bg=BG)
+        self._clips_sub_frames['auto_edit'] = ae_frame
+        self._build_auto_edit_sub(ae_frame)
+
+        # Show AI Clips by default
+        _switch_sub('ai_clips')
+
+        # All existing clips tab content goes into ai_clips_frame
+        p = ai_clips_frame  # redirect remaining builds into sub-frame
 
         # ── Control panel ─────────────────────────────────────────────────────
         ctrl = tk.Frame(p, bg=BG2)
@@ -2679,6 +2713,7 @@ class App(tk.Tk):
                                             relief='flat', bd=0, cursor='hand2', padx=7, pady=4,
                                             command=lambda: self._set_mode('interview'))
         self.mode_interview_btn.pack(side='left', padx=(0,2))
+
         self._refresh_mode_btns()
 
         tk.Frame(r4, bg=BORDER, width=1).pack(side='left', fill='y', padx=10)
@@ -2821,6 +2856,10 @@ class App(tk.Tk):
                   bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
                   activebackground=ACCENT2,
                   command=self._export_or_censor).pack(side='right', padx=(6,0))
+        # AUTO EDIT — trims silence from selected clips
+        tk.Button(exp_bar, text='⚡ Auto Edit', font=('Segoe UI', 9,'bold'),
+                  bg='#2a2a2a', fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=12, pady=5,
+                  command=self._auto_edit_selected).pack(side='right', padx=(0,4))
 
         # MP3 browse row — shown only when style=mp3 AND censor is on
         self._censor_mp3_row = tk.Frame(p, bg=BG2)
@@ -2935,6 +2974,235 @@ class App(tk.Tk):
         self.clip_canvas.bind('<Configure>', _on_clip_canvas_configure)
         tk.Label(self.clip_frame, text='\n  Click ▶ FIND CLIPS to analyze your video.\n',
                  font=FONT_MONO_S, fg=FG2, bg=BG3).pack(pady=30)
+
+
+    def _build_auto_edit_sub(self, p):
+        """Auto Edit sub-tab — removes silence from video using ffmpeg."""
+
+        tk.Label(p, text='⚡  AUTO EDIT', font=('Segoe UI',11,'bold'),
+                fg=ACCENT, bg=BG).pack(anchor='w', padx=20, pady=(14,2))
+        tk.Label(p, text='Remove silence and dead air from any video in one pass.',
+                font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', padx=20, pady=(0,10))
+
+        # ── Video source ──────────────────────────────────────────────────────
+        sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
+        sec.pack(fill='x', padx=16, pady=(0,8))
+        inner = tk.Frame(sec, bg=BG2); inner.pack(fill='x', padx=12, pady=8)
+
+        tk.Label(inner, text='Video:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        self.v_ae_video = tk.StringVar()
+        ae_ef = tk.Frame(inner, bg=BG3); ae_ef.pack(side='left', fill='x', expand=True)
+        tk.Entry(ae_ef, textvariable=self.v_ae_video, font=FONT_SMALL,
+                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
+                ).pack(side='left', fill='x', expand=True)
+        tk.Button(ae_ef, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
+                 relief='flat', bd=0, cursor='hand2', padx=6,
+                 command=lambda: self.v_ae_video.set(
+                     filedialog.askopenfilename(
+                         filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')]
+                     ) or self.v_ae_video.get())
+                 ).pack(side='right')
+        tk.Button(inner, text='Use Clip Finder video', font=FONT_SMALL,
+                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8,
+                 command=lambda: self.v_ae_video.set(self.v_video.get())
+                 ).pack(side='left', padx=8)
+
+        # ── Output ────────────────────────────────────────────────────────────
+        out_row = tk.Frame(sec, bg=BG2); out_row.pack(fill='x', padx=12, pady=(0,8))
+        tk.Label(out_row, text='Output:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        self.v_ae_out = tk.StringVar(value=self.cfg.get('outdir',''))
+        ae_of = tk.Frame(out_row, bg=BG3); ae_of.pack(side='left', fill='x', expand=True)
+        tk.Entry(ae_of, textvariable=self.v_ae_out, font=FONT_SMALL,
+                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
+                ).pack(side='left', fill='x', expand=True)
+        tk.Button(ae_of, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
+                 relief='flat', bd=0, cursor='hand2', padx=6,
+                 command=lambda: self.v_ae_out.set(
+                     filedialog.askdirectory(title='Output folder') or self.v_ae_out.get())
+                 ).pack(side='right')
+
+        # ── Settings ──────────────────────────────────────────────────────────
+        set_sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
+        set_sec.pack(fill='x', padx=16, pady=(0,8))
+        set_inner = tk.Frame(set_sec, bg=BG2); set_inner.pack(fill='x', padx=12, pady=10)
+
+        tk.Label(set_inner, text='Silence removal:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
+        self.v_ae_mode = tk.StringVar(value='balanced')
+        for val, lbl_txt, hint in [
+            ('light',      'Light',      '-45dB — only long pauses'),
+            ('balanced',   'Balanced',   '-35dB — recommended'),
+            ('aggressive', 'Aggressive', '-25dB — tight cuts'),
+        ]:
+            f = tk.Frame(set_inner, bg=BG2); f.pack(side='left', padx=(12,0))
+            tk.Radiobutton(f, text=lbl_txt, variable=self.v_ae_mode, value=val,
+                          font=FONT_SMALL, fg=FG, bg=BG2,
+                          selectcolor=BG3, activebackground=BG2,
+                          cursor='hand2').pack(side='left')
+            tk.Label(f, text=hint, font=('Segoe UI',7), fg=FG3, bg=BG2).pack(side='left', padx=(2,0))
+
+
+
+        # ── Run button ────────────────────────────────────────────────────────
+        btn_row = tk.Frame(p, bg=BG); btn_row.pack(fill='x', padx=16, pady=8)
+        tk.Button(btn_row, text='⚡  RUN AUTO EDIT',
+                 font=('Segoe UI',10,'bold'), bg=ACCENT, fg='#000',
+                 relief='flat', bd=0, cursor='hand2', padx=20, pady=8,
+                 command=self._run_auto_edit_sub).pack(side='left')
+        tk.Label(btn_row, text='Removes silence in one ffmpeg pass — no glitches',
+                font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left', padx=12)
+
+        # ── Status ────────────────────────────────────────────────────────────
+        self.ae_status_lbl = tk.Label(p, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
+        self.ae_status_lbl.pack(fill='x', padx=20, pady=4)
+
+    def _run_auto_edit_sub(self):
+        """Run silence removal via ffmpeg silenceremove filter — one pass, no glitches."""
+        vid = self.v_ae_video.get().strip()
+        out = self.v_ae_out.get().strip()
+        if not vid or not Path(vid).exists():
+            messagebox.showerror('No video', 'Select a video file first.'); return
+        if not out:
+            messagebox.showerror('No output', 'Select an output folder first.'); return
+
+        ff = ensure_ffmpeg()
+        if not ff:
+            messagebox.showerror('ffmpeg missing', 'Install ffmpeg in Settings → Core Dependencies.'); return
+
+        mode = self.v_ae_mode.get()
+        db = {'light': '-45', 'balanced': '-35', 'aggressive': '-25'}.get(mode, '-35')
+
+
+        Path(out).mkdir(parents=True, exist_ok=True)
+        stem = Path(vid).stem
+        out_path = str(Path(out) / f'{stem} - ClipFinder.mp4')
+
+        self.set_busy(True)
+        self.ae_status_lbl.config(text='⏳ Processing...', fg=ACCENT2)
+        self.log(f'⚡ Auto Edit: {stem} [{mode}]', ACCENT2)
+
+        def _run():
+            try:
+                import subprocess as _sp, re as _re2, tempfile as _tmp2
+                _ensure_pkgs_on_path()
+
+                # Step 1: Transcribe to get word timestamps
+                self.log('[Auto Edit] Transcribing for word-level cuts...', FG2)
+                self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Transcribing...', fg=ACCENT2))
+                _wm = self.v_whisper.get() if hasattr(self,'v_whisper') else 'base'
+                if _wm in ('auto',''):
+                    _wm = 'base'
+                try:
+                    result = _do_transcribe(vid, _wm, ffmpeg_path=ff, use_word_timestamps=True)
+                    segs = result.get('segments', [])
+                    words = []
+                    for seg in segs:
+                        for w in seg.get('words', []):
+                            words.append((w['start'], w['end']))
+                    self.log(f'[Auto Edit] Got {len(words)} word timestamps', FG2)
+                except Exception as _te:
+                    self.log(f'[Auto Edit] Transcription failed: {_te} — using silence detection only', YELLOW)
+                    words = []
+
+                # Step 2: Build keep segments from word timestamps + silence gaps
+                self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Detecting silence...', fg=ACCENT2))
+                _sil = _sp.run([ff,'-i',vid,'-af',f'silencedetect=noise={db}dB:d=0.3',
+                                '-f','null','-'], capture_output=True, text=True, timeout=300)
+                sil_starts = [float(m) for m in _re2.findall(r'silence_start: ([\d.]+)', _sil.stderr)]
+                sil_ends   = [float(m) for m in _re2.findall(r'silence_end: ([\d.]+)', _sil.stderr)]
+                self.log(f'[Auto Edit] Found {len(sil_starts)} silence gaps', FG2)
+
+                # Get total duration
+                _di = _sp.run([ff,'-i',vid], capture_output=True, text=True, timeout=30)
+                _dm = _re2.search(r'Duration: (\d+):(\d+):([\d.]+)', _di.stderr)
+                total = (int(_dm.group(1))*3600 + int(_dm.group(2))*60 + float(_dm.group(3))) if _dm else 0
+
+                # Build keep list — snap cuts to word boundaries if we have them
+                def _snap_to_word(t, wds, snap='end'):
+                    """Snap timestamp to nearest word start or end boundary."""
+                    if not wds:
+                        return t
+                    best, best_d = t, float('inf')
+                    for ws, we in wds:
+                        boundary = we if snap == 'end' else ws
+                        d = abs(boundary - t)
+                        if d < best_d:
+                            best_d = d
+                            best = boundary
+                    # Only snap if within 0.5s — otherwise keep original
+                    return best if best_d < 0.5 else t
+
+                if sil_starts:
+                    keeps = []
+                    prev = 0.0
+                    for ss, se in zip(sil_starts, sil_ends):
+                        if ss > prev + 0.15:
+                            # Snap cut-out point to nearest word end
+                            # Snap cut-in point to nearest word start
+                            snap_ss = _snap_to_word(ss, words, snap='end')
+                            snap_se = _snap_to_word(se, words, snap='start')
+                            keeps.append((prev, snap_ss))
+                            prev = snap_se
+                        else:
+                            prev = se
+                    if total > prev + 0.15:
+                        keeps.append((prev, total))
+                else:
+                    keeps = [(0, total)] if total else []
+
+                if words:
+                    self.log(f'[Auto Edit] Word-boundary cuts applied ({len(words)} words)', FG2)
+
+                if not keeps:
+                    self.log('[Auto Edit] Nothing to cut', YELLOW)
+                    self.after(0, lambda: self.ae_status_lbl.config(text='Nothing to cut', fg=YELLOW))
+                    return
+
+                removed = total - sum(e-s for s,e in keeps)
+                self.log(f'[Auto Edit] Removing {removed:.1f}s silence, keeping {sum(e-s for s,e in keeps):.1f}s', FG2)
+
+                # Step 3: Extract and concat segments
+                self.after(0, lambda: self.ae_status_lbl.config(text=f'⏳ Cutting {len(keeps)} segments...', fg=ACCENT2))
+                concat_f = str(Path(_tmp2.gettempdir()) / f'ae_concat_{Path(vid).stem}.txt')
+                segs_out = []
+                with open(concat_f, 'w') as cf:
+                    for j, (ks, ke) in enumerate(keeps):
+                        seg_p = str(Path(_tmp2.gettempdir()) / f'ae_s_{j}.mp4')
+                        _sp.run([ff,'-y','-ss',str(ks),'-to',str(ke),'-i',vid,
+                                 '-c','copy',seg_p],
+                                stdout=_sp.PIPE, stderr=_sp.PIPE)
+                        cf.write(f"file '{seg_p}'\n")
+                        segs_out.append(seg_p)
+
+                # Step 4: Concat with CRF encode to fix size + AV sync
+                self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Encoding final video...', fg=ACCENT2))
+                _sp.run([ff,'-y','-f','concat','-safe','0','-i',concat_f,
+                         '-c:v','libx264','-crf','23','-preset','fast',
+                         '-c:a','aac','-b:a','192k', out_path],
+                        stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=3600)
+
+                # Cleanup
+                for sf in segs_out:
+                    try: Path(sf).unlink()
+                    except: pass
+
+                if Path(out_path).exists():
+                    orig_mb = Path(vid).stat().st_size/1024/1024
+                    new_mb  = Path(out_path).stat().st_size/1024/1024
+                    self.log(f'✅ Auto Edit done: {orig_mb:.0f}MB → {new_mb:.0f}MB (removed {removed:.0f}s)', GREEN)
+                    self.after(0, lambda: self.ae_status_lbl.config(
+                        text=f'✅ {Path(out_path).name} — {orig_mb:.0f}MB → {new_mb:.0f}MB', fg=GREEN))
+                else:
+                    self.log('❌ Output file not created', RED)
+                    self.after(0, lambda: self.ae_status_lbl.config(text='❌ Failed', fg=RED))
+
+            except Exception as _e:
+                import traceback as _tb
+                self.log(f'Auto Edit error: {_tb.format_exc()}', RED)
+                self.after(0, lambda: self.ae_status_lbl.config(text=f'❌ {_e}', fg=RED))
+            finally:
+                self.set_busy(False)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _build_trans_tab(self, p):
         # ── Top bar: standalone video input ──────────────────────────────────
@@ -3585,13 +3853,7 @@ class App(tk.Tk):
             names = self.interview_names_box.get('1.0','end').strip()
             self.cfg['interview_names'] = names
             save_cfg(self.cfg)
-        if mode == 'auto':
-            self.running = True
-            self.set_busy(True)
-            self._show_empty()
-            self.log('🎬 Auto Edit — finding best clips automatically...', ACCENT2)
-            threading.Thread(target=self._run_auto_edit_v2, daemon=True).start()
-            return
+
         self.running = True
         self.set_busy(True)
         self._show_empty()
@@ -3616,10 +3878,19 @@ class App(tk.Tk):
             import subprocess as _sp_ae, re as _re_ae, json as _js_ae
             self.set_progress('Auto Edit: analyzing video...', pct=5)
 
-            _dur_r = _sp_ae.run([ff, '-v', 'error', '-show_entries', 'format=duration',
-                                  '-of', 'default=noprint_wrappers=1:nokey=1', vid],
+            # Try ffmpeg stderr for duration (works on all file types)
+            _dur_r = _sp_ae.run([ff, '-i', vid],
                                  capture_output=True, text=True, timeout=30)
-            duration = float(_dur_r.stdout.strip() or 0)
+            _dm = _re_ae.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur_r.stderr)
+            if _dm:
+                _h, _m, _s = _dm.groups()
+                duration = int(_h)*3600 + int(_m)*60 + float(_s)
+            else:
+                # fallback to ffprobe
+                _dur_r2 = _sp_ae.run([ff, '-v', 'error', '-show_entries', 'format=duration',
+                                      '-of', 'default=noprint_wrappers=1:nokey=1', vid],
+                                     capture_output=True, text=True, timeout=30)
+                duration = float(_dur_r2.stdout.strip() or 300)
             self.log(f'[Auto Edit] Video: {duration:.0f}s ({duration/60:.1f}min)', FG2)
 
             # Step 2: Detect silence gaps — find non-silent segments
@@ -3642,6 +3913,7 @@ class App(tk.Tk):
 
             # Step 4: Transcribe for AI context
             self.set_progress('Auto Edit: transcribing...', pct=40)
+            _ensure_pkgs_on_path()
             _wm = self.v_whisper.get()
             if _wm in ('auto', ''):
                 _wm = 'base' if duration < 1800 else 'small'
@@ -3650,7 +3922,7 @@ class App(tk.Tk):
                 transcript = result.get('text', '')
                 _segs = result.get("segments", [])
                 self.transcript = "\n".join(
-                    "[" + _fmt_ts(s["start"]) + " -> " + _fmt_ts(s["end"]) + "] " + s["text"].strip()
+                    "[" + ts(s["start"]) + " -> " + ts(s["end"]) + "] " + s["text"].strip()
                     for s in _segs)
                 self.log(f'[Auto Edit] Transcribed: {len(transcript.split())} words', FG2)
             except Exception as te:
@@ -3660,23 +3932,39 @@ class App(tk.Tk):
             # Step 5: Ask AI to pick the best clips using all the data
             self.set_progress('Auto Edit: AI selecting clips...', pct=60)
             self._current_energy_peaks = energy_peaks
-            if transcript:
-                threading.Thread(target=self._run_ai, daemon=True).start()
-                self.log('[Auto Edit] AI clip selection running...', FG2)
-            else:
-                # No transcript — just use energy peaks as clip candidates
+
+            if transcript and getattr(self, 'transcript', ''):
+                self.log('[Auto Edit] Sending to AI for clip selection...', FG2)
+                # Trigger AI analysis — reuse existing pipeline
+                # _run_transcribe with then_ai=True handles the full AI flow
+                # We already have transcript set, so just run the AI part
+                self.running = True
+                try:
+                    self._run_transcribe(then_ai=True)
+                    return  # _run_transcribe handles busy/running cleanup
+                except Exception as _ai_err:
+                    self.log(f'[Auto Edit] AI error: {_ai_err}', YELLOW)
+                    transcript = ''
+
+            if not transcript:
                 clips = []
                 for i, peak in enumerate(energy_peaks[:6]):
                     start = max(0, peak - 30)
                     end   = min(duration, peak + 60)
                     clips.append({
-                        'start': _fmt_ts(start), 'end': _fmt_ts(end),
+                        'start': ts(start), 'end': ts(end),
                         'title': f'Energy Peak {i+1}',
                         'score': 8, 'reason': 'High audio energy moment'
                     })
-                self.after(0, lambda c=clips: self._show_clips(c))
-                self.set_progress(f'Auto Edit: {len(clips)} clips found!', pct=100)
-                self.log(f'[Auto Edit] Done: {len(clips)} clips from energy peaks', GREEN)
+                if clips:
+                    def _display(c=clips):
+                        self.clips = c
+                        self._render_clips()
+                        self.set_progress(f'Auto Edit: {len(c)} clips found!', pct=100)
+                    self.after(0, _display)
+                    self.log(f'[Auto Edit] ✅ {len(clips)} clips ready', GREEN)
+                else:
+                    self.log('[Auto Edit] No clips found', YELLOW)
 
         except Exception:
             import traceback as _tb
@@ -3894,7 +4182,11 @@ class App(tk.Tk):
                 temperature=0.3, max_tokens=4096)
             raw = resp.choices[0].message.content.strip()
 
-        clean = re.sub(r'```json|```', '', raw).strip()
+        # Strip markdown code fences — multiple patterns
+        clean = raw.strip()
+        clean = re.sub(r'^```(?:json)?\s*', '', clean, flags=re.MULTILINE)
+        clean = re.sub(r'```\s*$', '', clean, flags=re.MULTILINE)
+        clean = clean.strip()
         s, e = clean.find('['), clean.rfind(']')
         if s != -1 and e > s:
             clean = clean[s:e+1]
@@ -4171,8 +4463,8 @@ class App(tk.Tk):
         self._clip_tk_imgs = []
         vid = self.v_video.get()
 
-        # 3-column grid — auto-scales to window width
-        COLS = 3
+        # 2-column grid — wider cards, more readable
+        COLS = 2
         for c in range(COLS):
             self.clip_frame.columnconfigure(c, weight=1, uniform='clipcol')
 
@@ -4412,7 +4704,8 @@ class App(tk.Tk):
                     self.set_progress(f'Censoring clip {i+1}/{len(sel)}...', step=1, total=2, pct=int(i/len(sel)*100))
                     start_t = clip['_sv'].get() if '_sv' in clip else clip.get('start','00:00:00')
                     end_t   = clip['_ev'].get() if '_ev' in clip else clip.get('end','00:01:00')
-                    title   = re.sub(r'[\\/:*?"<>|\']','', clip.get('title','clip'))[:30]
+                    _ct = clip.get('title','clip')
+                    title = re.sub(r'[\\/:*?"<>|\']', '', _ct).strip()[:45] or 'Clip'
                     # First export the clip
                     tmp_clip = str(Path(_tmp.gettempdir()) / f'cf_censor_clip_{i}.mp4')
                     _vcodec, _acodec, _extra = get_encoder(ff)
@@ -4539,6 +4832,113 @@ class App(tk.Tk):
             import traceback; print('[CF] mp3 row error:', traceback.format_exc())
 
 
+
+    def _auto_edit_selected(self):
+        """Auto Edit selected clips — removes silence, tightens pacing CapCut-style."""
+        sel = [self.clips[i] for i, v in enumerate(self.clip_vars) if v.get()]
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select at least one clip first.')
+            return
+        ff = ensure_ffmpeg()
+        if not ff:
+            messagebox.showerror('ffmpeg missing', 'Install ffmpeg in Settings → Core Dependencies.')
+            return
+        out = self.v_outdir.get().strip()
+        if not out:
+            messagebox.showerror('No output folder', 'Set an output folder first.')
+            return
+        vid = self.v_video.get()
+        self.set_busy(True)
+        self.log(f'⚡ Auto Edit: processing {len(sel)} clip(s)...', ACCENT2)
+
+        def _run():
+            try:
+                import subprocess as _sp, re as _re, tempfile as _tmp
+                for i, clip in enumerate(sel):
+                    self.set_progress(f'Auto Edit: clip {i+1}/{len(sel)}...', pct=int(i/len(sel)*100))
+                    start_t = clip.get('_sv') and clip['_sv'].get() or clip.get('start','00:00:00')
+                    end_t   = clip.get('_ev') and clip['_ev'].get() or clip.get('end','00:01:00')
+                    _at = clip.get('title','clip')
+                    title = re.sub(r'[\\/:*?"<>|]', '', _at).strip()[:45] or 'Clip'
+
+                    # Step 1: Extract raw clip
+                    raw = str(Path(_tmp.gettempdir()) / f'ae_raw_{i}.mp4')
+                    _vcodec, _acodec, _extra = get_encoder(ff)
+                    _sp.run([ff,'-y','-ss',start_t,'-to',end_t,'-i',vid,
+                             '-c:v',_vcodec,'-c:a',_acodec]+_extra+[raw],
+                            stdout=_sp.PIPE, stderr=_sp.PIPE)
+
+                    # Step 2: Detect silence
+                    _sil = _sp.run([ff,'-i',raw,'-af','silencedetect=noise=-35dB:d=0.3',
+                                    '-f','null','-'], capture_output=True, text=True)
+                    sil_starts = [float(m) for m in _re.findall(r'silence_start: ([\d.]+)', _sil.stderr)]
+                    sil_ends   = [float(m) for m in _re.findall(r'silence_end: ([\d.]+)', _sil.stderr)]
+
+                    if not sil_starts:
+                        # No silence — just copy
+                        import shutil as _sh
+                        _sh.copy2(raw, str(Path(out) / f'{title} - ClipFinder - Part {i+1}.mp4'))
+                        self.log(f'  Clip {i+1}: no silence detected, exported as-is', FG2)
+                        continue
+
+                    # Step 3: Build keep segments (non-silent parts)
+                    keeps = []
+                    prev = 0.0
+                    for ss, se in zip(sil_starts, sil_ends):
+                        if ss > prev + 0.1:
+                            keeps.append((prev, ss))
+                        prev = se
+                    # Get duration
+                    _dur = _sp.run([ff,'-i',raw], capture_output=True, text=True)
+                    _dm = _re.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur.stderr)
+                    if _dm:
+                        h,m,s = _dm.groups()
+                        total = int(h)*3600+int(m)*60+float(s)
+                        if total > prev + 0.1:
+                            keeps.append((prev, total))
+
+                    if not keeps:
+                        self.log(f'  Clip {i+1}: all silence, skipping', YELLOW)
+                        continue
+
+                    # Step 4: Concat non-silent segments
+                    concat_list = str(Path(_tmp.gettempdir()) / f'ae_list_{i}.txt')
+                    seg_files = []
+                    with open(concat_list, 'w') as cf:
+                        for j, (ks, ke) in enumerate(keeps):
+                            seg = str(Path(_tmp.gettempdir()) / f'ae_seg_{i}_{j}.mp4')
+                            _sp.run([ff,'-y','-ss',str(ks),'-to',str(ke),'-i',raw,
+                                     '-c','copy',seg],
+                                    stdout=_sp.PIPE, stderr=_sp.PIPE)
+                            cf.write(f"file '{seg}'\n")
+                            seg_files.append(seg)
+
+                    out_path = str(Path(out) / f'{title} - ClipFinder - Part {i+1}.mp4')
+                    _sp.run([ff,'-y','-f','concat','-safe','0','-i',concat_list,
+                             '-c','copy', out_path],
+                            stdout=_sp.PIPE, stderr=_sp.PIPE)
+
+                    removed = sum(e-s for s,e in zip(sil_starts, sil_ends))
+                    self.log(f'  ✅ Clip {i+1}: removed {removed:.1f}s silence → {out_path.split(chr(92))[-1]}', GREEN)
+
+                    # Cleanup
+                    for f2 in seg_files:
+                        try: Path(f2).unlink()
+                        except: pass
+                    try: Path(raw).unlink()
+                    except: pass
+
+                self.set_progress(f'⚡ Auto Edit done! {len(sel)} clips processed', pct=100)
+                self.after(0, lambda: messagebox.showinfo('Auto Edit Done',
+                    f'Processed {len(sel)} clip(s)\nSaved to: {out}'))
+            except Exception:
+                import traceback as _tb
+                self.log(f'Auto Edit error:\n{_tb.format_exc()}', RED)
+            finally:
+                self.set_busy(False)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _export_or_censor(self):
         """Export selected clips — with censoring if censor toggle is on."""
         if getattr(self, 'censor_toggle', None) and self.censor_toggle.get():
@@ -4633,8 +5033,9 @@ class App(tk.Tk):
             for i, clip in enumerate(clips):
                 start  = clip.get('start','00:00:00')
                 end    = clip.get('end','00:01:00')
-                fname_base = re.sub(r'[\\/:*?"<>|]','', clip.get('_fname',clip.get('title','clip')))[:50]
-                fname  = f'{base}_q{qi+1}_clip{i+1}_{fname_base}.mp4'
+                _raw_title = clip.get('_fname', clip.get('title', 'clip'))
+                fname_base = re.sub(r'[\\/:*?"<>|]', '', _raw_title).strip()[:45] or 'Clip'
+                fname  = f'{fname_base} - ClipFinder - Part {i+1}.mp4'
                 dest   = str(Path(out)/fname)
                 self.log(f'  Cutting: {fname}')
                 _vcodec, _acodec, _extra = get_encoder(ff)
@@ -4814,7 +5215,7 @@ class App(tk.Tk):
             else:
                 title = re.sub(r'[\\/:*?"<>|]', '', clip.get('title','clip'))[:40]
 
-            fname = f'{base}_clip{i+1}_{title}.mp4'
+            fname = f'{title} - ClipFinder - Part {i+1}.mp4'
             dest  = str(Path(out) / fname)
             self.log(f'Cutting [{start} → {end}]: {fname}')
             _vcodec, _acodec, _extra = get_encoder(ff)
@@ -4853,7 +5254,7 @@ class App(tk.Tk):
                         _r = subprocess.run(_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return _r.returncode == 0
 
-            dest_v = str(Path(out) / f'{base}_clip{i+1}_{title}_9x16.mp4')
+            dest_v = str(Path(out) / f'{title} - ClipFinder - Part {i+1} 9x16.mp4')
             if _crop_mode == 'normal':
                 if _run_fmt(dest): ok += 1; self.log(f'Saved: {fname}', GREEN)
                 else: self.log(f'Failed: {fname}', RED)
@@ -5312,7 +5713,7 @@ class App(tk.Tk):
 
             ydl_opts = {
                 'format': fmt,
-                'outtmpl': str(Path(_out_folder) / '%(uploader)s - %(title)s.%(ext)s'),
+                'outtmpl': str(Path(_out_folder) / '%(uploader)s - %(title)s - ClipFinder.%(ext)s'),
                 'postprocessors': pp,
                 'quiet': False,
                 'no_warnings': False,
@@ -5344,6 +5745,8 @@ class App(tk.Tk):
                     from curl_cffi import requests as _cffi
                     _hdrs = {'Referer': 'https://kick.com/', 'Accept': 'application/json',
                              'Accept-Language': 'en-US,en;q=0.9'}
+                    _kick_title    = None
+                    _kick_streamer = None
                     if clip_match:
                         clip_id = clip_match.group(1)
                         self._dl_log_write('🔧  Kick clip — Chrome impersonation...', FG2)
@@ -5353,10 +5756,15 @@ class App(tk.Tk):
                             cd = _resp.json()
                             video_url = (cd.get('clip_url') or cd.get('video_url') or
                                         (cd.get('clip') or {}).get('video_url'))
+                            # Grab streamer + title for filename
+                            _kick_streamer = (cd.get('channel', {}).get('slug') or
+                                             cd.get('broadcaster', {}).get('username') or
+                                             cd.get('streamer', {}).get('username'))
+                            _kick_title = (cd.get('title') or cd.get('clip_title') or
+                                          (cd.get('clip') or {}).get('title'))
                     elif vod_match:
                         vod_id = vod_match.group(1)
                         self._dl_log_write('🔧  Kick VOD — Chrome impersonation...', FG2)
-                        # Try v1/video endpoint
                         for ep in [f'v1/video/{vod_id}', f'v2/videos/{vod_id}']:
                             _resp = _cffi.get(f'https://kick.com/api/{ep}',
                                               impersonate='chrome120', headers=_hdrs, timeout=15)
@@ -5365,6 +5773,9 @@ class App(tk.Tk):
                                 video_url = (vd.get('source') or vd.get('playback_url') or
                                             vd.get('hls_url') or vd.get('video_url') or
                                             (vd.get('livestream') or {}).get('source'))
+                                _kick_streamer = (vd.get('channel', {}).get('slug') or
+                                                 vd.get('user', {}).get('username'))
+                                _kick_title = vd.get('session_title') or vd.get('title')
                                 if video_url: break
                 except Exception as ke:
                     self._dl_log_write(f'⚠️  curl_cffi: {ke}', YELLOW)
@@ -5372,6 +5783,13 @@ class App(tk.Tk):
                     self._dl_log_write('✅  Got Kick URL', FG2)
                     url = video_url
                     ydl_opts['format'] = 'best'
+                    # Override outtmpl with clean Kick name
+                    if _kick_streamer or _kick_title:
+                        import re as _re_k
+                        _ks = _re_k.sub(r'[\/:*?"<>|]', '', _kick_streamer or 'Kick').strip()
+                        _kt = _re_k.sub(r'[\/:*?"<>|]', '', _kick_title or 'clip').strip()[:60]
+                        ydl_opts['outtmpl'] = str(Path(_out_folder) / f'{_ks} - {_kt} - ClipFinder.%(ext)s')
+                        self._dl_log_write(f'📁  Name: {_ks} - {_kt} - ClipFinder', FG2)
                 else:
                     self._dl_log_write('⚠️  Kick API failed — trying yt-dlp...', YELLOW)
                 ydl_opts['http_headers'] = {
@@ -6954,7 +7372,7 @@ class App(tk.Tk):
                 self.log('Exporting segments...')
                 for i, seg in enumerate(kept):
                     title = re.sub(r'[\\/:*?"<>|\']','',seg.get('title','segment'))[:30]
-                    fname = f'{base}_auto_{i+1:02d}_{title}.mp4'
+                    fname = f'{title} - ClipFinder - Part {i+1:02d}.mp4'
                     dest  = str(Path(out)/fname)
                     _vcodec, _acodec, _extra = get_encoder(ff)
                     _hw_args = []
@@ -6967,7 +7385,7 @@ class App(tk.Tk):
                     exp_title = seg['_name_var'].get() if '_name_var' in seg else title
                     if exp_title != title:
                         _st = re.sub(r'[\\/:*?"<>|\']', '', exp_title)[:30]
-                        fname = f'{base}_auto_{i+1:02d}_{_st}.mp4'
+                        fname = f'{_st} - ClipFinder - Part {i+1:02d}.mp4'
                         dest  = str(Path(out)/fname)
                     r = subprocess.run(
                         [ff,'-y']+_hw_args+['-ss',exp_start,'-to',exp_end,'-i',vid,
