@@ -515,8 +515,7 @@ PROVIDERS = {
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
         'models': [
-            'mistralai/mistral-small-3.1-24b-instruct:free',  # updated mistral free model
-            'qwen/qwen3-8b:free',                      # high limits
+                        'qwen/qwen3-8b:free',                      # high limits
             'google/gemma-3-12b-it:free',              # good quality
             'microsoft/phi-3-mini-128k-instruct:free', # huge context
             'meta-llama/llama-3.1-8b-instruct:free',   # high limits
@@ -3137,6 +3136,7 @@ class App(tk.Tk):
 
                 # Step 1: Transcribe to get word timestamps
                 self.log('[Auto Edit] Transcribing for word-level cuts...', FG2)
+                if getattr(self, '_cancel_requested', False): return
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Transcribing...', fg=ACCENT2))
                 self.set_progress('Auto Edit: transcribing...', pct=10)
                 _wm = self.v_whisper.get() if hasattr(self,'v_whisper') else 'base'
@@ -3708,7 +3708,8 @@ class App(tk.Tk):
             self.after(0, _do)
 
     def set_busy(self, busy):
-        self._cancel_requested = False  # reset on each task start/end
+        if busy:
+            self._cancel_requested = False  # only reset when STARTING a new task
         state = 'disabled' if busy else 'normal'
         try: self.go_btn.config(state=state)
         except: pass
@@ -3931,6 +3932,7 @@ class App(tk.Tk):
             # Step 1: Get video duration
             import subprocess as _sp_ae, re as _re_ae, json as _js_ae
             self.set_progress('Auto Edit: analyzing video...', pct=5)
+            if getattr(self, '_cancel_requested', False): return
 
             # Try ffmpeg stderr for duration (works on all file types)
             _dur_r = _sp_ae.run([ff, '-i', vid],
@@ -3961,12 +3963,14 @@ class App(tk.Tk):
 
             # Step 3: Audio energy peaks
             self.set_progress('Auto Edit: finding reaction moments...', pct=30)
+            if getattr(self, '_cancel_requested', False): return
             energy_peaks = _analyze_audio_energy(vid, ff, num_peaks=15)
             if energy_peaks:
                 self.log(f'[Auto Edit] {len(energy_peaks)} energy peaks detected', FG2)
 
             # Step 4: Transcribe for AI context
             self.set_progress('Auto Edit: transcribing...', pct=40)
+            if getattr(self, '_cancel_requested', False): return
             _ensure_pkgs_on_path()
             _wm = self.v_whisper.get()
             if _wm in ('auto', ''):
@@ -4116,7 +4120,12 @@ class App(tk.Tk):
             self.log(f'Transcription done: {segs} segments, {words:,} words', GREEN)
 
             if then_ai:
-                self._run_ai()
+                if not getattr(self, '_cancel_requested', False):
+                    self._run_ai()
+                else:
+                    self.log('⛔ Cancelled — skipping AI', YELLOW)
+                    self.running = False
+                    self.after(0, lambda: self.set_busy(False))
             else:
                 self.running = False
                 self.after(0, lambda: self.set_busy(False))
@@ -4301,6 +4310,11 @@ class App(tk.Tk):
         raise ValueError(f'Could not parse AI response. Raw start: {raw[:200]}')
 
     def _run_ai(self):
+        if getattr(self, '_cancel_requested', False):
+            self.log('⛔ AI cancelled before start', YELLOW)
+            self.running = False
+            self.after(0, lambda: self.set_busy(False))
+            return
         _ensure_pkgs_on_path()
         try:
             primary   = self.v_provider.get()
@@ -4407,6 +4421,11 @@ class App(tk.Tk):
                             _mark_rl(prov)
                             self.log(f'[{label}] {prov} rate-limited, trying next...', YELLOW)
                             continue
+                        elif '404' in s or 'no endpoints' in s:
+                            # Dead model — skip permanently this session
+                            _mark_rl(prov)
+                            self.log(f'[{label}] {prov} model unavailable (404), skipping...', YELLOW)
+                            continue
                         elif '403' in s or 'access denied' in s or 'forbidden' in s:
                             self.log(f'[{label}] {prov} access denied, skipping...', YELLOW)
                             continue
@@ -4485,8 +4504,14 @@ class App(tk.Tk):
                 # Stagger start to avoid thundering herd on free APIs
                 _time.sleep(idx * 0.8)
 
+                # Check cancel before starting
+                if getattr(self, '_cancel_requested', False):
+                    return
+
                 # Wait if global cooldown is active
                 while _cooling_down[0]:
+                    if getattr(self, '_cancel_requested', False):
+                        return
                     _time.sleep(2)
 
                 clips, used = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
@@ -4494,15 +4519,24 @@ class App(tk.Tk):
                 # Retry loop — up to 3 times with increasing cooldown
                 _retry = 0
                 while not clips and _retry < 3:
+                    # Check cancel before waiting
+                    if getattr(self, '_cancel_requested', False):
+                        return
                     _retry += 1
                     _wait = 30 * _retry  # 30s, 60s, 90s
                     with _rl_lock:
                         if not _cooling_down[0]:
                             _cooling_down[0] = True
                             self.log(f'[{label}] All providers rate-limited — waiting {_wait}s (attempt {_retry}/3)...', YELLOW)
-                    _time.sleep(_wait)
+                    # Sleep in small chunks so cancel works immediately
+                    for _ in range(_wait):
+                        if getattr(self, '_cancel_requested', False):
+                            return
+                        _time.sleep(1)
                     with _rl_lock:
                         _cooling_down[0] = False
+                    if getattr(self, '_cancel_requested', False):
+                        return
                     clips, used = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
 
                 if not clips:
@@ -4519,8 +4553,18 @@ class App(tk.Tk):
             # Sequential — one task at a time, 5s gap between each
             import time as _t_seq
             for i, (ch, pv, lb) in enumerate(assignments):
+                if getattr(self, '_cancel_requested', False):
+                    self.log('⛔ AI cancelled', YELLOW)
+                    break
                 if i > 0:
-                    _t_seq.sleep(5)
+                    # Check cancel during the 5s sleep too
+                    for _ in range(5):
+                        if getattr(self, '_cancel_requested', False):
+                            break
+                        _t_seq.sleep(1)
+                if getattr(self, '_cancel_requested', False):
+                    self.log('⛔ AI cancelled', YELLOW)
+                    break
                 _task_worker(i, ch, pv, lb)
 
             # Merge all results, deduplicate by start timestamp
@@ -4532,6 +4576,8 @@ class App(tk.Tk):
                         all_clips.append(clip)
 
             if not all_clips:
+                if getattr(self, '_cancel_requested', False):
+                    return
                 raise Exception('All providers failed or rate-limited. Try again in a few minutes.')
 
             # Sort by score desc
@@ -5212,6 +5258,7 @@ class App(tk.Tk):
                 self.log(f'[Queue {qi+1}] No output folder set', RED)
                 continue
             self.log(f'[Queue {qi+1}/{len(queue)}] {len(clips)} clips from: {Path(vid).name}')
+            if getattr(self, '_cancel_requested', False): return
             self.set_progress(f'Queue {qi+1}/{len(queue)}: {Path(vid).name}', pct=int(qi/len(queue)*100))
             Path(out).mkdir(parents=True, exist_ok=True)
             for i, clip in enumerate(clips):
@@ -5222,6 +5269,7 @@ class App(tk.Tk):
                 fname  = f'{fname_base} - ClipFinder - Part {i+1}.mp4'
                 dest   = str(Path(out)/fname)
                 self.log(f'  Cutting [{start} → {end}]: {fname}')
+                if getattr(self, '_cancel_requested', False): return
                 self.set_progress(f'Queue: cutting {fname[:40]}...', pct=int((qi*len(clips)+i+1)/(len(queue)*len(clips))*100))
                 _vcodec, _acodec, _extra = get_encoder(ff)
                 r = subprocess.run([ff,'-y','-ss',start,'-to',end,'-i',vid,
@@ -5404,6 +5452,7 @@ class App(tk.Tk):
             fname = f'{title} - ClipFinder - Part {i+1}.mp4'
             dest  = str(Path(out) / fname)
             self.log(f'Cutting [{start} → {end}]: {fname}')
+            if getattr(self, '_cancel_requested', False): return
             self.set_progress(f'✂ Exporting {i+1}/{len(clips)}: {title[:40]}...', pct=int(i/len(clips)*100))
             _vcodec, _acodec, _extra = get_encoder(ff)
             # Add hwaccel input decoding for GPU encoders
@@ -8880,6 +8929,7 @@ sys.exit(main())
 
                 # Step 3: Find stems and mix the ones we want
                 self.log('Step 3: Mixing selected stems...', FG2)
+                if getattr(self, '_cancel_requested', False): return
                 self.set_progress('🎵 Music Removal: mixing stems...', pct=75)
                 self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Mixing stems...', fg=ACCENT2))
                 # two-stems output: vocals.wav and no_vocals.wav
@@ -8920,6 +8970,7 @@ sys.exit(main())
 
                 # Step 4: Merge cleaned audio back with original video
                 self.log('Step 4: Merging with original video...', FG2)
+                if getattr(self, '_cancel_requested', False): return
                 self.set_progress('🎵 Music Removal: merging audio + video...', pct=90)
                 self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Merging audio + video...', fg=ACCENT2))
                 stem = Path(vid).stem
