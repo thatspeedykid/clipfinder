@@ -1,75 +1,67 @@
-# Changelog
+# ClipFinder Changelog
 
-## v1.1 — Coming Soon
+## v1.2 — April 2026 — Stable Release
 
 ### New Features
-- Hybrid clip detection — FFmpeg audio energy analysis fed into AI for smarter clip selection
-- In-app update checker — silent GitHub check on launch, non-intrusive bottom bar notification
-- Donate button in Settings footer
+- Auto Edit sub-tab inside Clip Finder — Whisper transcription + word-boundary silence cuts + CRF encode
+- Auto Edit button in clip export bar — silence removal on selected AI-found clips
+- VOD Mode in Downloader — 8x concurrent fragments, auto vod/ subfolder, toggle + auto-detect
+- Smart Auto Whisper — picks tiny/base/small/medium based on video duration + GPU
+- Floating log panel — Toplevel overlay, stays on top, buffers 500 messages, all tabs
+- Floating update notification — numeric version compare, only shows when newer version exists
+- 2-column clip grid — wider cards, readable titles and descriptions
+- Smart file naming — Streamer/Title - ClipFinder - Part N.mp4 for all exports
+- Kick API filename — pulls streamer slug + clip title from Kick API v2
+- Unified API key layout — all 4 providers identical row layout, correct order
+- Tabs stretched to fill full width
+- Tab colors — selected orange/black, unselected dark/orange
+- Sub-tabs inside Clip Finder — AI Clips | Auto Edit switcher
+- Version shown in header (v1.2) and status bar (ClipFinder 1.2 · @MarsScumbags)
+- Window icon fix — loads clipfinder.ico directly, no temp file race condition
+
+### Bug Fixes
+- AI response parsing — multiline code fence stripping with re.MULTILINE
+- Output folder persists on restart via trace_add
+- Transcript tab no longer requires output folder (need_outdir=False)
+- Whisper auto model maps to base, not ggml-auto.bin
+- mediapipe 0.10+ API compatibility
+- Audio energy analysis vid variable scope fixed
+- Both export (16:9 + 9:16) fixed for censor mode
+- imagehash detection fixed in Core Dependencies
+- Update All permission errors fixed for locked .pyd files
+- Duration detection uses ffmpeg stderr (works on all file types)
+
+### Known Issues
+- Censor queue not processing queued videos
+- Auto Edit transcription returns 0 words on some files (falls back to energy peaks)
+
+---
+
+## v1.1 — April 2026
+
+### New Features
+- Hybrid clip detection — FFmpeg audio energy peaks + AI scoring
+- In-app update checker — silent check on launch
+- Donate button in Settings
 - App icon in header
 
 ### Bug Fixes
-- Both export (16:9 + 9:16) now correctly exports both formats including with censor
-- Update All permission errors fixed for locked .pyd files
-- imagehash correctly detected in Core Dependencies after install
-- Single smart Install/Update button in Update Modules
-- Progress bar and status message count mismatch fixed
-- Browse buttons added for default output and download folders in Settings
-- Transcript log button fixed
-- Whisper auto model no longer tries to download non-existent ggml-auto.bin
+- Both export (16:9 + 9:16) fixed
+- Browse buttons for output/download folders in Settings
+- imagehash detection fixed
+- Permission errors on Update All
+- Cookies status live-updating in Downloader
 
 ---
 
 ## v1.0 — April 2026 — Initial Release
 
-### Features
-- AI clip detection using Gemini, Groq, and OpenRouter
-- GPU transcription — whisper.cpp (AMD/Intel Vulkan) + faster-whisper (NVIDIA/CPU)
-- Export 16:9, 9:16 vertical, or both simultaneously
-- Face tracking for vertical 9:16 crop via MediaPipe
-- Built-in downloader — Kick, Twitch, YouTube, Twitter/X
-- Tweet generator with Drama / Tea / Breaking / Hype tones
-- Auto-censor — beep, silence, or custom MP3
-- Thumbnail finder via Unsplash
-- Studio tab — AI upscaling (EDSR 4x)
-- Interview mode — multi-speaker clip detection
+- AI clip detection via Gemini, Groq, OpenRouter
+- GPU transcription — AMD/Intel Vulkan via whisper.cpp, NVIDIA CUDA via faster-whisper
+- 16:9 and 9:16 export with mediapipe face tracking
+- Built-in downloader — Kick, Twitch, YouTube, Twitter/X via yt-dlp
+- Tweet generator — Drama/Tea/Breaking/Hype tones
+- Auto-censor — beep, silence, custom MP3
+- Studio tab — AI upscaling EDSR 4x
+- Interview mode — multi-speaker detection
 - One-click dependency installer in Settings
-- AMD AMF / NVIDIA NVENC / Intel QSV GPU export acceleration
-- No Python required — embedded Python 3.12 bundled
-
-### Known Issues (fixed in v1.1)
-- Both export only saves horizontal version
-- Update All permission errors on locked packages while app is running
-- imagehash not detected in deps panel after install
-- Double Install All button in Update Modules
-- Progress bar / status message count mismatch
-- Settings missing browse buttons for output folders
-- Transcript log button unresponsive
-- Whisper auto model caused 404 error on ggml-auto.bin
-
-## v1.2 — April 2026 — Stable Release
-
-### New Features
-- Auto Edit mode — CapCut-style automatic editing with silence detection + audio energy peaks + AI
-- VOD Mode — 8x concurrent fragment downloads, auto vod/ subfolder for Twitch/Kick
-- Smart Auto whisper — picks model based on video duration + GPU detection
-- Floating log panel — independent overlay window, works on all tabs
-- Floating update notification — proper overlay, only shows when genuinely newer version exists
-
-### Bug Fixes
-- Both export (16:9 + 9:16) fixed for regular and censor export
-- Output folder now persists on restart
-- Transcript tab no longer requires output folder just to transcribe
-- imagehash correctly detected in Core Dependencies
-- Update All permission errors fixed for locked .pyd files
-- Whisper auto model no longer tries ggml-auto.bin (404)
-- mediapipe 0.10+ API updated
-- AI response parsing improved (backtick stripping)
-- Hybrid energy analysis vid scope bug fixed
-- Provider API keys unified layout — Gemini, Unsplash, Groq, OpenRouter
-- Version number shown in header and status bar
-- Window icon fixed (was using deleted temp file)
-
-### Known Issues
-- Censor queue not processing queued videos (fix in v1.3)
-- OpenRouter occasional response truncation on long videos
