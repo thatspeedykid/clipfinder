@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.3.1"
 
 import subprocess
 import sys
@@ -515,11 +515,11 @@ PROVIDERS = {
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
         'models': [
-                        'qwen/qwen3-8b:free',                      # high limits
-            'google/gemma-3-12b-it:free',              # good quality
-            'microsoft/phi-3-mini-128k-instruct:free', # huge context
-            'meta-llama/llama-3.1-8b-instruct:free',   # high limits
-            'meta-llama/llama-3.3-70b-instruct:free',  # smarter, lower limits
+                        'qwen/qwen3.6-plus:free',
+            'nvidia/nemotron-3-super-120b-a12b:free',
+            'meta-llama/llama-3.3-70b-instruct:free',
+            'meta-llama/llama-3.1-8b-instruct:free',
+            'google/gemma-3-12b-it:free',
         ],
         'url':    'https://openrouter.ai/keys',
         'note':   '50+ free models — no credit card needed',
@@ -1723,7 +1723,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.3 — AI Clip Extractor')
+        self.title('ClipFinder 1.3.1 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -1792,6 +1792,13 @@ class App(tk.Tk):
         self.srt_result = None
         self.running    = False
         self._cancel_requested = False
+        # Extra API keys per provider for round-robin rotation
+        self._extra_keys = {
+            'Google Gemini (Free)':    [k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()],
+            'Groq (Free)':             [k.strip() for k in self.cfg.get('key_groq_extra','').split(',') if k.strip()],
+            'OpenRouter (Free models)':[k.strip() for k in self.cfg.get('key_openrouter_extra','').split(',') if k.strip()],
+        }
+        self._key_index = {}
         self._whisper_segments = []
         # Thumbnail finder state
         self._thumb_results  = []
@@ -3229,9 +3236,10 @@ class App(tk.Tk):
                 # Step 4: Concat with CRF encode to fix size + AV sync
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Encoding final video...', fg=ACCENT2))
                 self.set_progress('Auto Edit: encoding...', pct=80)
+                # Use GPU encoder for quality + speed, fallback to x264 CRF 18
+                _ae_vcodec, _ae_acodec, _ae_extra = get_encoder(ff)
                 _sp.run([ff,'-y','-f','concat','-safe','0','-i',concat_f,
-                         '-c:v','libx264','-crf','23','-preset','fast',
-                         '-c:a','aac','-b:a','192k', out_path],
+                         '-c:v',_ae_vcodec,'-c:a',_ae_acodec]+_ae_extra+[out_path],
                         stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=3600)
 
                 # Cleanup
@@ -4152,61 +4160,86 @@ class App(tk.Tk):
 
     # ── AI call helpers ───────────────────────────────────────────────────────
 
+    def _call_with_key(self, prov_name, key, model, data):
+        """Make a single API call with a specific key. Raises on failure."""
+        lib = data['lib']
+        if lib == 'gemini':
+            from google import genai as _g
+            client = _g.Client(api_key=key)
+            all_models = data['models']
+            try_models = [model] + [m for m in all_models if m != model]
+            last_err = None
+            for try_model in try_models:
+                try:
+                    resp = client.models.generate_content(
+                        model=try_model, contents=self._current_prompt,
+                        config={'temperature': 0.3, 'max_output_tokens': 4096})
+                    return resp.text.strip()
+                except Exception as _e:
+                    if '429' in str(_e) or 'RESOURCE_EXHAUSTED' in str(_e):
+                        last_err = _e; continue
+                    raise
+            raise last_err or Exception('Gemini quota exhausted')
+        elif lib == 'groq':
+            from groq import Groq as _G
+            resp = _G(api_key=key).chat.completions.create(
+                model=model,
+                messages=[{'role': 'user', 'content': self._current_prompt}],
+                temperature=0.3, max_tokens=4096)
+            return resp.choices[0].message.content.strip()
+        elif lib == 'openrouter':
+            from openai import OpenAI as _O
+            _or = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
+            resp = _or.chat.completions.create(
+                model=model,
+                messages=[{'role': 'user', 'content': self._current_prompt}],
+                temperature=0.3, max_tokens=8192)
+            choice = resp.choices[0]
+            raw = choice.message.content.strip()
+            if choice.finish_reason == 'length' and len(raw) > 100:
+                self.log('[OpenRouter] Truncated — retrying condensed', YELLOW)
+                resp2 = _or.chat.completions.create(
+                    model=model,
+                    messages=[{'role': 'user', 'content': self._current_prompt[:len(self._current_prompt)//2] + '\n\n[Top 3 clips as JSON only]'}],
+                    temperature=0.3, max_tokens=4096)
+                raw = resp2.choices[0].message.content.strip()
+            return raw
+        raise ValueError(f'Unknown lib: {lib}')
+
     def _call_provider(self, prov_name, transcript_chunk):
-        """Call a single provider. Returns list of clip dicts or raises."""
+        """Call a single provider, rotating through all configured keys. Returns clip list or raises."""
         data  = PROVIDERS[prov_name]
         lib   = data['lib']
-        key   = self._keys.get(prov_name, '').strip()
         model = self.v_model.get() if self.v_provider.get() == prov_name else data['models'][0]
 
-        if not key:
-            raise ValueError(f'No API key saved for {prov_name}')
+        # Key pool: primary + extras
+        _primary = self._keys.get(prov_name, '').strip()
+        _extras  = getattr(self, '_extra_keys', {}).get(prov_name, [])
+        _key_pool = [k for k in [_primary] + list(_extras) if k]
+        if not _key_pool:
+            raise ValueError(f'No API key for {prov_name}')
 
-        # Build context + section note for this chunk
+        # Build prompt
         ctx_raw = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
         context_block = f'VIDEO CONTEXT: {ctx_raw}\n' if ctx_raw else ''
-        # Names block — helps AI identify speakers correctly
         _names_raw = ''
         if hasattr(self, 'v_names'):
             _nv = self.v_names.get().strip()
             _ph = 'Mizkif, xQc, HasanAbi...'
             if _nv and _nv != _ph:
                 _names_raw = _nv
-        names_block = (f'PEOPLE IN THIS VIDEO: {_names_raw}\n'
-                      f'Use these names when identifying who is speaking or being talked about. '
-                      f'If you hear a name in the transcript that matches, use it in the title and description.\n'
-                      ) if _names_raw else ''
-
-        # Inject energy peaks if available from hybrid analysis
+        names_block = (f'PEOPLE IN THIS VIDEO: {_names_raw}\nUse these names in titles and descriptions.\n') if _names_raw else ''
         _ep = getattr(self, '_current_energy_peaks', [])
         if _ep:
-            _ep_str = ', '.join(f'{t:.0f}s' for t in _ep)
-            context_block += (
-                f'AUDIO ENERGY PEAKS (loud/reaction moments — prioritize clips near these): {_ep_str}\n'
-                f'These timestamps have the highest audio energy — shouting, reactions, key moments.\n'
-            )
-
-        # Detect timestamp range of this chunk so AI knows what section it covers
+            context_block += f'AUDIO ENERGY PEAKS: {", ".join(f"{t:.0f}s" for t in _ep)}\n'
         import re as _re
         ts_matches = _re.findall(r'\[(\d{2}:\d{2}:\d{2})', transcript_chunk)
-        if len(ts_matches) >= 2:
-            section_note = f'SECTION: {ts_matches[0]} → {ts_matches[-1]}. Find the best clips within this time range only.\n'
-        else:
-            section_note = ''
-
-        # Interview or normal prompt
+        section_note = f'SECTION: {ts_matches[0]} → {ts_matches[-1]}. Find clips within this range only.\n' if len(ts_matches) >= 2 else ''
         app_mode = self.app_mode.get() if hasattr(self,'app_mode') else 'normal'
         if app_mode == 'interview':
-            # Use shared Names field — same as normal mode
             _ph = 'Mizkif, xQc, HasanAbi...'
-            names = ''
-            if hasattr(self, 'v_names'):
-                _nv = self.v_names.get().strip()
-                if _nv and _nv != _ph:
-                    names = _nv
-            if not names and hasattr(self, 'interview_names_box'):
-                try: names = self.interview_names_box.get('1.0','end').strip()
-                except: pass
+            names = self.v_names.get().strip() if hasattr(self,'v_names') else ''
+            if names == _ph: names = ''
             names_list = ', '.join(n.strip() for n in names.splitlines() if n.strip()) or 'Unknown'
             prompt = INTERVIEW_CLIP_PROMPT.replace('{transcript}', transcript_chunk) \
                                           .replace('{names}', names_list) \
@@ -4215,67 +4248,94 @@ class App(tk.Tk):
             prompt = AI_PROMPT.replace('{transcript}', transcript_chunk) \
                                .replace('{context_block}', context_block + section_note) \
                                .replace('{names_block}', names_block)
-        raw = None
 
-        if lib == 'gemini':
+        # Try each key in pool — rotate on rate limit
+        _last_err = None
+        for _ki, key in enumerate(_key_pool):
             try:
-                from google import genai as _g
-            except ImportError:
-                raise ImportError('google-genai not installed. Go to Settings → Update Modules to install it.')
-            client = _g.Client(api_key=key)
-            all_models = data['models']
-            try_models = [model] + [m for m in all_models if m != model]
-            last_err = None
-            for try_model in try_models:
-                try:
-                    resp = client.models.generate_content(
-                        model=try_model, contents=prompt,
-                        config={'temperature': 0.3, 'max_output_tokens': 4096})
-                    raw = resp.text.strip()
-                    last_err = None
-                    break
-                except Exception as _e:
-                    if '429' in str(_e) or 'RESOURCE_EXHAUSTED' in str(_e):
-                        last_err = _e
+                if lib == 'gemini':
+                    from google import genai as _g
+                    client = _g.Client(api_key=key)
+                    all_models = data['models']
+                    try_models = [model] + [m for m in all_models if m != model]
+                    last_merr = None
+                    raw = None
+                    for try_model in try_models:
+                        try:
+                            resp = client.models.generate_content(
+                                model=try_model, contents=prompt,
+                                config={'temperature': 0.3, 'max_output_tokens': 4096})
+                            raw = resp.text.strip()
+                            last_merr = None
+                            break
+                        except Exception as _e:
+                            if '429' in str(_e) or 'RESOURCE_EXHAUSTED' in str(_e):
+                                last_merr = _e; continue
+                            raise
+                    if last_merr is not None:
+                        raise last_merr
+
+                elif lib == 'groq':
+                    from groq import Groq as _G
+                    _groq_prompt = prompt
+                    # Groq has ~6000 token input limit on free — truncate if needed
+                    if len(_groq_prompt) > 20000:
+                        _groq_prompt = _groq_prompt[:20000] + '\n[Transcript truncated — find clips from the above]'
+                        self.log('[Groq] Prompt truncated to fit token limit', FG2)
+                    resp = _G(api_key=key).chat.completions.create(
+                        model=model, messages=[{'role':'user','content':_groq_prompt}],
+                        temperature=0.3, max_tokens=4096)
+                    raw = resp.choices[0].message.content.strip()
+
+                elif lib == 'openrouter':
+                    from openai import OpenAI as _O
+                    _or = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
+                    if not hasattr(self, '_dead_or_models'): self._dead_or_models = set()
+                    _or_models = [m for m in data['models'] if m not in self._dead_or_models] or data['models']
+                    _or_raw = None
+                    for _orm in _or_models:
+                        try:
+                            _r = _or.chat.completions.create(
+                                model=_orm, messages=[{'role':'user','content':prompt}],
+                                temperature=0.3, max_tokens=8192)
+                            _or_raw = _r.choices[0].message.content.strip()
+                            if _r.choices[0].finish_reason == 'length' and _or_raw:
+                                self.log('[OpenRouter] Truncated — retrying condensed', YELLOW)
+                                _r2 = _or.chat.completions.create(
+                                    model=_orm,
+                                    messages=[{'role':'user','content':prompt[:len(prompt)//2]+'\n\n[Top 3 clips JSON only]'}],
+                                    temperature=0.3, max_tokens=4096)
+                                _or_raw = _r2.choices[0].message.content.strip()
+                            break
+                        except Exception as _orme:
+                            _es = str(_orme).lower()
+                            if '404' in _es or 'no endpoints' in _es:
+                                self._dead_or_models.add(_orm)
+                                self.log(f'[OpenRouter] {_orm} dead, trying next...', YELLOW)
+                                continue
+                            raise
+                    if _or_raw is None: raise Exception('All OpenRouter models unavailable')
+                    raw = _or_raw
+                else:
+                    raise ValueError(f'Unknown lib: {lib}')
+
+
+                if _ki > 0:
+                    self.log(f'[{prov_name}] Key {_ki+1} succeeded', GREEN)
+                break  # success — exit key loop
+
+            except Exception as _ke:
+                _ks = str(_ke).lower()
+                if any(x in _ks for x in ['429','rate','quota','resource_exhausted','too many']):
+                    if _ki < len(_key_pool) - 1:
+                        self.log(f'[{prov_name}] Key {_ki+1}/{len(_key_pool)} rate-limited → trying key {_ki+2}...', YELLOW)
+                        _last_err = _ke
                         continue
-                    raise
-            if last_err is not None:
-                raise Exception(f'Gemini quota exhausted on all models')
+                    else:
+                        raise  # all keys exhausted
+                raise  # non-rate-limit error
 
-        elif lib == 'groq':
-            try:
-                from groq import Groq as _G
-            except ImportError:
-                raise ImportError('groq not installed. Go to Settings → Update Modules to install it.')
-            resp = _G(api_key=key).chat.completions.create(
-                model=model,
-                messages=[{'role': 'user', 'content': prompt}],
-                temperature=0.3, max_tokens=4096)
-            raw = resp.choices[0].message.content.strip()
-
-        elif lib == 'openrouter':
-            try:
-                from openai import OpenAI as _O
-            except ImportError:
-                raise ImportError('openai not installed. Go to Settings → Update Modules to install it.')
-            _or_client = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
-            resp = _or_client.chat.completions.create(
-                model=model,
-                messages=[{'role': 'user', 'content': prompt}],
-                temperature=0.3, max_tokens=8192)
-            choice = resp.choices[0]
-            raw = choice.message.content.strip()
-            # Detect truncation — if response was cut off, retry with shorter prompt
-            if choice.finish_reason == 'length' and len(raw) > 100:
-                self.log(f'[OpenRouter] Response truncated — retrying with condensed prompt', YELLOW)
-                _short_prompt = prompt[:len(prompt)//2] + '\n\n[Return only the top 3 clips as JSON]'
-                resp2 = _or_client.chat.completions.create(
-                    model=model,
-                    messages=[{'role': 'user', 'content': _short_prompt}],
-                    temperature=0.3, max_tokens=4096)
-                raw = resp2.choices[0].message.content.strip()
-
-        # Strip markdown code fences — multiple patterns
+        # Parse JSON response
         clean = raw.strip()
         clean = re.sub(r'^```(?:json)?\s*', '', clean, flags=re.MULTILINE)
         clean = re.sub(r'```\s*$', '', clean, flags=re.MULTILINE)
@@ -4283,31 +4343,26 @@ class App(tk.Tk):
         s, e = clean.find('['), clean.rfind(']')
         if s != -1 and e > s:
             clean = clean[s:e+1]
-        # Try direct parse first
         try:
             return json.loads(clean)
         except json.JSONDecodeError:
             pass
-        # JSON got cut off — trim to last complete object }
         last_brace = clean.rfind('}')
         if last_brace != -1:
             trimmed = clean[:last_brace+1]
-            # Make sure it closes the array
             if not trimmed.rstrip().endswith(']'):
                 trimmed = trimmed + ']'
             try:
                 return json.loads(trimmed)
             except json.JSONDecodeError:
                 pass
-        # Last resort: extract individual objects with regex
         objects = re.findall(r'\{[^{}]+\}', clean, re.DOTALL)
         if objects:
-            merged_json = '[' + ','.join(objects) + ']'
             try:
-                return json.loads(merged_json)
+                return json.loads('[' + ','.join(objects) + ']')
             except json.JSONDecodeError:
                 pass
-        raise ValueError(f'Could not parse AI response. Raw start: {raw[:200]}')
+        raise ValueError(f'Could not parse AI response: {raw[:200]}')
 
     def _run_ai(self):
         if getattr(self, '_cancel_requested', False):
@@ -4392,6 +4447,16 @@ class App(tk.Tk):
 
             def _mark_rl(prov):
                 with _rl_provs_lock:
+                    # Rotate to next key before marking as limited
+                    _pool = [k for k in [self._keys.get(prov,'').strip()] + getattr(self,'_extra_keys',{}).get(prov,[]) if k]
+                    if len(_pool) > 1:
+                        _cur = getattr(self, '_key_index', {}).get(prov, 0)
+                        _next = (_cur + 1) % len(_pool)
+                        if not hasattr(self, '_key_index'): self._key_index = {}
+                        self._key_index[prov] = _next
+                        # Only mark RL if we've cycled through all keys
+                        if _next != 0:
+                            return  # still have keys to try, don't mark as RL yet
                     _rl_provs.add(prov)
 
             def _clear_rl(prov):
@@ -4406,8 +4471,9 @@ class App(tk.Tk):
                     idx = _order.index(start_prov)
                     _order = _order[idx:] + _order[:idx]
                 # Try non-rate-limited providers first
-                _available = [p for p in _order if p not in _rl_provs and p not in exclude]
-                _fallback  = [p for p in _order if p in _rl_provs and p not in exclude]
+                _dead = getattr(self, '_dead_models', set())
+                _available = [p for p in _order if p not in _rl_provs and p not in exclude and p not in _dead]
+                _fallback  = [p for p in _order if p in _rl_provs and p not in exclude and p not in _dead]
                 for prov in _available + _fallback:
                     try:
                         self.log(f'[{label}] → {prov}...')
@@ -4422,9 +4488,11 @@ class App(tk.Tk):
                             self.log(f'[{label}] {prov} rate-limited, trying next...', YELLOW)
                             continue
                         elif '404' in s or 'no endpoints' in s:
-                            # Dead model — skip permanently this session
-                            _mark_rl(prov)
-                            self.log(f'[{label}] {prov} model unavailable (404), skipping...', YELLOW)
+                            # Dead model — add to session dead list, never try again
+                            if not hasattr(self, '_dead_models'):
+                                self._dead_models = set()
+                            self._dead_models.add(prov)
+                            self.log(f'[{label}] {prov} model unavailable — skipping for session', YELLOW)
                             continue
                         elif '403' in s or 'access denied' in s or 'forbidden' in s:
                             self.log(f'[{label}] {prov} access denied, skipping...', YELLOW)
@@ -4465,24 +4533,26 @@ class App(tk.Tk):
                     result.append('\n'.join(buf))
                 return result
 
-            # Assign chunks to providers — round-robin across keyed providers
-            # Each provider gets its own appropriately-sized chunks
-            assignments = []  # list of (chunk_text, provider, label)
-            if len(keyed) == 1:
-                # Single provider — use its chunks
+            # Assign chunks to providers — only split if transcript is long enough
+            assignments = []
+            _MIN_LINES_PER_SECTION = 20  # don't split tiny transcripts across 3 providers
+            if len(keyed) == 1 or len(lines) < _MIN_LINES_PER_SECTION * 2:
+                # Short transcript or single provider — just use first available provider
+                _best_prov = keyed[0]
                 for i, ch in enumerate(chunks):
-                    assignments.append((ch, keyed[0], f'sec{i+1}/{n_chunks}'))
+                    assignments.append((ch, _best_prov, f'sec{i+1}/{n_chunks}'))
+                if len(keyed) > 1 and len(lines) < _MIN_LINES_PER_SECTION * 2:
+                    self.log(f'Short transcript ({len(lines)} lines) — using single provider to save quota', FG2)
             else:
-                # Multiple providers — split transcript proportionally
-                # Divide transcript lines evenly across providers
-                n_provs = len(keyed)
+                # Long transcript — split across providers to parallelize
+                n_provs = min(len(keyed), max(1, len(lines) // _MIN_LINES_PER_SECTION))
+                active_provs = keyed[:n_provs]
                 section_size = max(1, len(lines) // n_provs)
-                for pi, prov in enumerate(keyed):
+                for pi, prov in enumerate(active_provs):
                     sec_start = pi * section_size
                     sec_end   = (pi + 1) * section_size if pi < n_provs - 1 else len(lines)
                     sec_lines = lines[sec_start:sec_end]
                     sec_text  = '\n'.join(sec_lines)
-                    # Further sub-chunk if this section exceeds provider's limit
                     sub_chunks = _chunks_for_prov(prov, sec_text)
                     for si, sc in enumerate(sub_chunks):
                         lbl = f'{prov.split()[0]} sec{pi+1}'
@@ -5922,19 +5992,23 @@ class App(tk.Tk):
                 fmt = 'bestaudio/best'
                 pp  = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
             elif quality == 'best':
-                # Broad fallback chain — works even when some formats are unavailable
-                fmt = ('bestvideo[ext=mp4]+bestaudio[ext=m4a]'
-                       '/bestvideo+bestaudio'
+                # Best video + best audio regardless of codec, merge to mp4
+                # vp9/av1 + opus is fine — ffmpeg will remux/transcode to mp4
+                fmt = ('bestvideo+bestaudio'
+                       '/bestvideo[ext=mp4]+bestaudio[ext=m4a]'
                        '/best[ext=mp4]'
                        '/best')
-                pp  = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
+                pp  = [{'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mp4'},
+                       {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
             else:
-                fmt = (f'bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]'
-                       f'/bestvideo[height<={quality}]+bestaudio'
+                # Specific resolution — prefer vp9 (higher quality per bitrate than h264)
+                fmt = (f'bestvideo[height<={quality}]+bestaudio'
+                       f'/bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]'
                        f'/best[height<={quality}][ext=mp4]'
                        f'/best[height<={quality}]'
                        f'/best')
-                pp  = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
+                pp  = [{'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mp4'},
+                       {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
 
             ff = find_ffmpeg()
             ffmpeg_loc = str(Path(ff).parent) if ff and ff != 'ffmpeg' else None
@@ -5952,6 +6026,8 @@ class App(tk.Tk):
                 'format': fmt,
                 'outtmpl': str(Path(_out_folder) / '%(uploader)s - %(title)s - ClipFinder.%(ext)s'),
                 'postprocessors': pp,
+                'merge_output_format': 'mp4',
+                'postprocessor_args': {'ffmpeg': ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k']},
                 'quiet': False,
                 'no_warnings': False,
                 'noplaylist': True,
@@ -7877,8 +7953,25 @@ class App(tk.Tk):
             return e
 
         # ── API Keys ──
-        s1 = section('🔑  AI Provider API Keys',
-                     'Keys are saved locally — never sent anywhere except the AI provider you choose')
+        # Build section header manually so we can add Export/Import buttons to it
+        _s1_outer = tk.Frame(inner, bg=BG3, highlightbackground=BG4, highlightthickness=1)
+        _s1_outer.pack(fill='x', padx=14, pady=(10,0))
+        _s1_hd = tk.Frame(_s1_outer, bg=BG4); _s1_hd.pack(fill='x')
+        tk.Frame(_s1_hd, bg=ACCENT, width=3).pack(side='left', fill='y')
+        _s1_hd_inner = tk.Frame(_s1_hd, bg=BG4); _s1_hd_inner.pack(side='left', padx=10, pady=7, fill='x', expand=True)
+        tk.Label(_s1_hd_inner, text='🔑  AI Provider API Keys', font=('Segoe UI', 10, 'bold'), fg=FG, bg=BG4).pack(anchor='w')
+        tk.Label(_s1_hd_inner, text='Keys are saved locally — never sent anywhere except the AI provider you choose',
+                 font=('Segoe UI', 8), fg=FG2, bg=BG4).pack(anchor='w')
+        # Export / Import buttons in the header — right side
+        _s1_btn_frame = tk.Frame(_s1_hd, bg=BG4)
+        _s1_btn_frame.pack(side='right', padx=10, pady=7)
+        _export_btn = tk.Button(_s1_btn_frame, text='📤  Export All Keys', font=('Segoe UI', 8),
+                 bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10, pady=4)
+        _export_btn.pack(side='left', padx=(0,6))
+        _import_btn = tk.Button(_s1_btn_frame, text='📥  Import All Keys', font=('Segoe UI', 8),
+                 bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10, pady=4)
+        _import_btn.pack(side='left')
+        s1 = tk.Frame(_s1_outer, bg=BG3); s1.pack(fill='x', padx=12, pady=8)
 
         # All 4 providers use identical layout — order: Gemini, Unsplash, Groq, OpenRouter
         _all_providers = [
@@ -7893,47 +7986,109 @@ class App(tk.Tk):
             self.v_unsplash_key = tk.StringVar(value=self._keys.get('_unsplash',''))
 
         _provider_entries = {}
+        _extra_key_vars = {}  # pkey -> list of StringVars for extra keys
+        _extra_key_frames = {}  # pkey -> frame containing extra rows
 
         def _make_eye_toggle(entry):
             def _t(): entry.config(show='' if entry.cget('show')=='•' else '•')
             return _t
 
+        # Fixed column widths so ALL rows (primary + extra) align perfectly
+        # Using character units on Labels directly — immune to canvas sizing issues
+        _COL_NAME  = 14   # chars for left name column
+        _COL_RIGHT = 32   # chars for right hint column
+
         for pkey, display, hint, url in _all_providers:
-            # Get current value
             if pkey == '_unsplash':
                 _var = self.v_unsplash_key
             else:
                 _var = self.v_keys.get(pkey, tk.StringVar())
             _has = bool(_var.get().strip())
 
+            # ── Primary key row ───────────────────────────────────────────────
             pr = tk.Frame(s1, bg=BG3); pr.pack(fill='x', pady=3)
 
-            # Left: dot + name (min width via label anchor)
-            left = tk.Frame(pr, bg=BG3); left.pack(side='left')
-            tk.Label(left, text='● ', font=('Segoe UI', 10),
-                    fg=GREEN if _has else FG3, bg=BG3).pack(side='left')
-            tk.Label(left, text=f'{display:<12}', font=('Segoe UI', 9, 'bold'),
-                    fg=FG if _has else FG2, bg=BG3, anchor='w').pack(side='left')
+            # LEFT: single label, character width — no frame needed
+            tk.Label(pr, text=f'{"●" if _has else "○"} {display}',
+                     font=('Segoe UI',9,'bold'),
+                     fg=GREEN if _has else FG3, bg=BG3,
+                     width=_COL_NAME, anchor='w').pack(side='left', padx=(4,0))
 
-            # Right: Get key button + hint (fixed width)
-            right = tk.Frame(pr, bg=BG3); right.pack(side='right')
-            tk.Label(right, text=hint, font=('Segoe UI', 7),
-                    fg=FG2, bg=BG3, anchor='e', width=28).pack(side='left')
-            tk.Button(right, text='Get key →', font=('Segoe UI', 7),
+            # RIGHT: hint + Get key — packed before entry so they claim space first
+            tk.Button(pr, text='Get key →', font=('Segoe UI',7),
                      bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=6,
-                     command=lambda u=url: __import__('webbrowser').open(u)).pack(side='left', padx=(4,0))
+                     command=lambda u=url: __import__('webbrowser').open(u)).pack(side='right', padx=(0,6))
+            tk.Label(pr, text=hint, font=('Segoe UI',7), fg=FG2, bg=BG3,
+                     width=_COL_RIGHT, anchor='e').pack(side='right')
 
-            # Middle: entry field (expands to fill)
-            ef = tk.Frame(pr, bg=BG4); ef.pack(side='left', fill='x', expand=True, padx=6)
-            e = tk.Entry(ef, textvariable=_var, font=('Consolas', 9),
-                        bg=BG4, fg=FG, insertbackground=ACCENT,
-                        relief='flat', bd=4, show='•')
+            # RIGHT: + button (fixed, before entry)
+            _plus_holder = tk.Frame(pr, bg=BG3, width=28)
+            _plus_holder.pack(side='right'); _plus_holder.pack_propagate(False)
+            _plus_btn = tk.Button(_plus_holder, text='＋', font=('Segoe UI',9,'bold'),
+                                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2')
+            _plus_btn.pack(expand=True)
+
+            # MIDDLE: entry expands to fill
+            ef = tk.Frame(pr, bg=BG4)
+            ef.pack(side='left', fill='x', expand=True, padx=6)
+            e = tk.Entry(ef, textvariable=_var, font=('Consolas',9),
+                        bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='•')
             e.pack(side='left', fill='x', expand=True)
-            tk.Button(ef, text='👁', font=('Segoe UI', 8), bg=BG4, fg=FG2,
+            tk.Button(ef, text='👁', font=('Segoe UI',8), bg=BG4, fg=FG2,
                      relief='flat', bd=0, cursor='hand2', padx=4,
                      command=_make_eye_toggle(e)).pack(side='right')
-
             _provider_entries[pkey] = _var
+
+            # ── Extra key rows container ──────────────────────────────────────
+            _extra_key_vars[pkey] = []
+            _extra_key_frames[pkey] = tk.Frame(s1, bg=BG3)
+            _extra_key_frames[pkey].pack(fill='x')
+            _cfg_extra_k = {
+                'Google Gemini (Free)':'key_gemini_extra',
+                'Groq (Free)':'key_groq_extra',
+                'OpenRouter (Free models)':'key_openrouter_extra',
+                '_unsplash':'key_unsplash_extra'
+            }.get(pkey, '')
+            _existing_extras = [k.strip() for k in self.cfg.get(_cfg_extra_k,'').split(',') if k.strip()]
+
+            def _add_extra_row(pk=pkey, val=''):
+                _ev = tk.StringVar(value=val)
+                _extra_key_vars[pk].append(_ev)
+                _kidx = len(_extra_key_vars[pk])
+
+                # Same parent as primary rows
+                _erow = tk.Frame(s1, bg=BG3)
+                _erow.pack(fill='x', pady=1)
+
+                # LEFT: character-width label — matches primary row exactly
+                tk.Label(_erow, text=f'  ↳ Key {_kidx+1}',
+                        font=('Segoe UI',8), fg=ACCENT2, bg=BG3,
+                        width=_COL_NAME, anchor='w').pack(side='left', padx=(4,0))
+
+                # RIGHT: spacer + ✕ button — packed before entry same as primary
+                tk.Button(_erow, text='✕', font=('Segoe UI',9,'bold'),
+                         bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=6,
+                         command=lambda r=_erow, v=_ev, pk2=pk: (
+                             r.destroy(), _extra_key_vars[pk2].remove(v)
+                         )).pack(side='right', padx=(0,6))
+                # Blank spacer same width as hint column keeps entry aligned with primary
+                tk.Label(_erow, text='', bg=BG3,
+                         width=_COL_RIGHT).pack(side='right')
+
+                # MIDDLE: orange-bordered entry — same padx=6 as primary
+                _eef = tk.Frame(_erow, bg=ACCENT, padx=1, pady=1)
+                _eef.pack(side='left', fill='x', expand=True, padx=6)
+                _einn = tk.Frame(_eef, bg=BG4); _einn.pack(fill='both', expand=True)
+                _ee = tk.Entry(_einn, textvariable=_ev, font=('Consolas',9),
+                              bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='•')
+                _ee.pack(side='left', fill='x', expand=True)
+                tk.Button(_einn, text='👁', font=('Segoe UI',8), bg=BG4, fg=FG2,
+                         relief='flat', bd=0, cursor='hand2', padx=4,
+                         command=_make_eye_toggle(_ee)).pack(side='right')
+
+            for _ev_val in _existing_extras:
+                _add_extra_row(pkey, _ev_val)
+            _plus_btn.config(command=lambda pk=pkey: _add_extra_row(pk))
 
         def _save_keys():
             for pkey, var in _provider_entries.items():
@@ -7945,14 +8100,104 @@ class App(tk.Tk):
                         self.thumb_unsplash_var.set(val)
                 else:
                     self._keys[pkey] = val
-            self.cfg.update({
-                'key_gemini':     self._keys.get('Google Gemini (Free)', ''),
-                'key_groq':       self._keys.get('Groq (Free)', ''),
-                'key_openrouter': self._keys.get('OpenRouter (Free models)', ''),
-            })
+            # Save extra keys
+            _cfg_map = {
+                'Google Gemini (Free)': ('key_gemini', 'key_gemini_extra'),
+                'Groq (Free)':          ('key_groq',   'key_groq_extra'),
+                'OpenRouter (Free models)': ('key_openrouter', 'key_openrouter_extra'),
+            }
+            for pkey, (cfg_k, cfg_extra_k) in _cfg_map.items():
+                self.cfg[cfg_k] = self._keys.get(pkey, '')
+                extras = [v.get().strip() for v in _extra_key_vars.get(pkey, []) if v.get().strip()]
+                self.cfg[cfg_extra_k] = ','.join(extras)
+                if hasattr(self, '_extra_keys'):
+                    self._extra_keys[pkey] = extras
             save_cfg(self.cfg)
             self._auto_select_provider()
-            self.log('✅ API keys saved', GREEN)
+            self.log(f'✅ API keys saved', GREEN)
+
+        def _export_keys():
+            import json as _j, base64 as _b64, hashlib as _hs
+            from tkinter import simpledialog as _sd, filedialog as _fd
+            _save_keys()
+            _bundle = {'v': 1, 'keys': {
+                'key_gemini':           self._keys.get('Google Gemini (Free)', ''),
+                'key_gemini_extra':     self.cfg.get('key_gemini_extra', ''),
+                'key_groq':             self._keys.get('Groq (Free)', ''),
+                'key_groq_extra':       self.cfg.get('key_groq_extra', ''),
+                'key_openrouter':       self._keys.get('OpenRouter (Free models)', ''),
+                'key_openrouter_extra': self.cfg.get('key_openrouter_extra', ''),
+                'key_unsplash':         self._keys.get('_unsplash', ''),
+            }}
+            pw = _sd.askstring('Export Keys', 'Set a password to encrypt your keys:', show='*', parent=self)
+            if not pw: return
+            dest = _fd.asksaveasfilename(title='Save encrypted key bundle',
+                defaultextension='.cfkeys', initialfile='clipfinder_keys.cfkeys',
+                filetypes=[('ClipFinder Keys', '*.cfkeys'), ('All', '*.*')])
+            if not dest: return
+            try:
+                _key = _hs.sha256(pw.encode()).digest()
+                _data = _j.dumps(_bundle).encode()
+                _cipher = bytearray()
+                _ks = _key
+                for i, b in enumerate(_data):
+                    if i % 32 == 0 and i > 0: _ks = _hs.sha256(_ks).digest()
+                    _cipher.append(b ^ _ks[i % 32])
+                with open(dest, 'wb') as _f:
+                    _f.write(_b64.b64encode(b'CFKEYS1:' + bytes(_cipher)))
+                messagebox.showinfo('Exported', f'Keys saved to:\n{dest}\n\nKeep this file and your password safe!')
+                self.log(f'✅ Keys exported to {dest}', GREEN)
+            except Exception as ex:
+                messagebox.showerror('Export failed', str(ex))
+
+        def _import_keys():
+            import json as _j, base64 as _b64, hashlib as _hs
+            from tkinter import simpledialog as _sd, filedialog as _fd
+            src = _fd.askopenfilename(title='Select encrypted key bundle',
+                filetypes=[('ClipFinder Keys', '*.cfkeys'), ('All', '*.*')])
+            if not src: return
+            pw = _sd.askstring('Import Keys', 'Enter the password for this key bundle:', show='*', parent=self)
+            if not pw: return
+            try:
+                with open(src, 'rb') as _f: _raw = _b64.b64decode(_f.read())
+                _magic = b'CFKEYS1:'
+                if not _raw.startswith(_magic):
+                    messagebox.showerror('Import failed', 'Not a valid ClipFinder key bundle.'); return
+                _cipher = _raw[len(_magic):]
+                _key = _hs.sha256(pw.encode()).digest()
+                _plain = bytearray()
+                _ks = _key
+                for i, b in enumerate(_cipher):
+                    if i % 32 == 0 and i > 0: _ks = _hs.sha256(_ks).digest()
+                    _plain.append(b ^ _ks[i % 32])
+                _bundle = _j.loads(_plain.decode())
+                if _bundle.get('v') != 1:
+                    messagebox.showerror('Import failed', 'Unknown bundle version.'); return
+                _kd = _bundle.get('keys', {})
+                self._keys['Google Gemini (Free)']     = _kd.get('key_gemini', '')
+                self._keys['Groq (Free)']              = _kd.get('key_groq', '')
+                self._keys['OpenRouter (Free models)'] = _kd.get('key_openrouter', '')
+                self._keys['_unsplash']                = _kd.get('key_unsplash', '')
+                self.cfg.update({k: _kd.get(k, '') for k in [
+                    'key_gemini','key_gemini_extra','key_groq','key_groq_extra',
+                    'key_openrouter','key_openrouter_extra','key_unsplash']})
+                save_cfg(self.cfg)
+                for _pk, _ck in [('Google Gemini (Free)','key_gemini'),
+                                  ('Groq (Free)','key_groq'),
+                                  ('OpenRouter (Free models)','key_openrouter')]:
+                    if _pk in self.v_keys: self.v_keys[_pk].set(_kd.get(_ck, ''))
+                if hasattr(self, 'v_unsplash_key'): self.v_unsplash_key.set(_kd.get('key_unsplash',''))
+                self._auto_select_provider()
+                messagebox.showinfo('Imported', 'All keys imported!\nExtra keys (Key 2, Key 3) reload on next Settings open.')
+                self.log('✅ Keys imported successfully', GREEN)
+            except (ValueError, KeyError):
+                messagebox.showerror('Import failed', 'Wrong password or corrupted file.')
+            except Exception as ex:
+                messagebox.showerror('Import failed', str(ex))
+
+        # Wire export/import to the header buttons created earlier
+        _export_btn.config(command=_export_keys)
+        _import_btn.config(command=_import_keys)
 
         # Save & Apply button
         btn_row = tk.Frame(s1, bg=BG3); btn_row.pack(fill='x', pady=(10,0))
@@ -7965,6 +8210,9 @@ class App(tk.Tk):
         # ── Smart Provider Status ──
         s2 = section('🤖  AI Provider Status')
         self._prov_status_frame = s2
+        _leg = tk.Frame(s2, bg=BG2); _leg.pack(anchor='w', pady=(0,6))
+        for _lt, _lc in [('● Ready', GREEN), ('  ● Rate-limited', YELLOW), ('  ○ No key', FG3)]:
+            tk.Label(_leg, text=_lt, font=('Segoe UI',8), fg=_lc, bg=BG2).pack(side='left')
         # Defer to background — provider status check imports packages (slow)
         self.after(50, self._refresh_provider_status)
 
@@ -8698,17 +8946,28 @@ class App(tk.Tk):
             if pname.startswith('_'): continue
             has_key = bool(key.strip())
             if has_key: has_any = True
+            _extras = [k for k in getattr(self,'_extra_keys',{}).get(pname,[]) if k]
+            _rl_provs = getattr(self, '_rl_provs', set())
+            _is_rl = pname in _rl_provs
             r = tk.Frame(self._prov_status_frame, bg=BG2)
             r._is_status_row = True
             r.pack(fill='x', pady=2)
-            dot_color = GREEN if has_key else FG3
+            dot_color = YELLOW if _is_rl else (GREEN if has_key else FG3)
             tk.Label(r, text='●', font=('Segoe UI', 10), fg=dot_color, bg=BG2).pack(side='left')
             display_name = _display.get(pname, pname)
-            tk.Label(r, text=f' {display_name}', font=FONT_SMALL,
+            _key_suffix = f' (+{len(_extras)} more)' if _extras else ''
+            tk.Label(r, text=f' {display_name}{_key_suffix}', font=FONT_SMALL,
                     fg=FG if has_key else FG2, bg=BG2).pack(side='left')
-            status = '✓ Ready' if has_key else 'No key — add above'
-            tk.Label(r, text=status, font=FONT_SMALL,
-                    fg=GREEN if has_key else YELLOW, bg=BG2).pack(side='right')
+            if _is_rl:
+                status = f'⏳ Rate-limited ({1+len(_extras)} keys)'
+            elif _extras:
+                status = f'✓ Ready ({1+len(_extras)} keys)'
+            elif has_key:
+                status = '✓ Ready'
+            else:
+                status = 'No key — add above'
+            status_color = YELLOW if _is_rl else (GREEN if has_key else YELLOW)
+            tk.Label(r, text=status, font=FONT_SMALL, fg=status_color, bg=BG2).pack(side='right')
         # Unsplash status row (separate from AI providers)
         us_key = self._keys.get('_unsplash', '') or (
             self.v_unsplash_key.get().strip() if hasattr(self, 'v_unsplash_key') else '')
@@ -8728,6 +8987,8 @@ class App(tk.Tk):
             r.pack(fill='x', pady=4)
             tk.Label(r, text='⚠️  No API keys configured — add at least one above to find clips',
                     font=FONT_SMALL, fg=YELLOW, bg=BG2).pack(anchor='w')
+        # Auto-refresh every 30s to reflect rate limit changes
+        self.after(30000, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
 
 
     def _auto_select_provider(self):
@@ -9506,8 +9767,8 @@ sys.exit(main())
                             matched = _word_matches_banned(w_clean, words)
                             if matched:
                                 hits.append((
-                                    max(0.0, wd['start'] - 0.05),
-                                    wd['end'] + 0.15,
+                                    max(0.0, wd['start'] - 0.15),  # start 0.15s early
+                                    wd['end'] + 0.1,
                                     w_clean
                                 ))
                     else:
@@ -9521,7 +9782,8 @@ sys.exit(main())
                                 # Estimate position proportionally within segment
                                 frac   = _ti / max(len(seg_tokens), 1)
                                 word_t = seg['start'] + frac * seg_dur
-                                hits.append((max(0, word_t - 0.1), word_t + 0.5, tok))
+                                # Start beep 0.15s early, cover full word + 0.1s tail
+                                hits.append((max(0, word_t - 0.15), word_t + 0.6, tok))
                 # ── Step 3: AI context pass (optional) ───────────────────────
                 if self.censor_ai_pass.get() and hits:
                     self._censor_set_status('AI context pass...')

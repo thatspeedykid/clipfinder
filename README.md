@@ -1,112 +1,103 @@
-<div align="center">
+# ✂ ClipFinder
+### AI Drama Clip Extractor — v1.3.1
 
-<img src="assets/logo.png" alt="ClipFinder Logo" width="120"/>
-
-# ClipFinder — AI Drama Clip Extractor
-
-**Find, cut, and caption viral moments from any stream or video — automatically.**
-
-[![Version](https://img.shields.io/badge/Version-1.3-FF6B1A?style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
-[![Download](https://img.shields.io/github/v/release/thatspeedykid/clipfinder?color=FF6B1A&label=Download&style=for-the-badge)](https://github.com/thatspeedykid/clipfinder/releases/latest)
-[![License](https://img.shields.io/badge/License-MIT-orange?style=for-the-badge)](LICENSE)
-[![Twitter](https://img.shields.io/badge/@MarsScumbags-000000?style=for-the-badge&logo=x)](https://x.com/MarsScumbags)
-
-<img src="assets/preview.webp" alt="ClipFinder Preview" width="900"/>
-
-</div>
+> Built by [@MarsScumbags](https://x.com/MarsScumbags) for the streaming & drama clip game.  
+> Find, cut, censor, and export viral clips from any VOD — fully automated, locally run, free AI.
 
 ---
 
-## What is ClipFinder?
+## 🚀 What It Does
 
-ClipFinder is a Windows desktop app that uses AI to automatically find the best drama, tea, and highlight moments in stream VODs and videos. Point it at any video, hit Find Clips, and get timestamped clips scored for virality — ready to export as 16:9 or 9:16 vertical for TikTok/Reels.
+ClipFinder watches your video, transcribes it, and uses AI to find the moments worth clipping — arguments, callouts, reveals, confessions, rants. Then it exports them ready to post.
 
-Built by [@MarsScumbags](https://x.com/MarsScumbags) for drama clip channels.
-
----
-
-## Features
-
-- 🤖 **AI Clip Detection** — Gemini, Groq, and OpenRouter find the best moments automatically
-- 🎯 **Accurate Descriptions** — titles/descriptions match what's actually said in each clip
-- 👥 **Names Field** — tell the AI who's in the video for better titles
-- 🎬 **Hybrid Detection** — FFmpeg audio energy peaks + AI
-- ⚡ **Auto Edit** — CapCut-style silence removal with word-boundary cuts
-- 🎵 **AI Music Removal** — strip background music, keep vocals (Demucs, runs locally)
-- 📼 **VOD Mode** — 8x parallel downloads for Twitch/Kick/YouTube VODs
-- ✂️ **Smart Export** — 16:9, 9:16 vertical, or both with GPU acceleration
-- 🎙️ **Smart Auto Whisper** — picks best model based on video length + GPU
-- 🔇 **Auto Censor** — beep, silence, or custom MP3 over banned words
-- ⬇️ **Built-in Downloader** — Kick, Twitch, YouTube, Twitter/X with smart naming
-- 🖼️ **Thumbnail Finder** — Unsplash + Google Images
-- 🐦 **Tweet Generator** — AI-written viral tweets
-- 🔔 **Update Checker** — notified when new version drops
+- **AI Clip Finding** — Gemini, Groq, and OpenRouter scan your transcript and pick the best moments
+- **GPU Transcription** — whisper.cpp (AMD/Intel Vulkan) or faster-whisper (NVIDIA CUDA)
+- **One-Click Export** — 16:9, 9:16 vertical, or both at once with GPU encoding
+- **Auto Edit** — silence removal with word-boundary cuts for tight pacing
+- **Music Removal** — Demucs AI stem separation, runs fully local, no API needed
+- **Word Censor** — transcribes and bleeps/silences banned words, bulk queue support
+- **Downloader** — yt-dlp for YouTube, Twitch, Twitter/X, Kick (Cloudflare bypass included)
+- **Tweet Generator** — paste a transcript, get a viral tweet in your tone
+- **Thumbnail Finder** — searches Unsplash, DuckDuckGo, Bing, Pixabay for HD images
+- **Image Studio** — duplicate finder + AI upscaler (Real-ESRGAN)
 
 ---
 
-## Download
+## 📦 Installation
 
-**[⬇ Download ClipFinder_Setup.exe — v1.3 Latest](https://github.com/thatspeedykid/clipfinder/releases/latest)**
+1. Download the latest installer from [Releases](https://github.com/thatspeedykid/clipfinder/releases/latest)
+2. Run `ClipFinder-Setup.exe` — installs to `AppData\Local\ClipFinder\`
+3. Launch ClipFinder
+4. Go to **Settings → AI Provider API Keys** and add at least one free key
+5. Go to **Settings → Update Modules** and click **Install All AI Packages**
+6. Go to **Settings → Core Dependencies** and install **ffmpeg** + **whisper.cpp**
 
-- Windows 10/11 64-bit only
-- No Python required — everything included
-- ~110MB installer
-
----
-
-## First Time Setup
-
-1. Run `ClipFinder_Setup.exe` → installs + Desktop shortcut
-2. Open ClipFinder
-3. Go to **⚙ Settings → API Keys** and add your keys (all free):
-
-| Provider | What It's For | Free Tier | Get Key |
-|----------|--------------|-----------|---------|
-| **Gemini** | Clip finding — best quality | 1,500 req/day | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
-| **Unsplash** | Thumbnail search | 50 req/hr | [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) |
-| **Groq** | Tweets + fast inference | High limits | [console.groq.com](https://console.groq.com) |
-| **OpenRouter** | Fallback + 50+ free models | Varies | [openrouter.ai/keys](https://openrouter.ai/keys) |
-
-4. Click **Save & Apply** — no restart needed
-
-<details>
-<summary><b>🔑 How to get each API key</b></summary>
-
-**Gemini:** [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → Sign in → Create API Key
-
-**Groq:** [console.groq.com](https://console.groq.com) → Sign up → API Keys → Create
-
-**OpenRouter:** [openrouter.ai](https://openrouter.ai) → Sign up → Keys → Create
-
-**Unsplash:** [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) → New Application → Access Key
-</details>
+> No Python install required — ships with embedded Python 3.12.
 
 ---
 
-## How to Use
+## 🔑 Free API Keys (No Credit Card)
+
+| Provider | Free Tier | Link |
+|---|---|---|
+| Google Gemini | 1,500 req/day · 15 req/min | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
+| Groq | High limits · fastest inference | [console.groq.com](https://console.groq.com/keys) |
+| OpenRouter | 200 req/day · 50+ free models | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| Unsplash | 50 req/hr · thumbnail search | [unsplash.com/developers](https://unsplash.com/oauth/applications) |
+
+**Pro tip:** Add 2–3 keys per provider. ClipFinder rotates through them automatically and each Gemini key is assigned a different model version so they hit separate rate limit buckets.
+
+---
+
+## ⚙️ System Requirements
+
+| | |
+|---|---|
+| **OS** | Windows 10/11 64-bit |
+| **RAM** | 4GB minimum · 8GB recommended |
+| **GPU** | Optional — AMD RX 5000+, NVIDIA, or Intel Arc for acceleration |
+| **Disk** | ~500MB app + ~2GB for Demucs (Music Removal) |
+| **Python** | Embedded — no system Python required |
+
+---
+
+## 🎮 How To Use
 
 ### Find Clips
-1. Paste a URL or browse to a video file
-2. Add context + names (who's in the video)
-3. Hit **▶ FIND CLIPS**
-4. Review 2-column clip grid, adjust timestamps if needed
-5. Select clips → **✂ EXPORT SELECTED**
+1. Paste a URL or click 📁 to load a video
+2. Set your output folder
+3. Add context (who's in it, what's the drama)
+4. Hit **▶ FIND CLIPS**
+5. Review suggestions, edit timestamps if needed
+6. Hit **✂ EXPORT SELECTED**
 
 ### Auto Edit
-Go to **Clip Finder → ⚡ Auto Edit** sub-tab. Load video, pick silence mode, hit **RUN AUTO EDIT**. Transcribes, detects silence, cuts on word boundaries, exports clean.
+Switch to the **Auto Edit** sub-tab to remove all silence and dead air from a video in one pass — no clip selection needed.
 
-### Music Removal
-Go to **🎵 Music Removal** tab. Install Demucs via Settings first, then load video and hit **REMOVE MUSIC**. Strips background music, keeps vocals.
+### Censor Words
+Go to the **Censor** tab, set your word list, select a video, pick Beep / Silence / MP3, and hit **🔇 CENSOR**. Supports bulk queue for multiple videos.
 
-### VOD Mode
-**⬇ Downloader** → enable **📼 VOD Mode** → paste URL. Saves to `vod/` folder with 8x speed.
+### Remove Music
+Go to the **Music Removal** tab, select your video, pick a Demucs model, and hit **🎵 REMOVE MUSIC**. Runs fully locally.
 
 ---
 
-## File Naming
+## 🧠 AI Provider Details
+
+ClipFinder dispatches work across all providers simultaneously:
+
+- **Gemini 1.5 Flash** — best for long videos (120k char context), 1,500 req/day free
+- **Groq Llama** — fastest inference, great for short clips
+- **OpenRouter** — 50+ free models, good fallback
+
+**Multi-key rotation:** Keys are shuffled randomly each run. When a key hits a rate limit, its cooldown is tracked precisely and the next ready key is used. If all keys are cooling, ClipFinder waits only the minimum time needed — not a hardcoded delay.
+
+---
+
+## 📁 File Naming
 
 | Type | Format |
-|------|--------|
+|---|---|
 | Downloaded | `Streamer - Clip Title - ClipFinder.mp4` |
 | Exported clip | `Clip Title - ClipFinder - Part 1.mp4` |
 | Auto Edit | `VideoName - AutoEdit - ClipFinder.mp4` |
@@ -115,68 +106,25 @@ Go to **🎵 Music Removal** tab. Install Demucs via Settings first, then load v
 
 ---
 
-## GPU Transcription
+## 🛠️ GPU Support
 
-| GPU | Method | Speed |
-|-----|--------|-------|
-| AMD (RX 5000+) | whisper.cpp + Vulkan | ~10x realtime |
-| Intel Arc | whisper.cpp + Vulkan | ~5x realtime |
-| NVIDIA | faster-whisper + CUDA | ~15x realtime |
-| CPU | faster-whisper int8 | ~3x realtime |
-
----
-
-## What's Coming in v1.4
-
-- ✂️ **Mini Editor** — trim handles, captions overlay, crop/resize, face-focus portrait
-- ⬇️ **VOD Timestamp Range** — download only `00:10:00-00:15:00` from a VOD
-- 🖼️ **Thumbnail Finder Overhaul** — Kick direct lookup + Gemini image search
-- 🔄 **Auto-updater** — one-click update from inside the app
+| GPU | Transcription | Encoding |
+|---|---|---|
+| AMD RX 5000+ | whisper.cpp Vulkan ⚡ | h264_amf |
+| NVIDIA | faster-whisper CUDA ⚡ | h264_nvenc |
+| Intel Arc | whisper.cpp Vulkan ⚡ | h264_qsv |
+| CPU fallback | faster-whisper int8 | libx264 CRF 18 |
 
 ---
 
-## Changelog
+## 📋 Changelog
 
-### v1.3 — April 2026 — Current Stable
-- 🎵 AI Music Removal — Demucs, local, GPU accelerated
-- 🎯 Segment-aware clip accuracy — descriptions match actual clip content
-- 👥 Names field — AI uses real names in titles/descriptions
-- ⚡ Rate limiting overhaul — sequential tasks, global RL tracking, Gemini 1.5 Flash
-- 🔧 Censor queue fixed
-- 📊 Progress bar for every operation
-- 📦 Settings module status dots, faster open
-- 🏷️ Better file naming (AutoEdit suffix, NA uploader fix)
-- 🎨 Encoder detecting label fixed, interview names unified
-
-### v1.2 — April 2026
-- ⚡ Auto Edit sub-tab — silence removal with word-boundary cuts
-- 📼 VOD Mode — 8x concurrent downloads
-- 🎙️ Smart Auto Whisper
-- 📋 Floating log panel
-- 🗂️ 2-column clip grid
-- 🏷️ Smart file naming
-- 🎨 Tabs stretched, orange tab colors
-- AI response backtick parsing fixed
-
-### v1.1 — April 2026
-- Hybrid clip detection (FFmpeg energy + AI)
-- In-app update checker
-- Donate button
-
-### v1.0 — April 2026 — Initial Release
-- AI clip detection, GPU transcription, 16:9/9:16 export
-- Built-in downloader, tweet generator, auto-censor
+See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 ---
 
-## Support
+## ☕ Support
 
-[![Donate](https://img.shields.io/badge/Donate-PayPal-blue?style=for-the-badge&logo=paypal)](https://www.paypal.com/donate/?business=networkchasemedia%40gmail.com&currency_code=USD)
+If ClipFinder saves you time, consider [buying me a coffee](https://www.paypal.com/donate/?business=networkchasemedia%40gmail.com&currency_code=USD).
 
-Follow for clips and updates: [@MarsScumbags](https://x.com/MarsScumbags)
-
----
-
-## License
-
-MIT — free to use, modify, and distribute. Credit appreciated.
+[@MarsScumbags](https://x.com/MarsScumbags) · [github.com/thatspeedykid/clipfinder](https://github.com/thatspeedykid/clipfinder)

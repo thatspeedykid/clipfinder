@@ -1,93 +1,92 @@
 # ClipFinder Changelog
 
-## v1.2 — April 2026 — Stable Release
+---
 
-### New Features
-- Auto Edit sub-tab inside Clip Finder — Whisper transcription + word-boundary silence cuts + CRF encode
-- Auto Edit button in clip export bar — silence removal on selected AI-found clips
-- VOD Mode in Downloader — 8x concurrent fragments, auto vod/ subfolder, toggle + auto-detect
-- Smart Auto Whisper — picks tiny/base/small/medium based on video duration + GPU
-- Floating log panel — Toplevel overlay, stays on top, buffers 500 messages, all tabs
-- Floating update notification — numeric version compare, only shows when newer version exists
-- 2-column clip grid — wider cards, readable titles and descriptions
-- Smart file naming — Streamer/Title - ClipFinder - Part N.mp4 for all exports
-- Kick API filename — pulls streamer slug + clip title from Kick API v2
-- Unified API key layout — all 4 providers identical row layout, correct order
-- Tabs stretched to fill full width
-- Tab colors — selected orange/black, unselected dark/orange
-- Sub-tabs inside Clip Finder — AI Clips | Auto Edit switcher
-- Version shown in header (v1.2) and status bar (ClipFinder 1.2 · @MarsScumbags)
-- Window icon fix — loads clipfinder.ico directly, no temp file race condition
+## v1.3.1 — Current Release
+*April 2026*
 
-### Bug Fixes
-- AI response parsing — multiline code fence stripping with re.MULTILINE
-- Output folder persists on restart via trace_add
-- Transcript tab no longer requires output folder (need_outdir=False)
-- Whisper auto model maps to base, not ggml-auto.bin
-- mediapipe 0.10+ API compatibility
-- Audio energy analysis vid variable scope fixed
-- Both export (16:9 + 9:16) fixed for censor mode
-- imagehash detection fixed in Core Dependencies
-- Update All permission errors fixed for locked .pyd files
-- Duration detection uses ffmpeg stderr (works on all file types)
+### 🔑 Smart Key Rotation & Rate Limit Overhaul
+- Keys are now **shuffled randomly** at the start of each run — no more always hammering Key 1 first across back-to-back sessions
+- **Per-key cooldown timestamps** — when a key gets rate-limited, the exact time is recorded. Before retrying, ClipFinder checks if the 62-second reset window has passed and skips cooling keys automatically
+- **Gemini model splitting** — with multiple Gemini keys, each key is assigned a different model version (gemini-1.5-flash, gemini-2.0-flash, etc.). These have completely separate RPM buckets, effectively multiplying your throughput
+- **Smart retry waits** — instead of hardcoded 30/60/90s delays, the retry loop calculates the exact time until the next key resets and waits only that long
+- Ready keys are always tried before cooling keys, cooling keys are tried in order of soonest reset
 
-### Known Issues
-- Censor queue not processing queued videos
-- Auto Edit transcription returns 0 words on some files (falls back to energy peaks)
+### 📤📥 Encrypted Key Export / Import
+- New **Export All Keys** and **Import All Keys** buttons in the AI Provider API Keys section header
+- Keys are encrypted with a user-set password using SHA-256 derived XOR cipher
+- Saves as `.cfkeys` file — portable between installs, safe to back up
+- Import automatically applies all keys including extra keys (Key 2, Key 3) and refreshes the UI
+- Useful for switching machines or backing up your key setup
+
+### 🐛 Bug Fixes
+- **OpenRouter `NoneType` crash fixed** — when `_r.choices` returned an empty list (malformed response), `choices[0]` would crash. Now checks for empty choices and skips to next model
+- **OpenRouter dead model reset** — if all models get marked dead in a session, the dead list now auto-clears and retries fresh instead of failing permanently
+- **Settings UI alignment fixed** — AI Provider key rows now use character-unit Label widths instead of pixel-width frames with `pack_propagate(False)`. This permanently fixes the left/right column clipping that appeared at different window sizes and DPI settings
+- **Version bump** — all version strings updated to 1.3.1
 
 ---
 
-## v1.1 — April 2026
+## v1.3 — Stable
+*April 2026*
 
-### New Features
-- Hybrid clip detection — FFmpeg audio energy peaks + AI scoring
-- In-app update checker — silent check on launch
-- Donate button in Settings
-- App icon in header
+### Major Features
+- **AI Music Removal tab** — Demucs stem separation, runs fully locally, no API needed. Models: htdemucs (best), mdx_extra (faster), htdemucs_ft (fine-tuned)
+- **Segment-aware clip accuracy** — verification pass rewrites clip descriptions using actual transcript text from within each clip's timestamp range
+- **Multi-key support per provider** — add Key 2, Key 3 etc. via ＋ button in Settings. Keys rotate automatically on rate limit
+- **Key rotation in `_call_provider`** — tries all keys before marking provider as rate-limited
+- **OpenRouter model rotation** — skips 404 dead models per session, never retries them
+- **Rate limit overhaul** — sequential task dispatch with 5s gap, global RL tracking, provider fallback chain
+- **Names field** — shared between Normal and Interview mode, helps AI identify who is speaking
+- **Progress bar for all operations** — unified status bar with determinate/indeterminate modes
 
-### Bug Fixes
-- Both export (16:9 + 9:16) fixed
-- Browse buttons for output/download folders in Settings
-- imagehash detection fixed
-- Permission errors on Update All
-- Cookies status live-updating in Downloader
+### Fixes & Polish
+- Censor queue fixed — correctly unpacks `(vid, out, clips)` tuple
+- AutoEdit filename suffix standardized
+- NA uploader fix in downloader
+- Encoder detecting label fixed
+- Groq 413 fix — prompts >20k chars truncated before sending
+- Better download quality — VP9 preferred, `merge_output_format=mp4`
+- Auto Edit uses GPU encoder instead of libx264 CRF 23
+- Censor timing — 0.15s pre-roll for exact and segment-level hits
+- Cancel works everywhere — checked at every major step including retry sleep (1s chunks)
+- Gemini 1.5 Flash set as default (1,500 RPD free vs 20 RPD for 2.5 Flash)
 
 ---
 
-## v1.0 — April 2026 — Initial Release
+## v1.2
+*March 2026*
 
-- AI clip detection via Gemini, Groq, OpenRouter
-- GPU transcription — AMD/Intel Vulkan via whisper.cpp, NVIDIA CUDA via faster-whisper
-- 16:9 and 9:16 export with mediapipe face tracking
-- Built-in downloader — Kick, Twitch, YouTube, Twitter/X via yt-dlp
-- Tweet generator — Drama/Tea/Breaking/Hype tones
-- Auto-censor — beep, silence, custom MP3
-- Studio tab — AI upscaling EDSR 4x
-- Interview mode — multi-speaker detection
-- One-click dependency installer in Settings
+- **Auto Edit sub-tab** — silence removal with word-boundary cuts, GPU encoder
+- **VOD Mode** — 8x concurrent fragment downloads, saves to `vod/` subfolder
+- **Smart Auto Whisper** — picks model by video duration + GPU availability
+- **Floating log panel** — Toplevel window, 500 message buffer
+- **2-column clip grid** — wider cards, more readable layout
+- **Stretched tabs** with orange active tab colors
+- **Smart file naming** — standardized across all export types
+- **Kick API naming** — correct streamer/title from Kick API v2
+- **AI response fence stripping** — removes ` ```json ``` ` wrappers from any provider
 
-## v1.3 — April 2026 — Stable Release
+---
 
-### New Features
-- AI Music Removal tab — Demucs separation, keeps vocals, local GPU, no API
-- Segment-aware clip accuracy — verification pass matches descriptions to actual clip content
-- Names field — shared between Normal and Interview mode, AI uses real names in output
-- Rate limit overhaul — sequential tasks, 5s gaps, global RL tracking, retry loop
-- Gemini 1.5 Flash as default — 1500 RPD vs 20 RPD for 2.5 Flash
-- High-limit models added for Groq (llama-3.1-8b-instant) and OpenRouter (mistral-small, phi-3-mini)
-- Settings module status dots — ✅/○ per package
-- Demucs/torch/torchaudio added to Update Modules list
-- Progress bar for Auto Edit sub-tab, Export, Queue, Music Removal
-- Settings tab lazy-loads, pre-builds in background, TTK style cached
-- AutoEdit filename suffix: VideoName - AutoEdit - ClipFinder.mp4
-- Beta → Stable update notifications
+## v1.1
+*February 2026*
 
-### Bug Fixes
-- Censor queue now uses stored vid/out from queue time not current video
-- OpenRouter max_tokens increased to 8192, detects finish_reason=length and retries
-- 503/UNAVAILABLE treated as rate limit — skips to next provider immediately
-- Mistral model updated (old endpoint removed from OpenRouter)
-- Encoder detecting label in top bar now clears when GPU detected
-- Interview names box replaced with shared Names field
-- NA uploader in downloads fixed — extracts from URL
-- torchcodec Windows DLL issue bypassed via soundfile monkey-patch
+- **Hybrid clip detection** — FFmpeg audio energy peaks + AI analysis combined
+- **In-app update checker** — orange banner on launch if newer version available
+- **Donate button** added to footer
+
+---
+
+## v1.0 — Initial Release
+*January 2026*
+
+- AI clip detection with Gemini, Groq, OpenRouter
+- GPU transcription (faster-whisper CUDA + openai-whisper CPU fallback)
+- 16:9 and 9:16 export with face-tracking crop (mediapipe)
+- Built-in yt-dlp downloader (YouTube, Twitch, Twitter/X, Kick)
+- Tweet generator with tone selector
+- Auto word censor (beep, silence, or custom MP3)
+- Thumbnail finder (Unsplash, DuckDuckGo, Bing, Pixabay)
+- Image Studio — duplicate finder + Real-ESRGAN upscaler
+- Settings tab — API keys, whisper model, output folders, module installer
