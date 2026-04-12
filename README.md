@@ -1,5 +1,5 @@
 # ✂ ClipFinder
-### AI Drama Clip Extractor — v1.3.1
+### AI Drama Clip Extractor — v1.3.2
 
 > Built by [@MarsScumbags](https://x.com/MarsScumbags) for the streaming & drama clip game.  
 > Find, cut, censor, and export viral clips from any VOD — fully automated, locally run, free AI.
@@ -18,7 +18,7 @@ ClipFinder watches your video, transcribes it, and uses AI to find the moments w
 - **Word Censor** — transcribes and bleeps/silences banned words, bulk queue support
 - **Downloader** — yt-dlp for YouTube, Twitch, Twitter/X, Kick (Cloudflare bypass included)
 - **Tweet Generator** — paste a transcript, get a viral tweet in your tone
-- **Thumbnail Finder** — searches Unsplash, DuckDuckGo, Bing, Pixabay for HD images
+- **Thumbnail Finder** — searches Unsplash, Pexels, Pixabay, DuckDuckGo, Bing for HD images
 - **Image Studio** — duplicate finder + AI upscaler (Real-ESRGAN)
 
 ---
@@ -44,8 +44,20 @@ ClipFinder watches your video, transcribes it, and uses AI to find the moments w
 | Groq | High limits · fastest inference | [console.groq.com](https://console.groq.com/keys) |
 | OpenRouter | 200 req/day · 50+ free models | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | Unsplash | 50 req/hr · thumbnail search | [unsplash.com/developers](https://unsplash.com/oauth/applications) |
+| Pexels | Free · thumbnail search | [pexels.com/api](https://www.pexels.com/api/) |
+| Pixabay | Free · thumbnail search | [pixabay.com/api](https://pixabay.com/api/docs/) |
 
-**Pro tip:** Add 2–3 keys per provider. ClipFinder rotates through them automatically and each Gemini key is assigned a different model version so they hit separate rate limit buckets.
+**Pro tip:** Add 2–3 keys per AI provider. ClipFinder rotates through them automatically and each Gemini key is assigned a different model version so they hit separate rate limit buckets.
+
+---
+
+## 📤📥 Export & Import Your Keys
+
+Settings → AI Provider API Keys has **Export All Keys** and **Import All Keys** buttons in the section header.
+
+- **Export** → choose where to save → set a password → done. All keys saved to an encrypted `.cfkeys` file
+- **Import** → point to your `.cfkeys` → enter password → all keys load instantly
+- Safe to back up to cloud storage or move between machines
 
 ---
 
@@ -90,7 +102,7 @@ ClipFinder dispatches work across all providers simultaneously:
 - **Groq Llama** — fastest inference, great for short clips
 - **OpenRouter** — 50+ free models, good fallback
 
-**Multi-key rotation:** Keys are shuffled randomly each run. When a key hits a rate limit, its cooldown is tracked precisely and the next ready key is used. If all keys are cooling, ClipFinder waits only the minimum time needed — not a hardcoded delay.
+**Multi-key rotation:** Keys are shuffled randomly each run. When a key hits a rate limit, its cooldown is tracked precisely and the next ready key is used. If all keys are cooling, ClipFinder waits only the minimum time needed.
 
 ---
 

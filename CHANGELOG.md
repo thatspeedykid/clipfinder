@@ -2,55 +2,69 @@
 
 ---
 
-## v1.3.1 — Current Release
+## v1.3.2 — Current Release
 *April 2026*
 
-### 🔑 Smart Key Rotation & Rate Limit Overhaul
-- Keys are now **shuffled randomly** at the start of each run — no more always hammering Key 1 first across back-to-back sessions
-- **Per-key cooldown timestamps** — when a key gets rate-limited, the exact time is recorded. Before retrying, ClipFinder checks if the 62-second reset window has passed and skips cooling keys automatically
-- **Gemini model splitting** — with multiple Gemini keys, each key is assigned a different model version (gemini-1.5-flash, gemini-2.0-flash, etc.). These have completely separate RPM buckets, effectively multiplying your throughput
-- **Smart retry waits** — instead of hardcoded 30/60/90s delays, the retry loop calculates the exact time until the next key resets and waits only that long
-- Ready keys are always tried before cooling keys, cooling keys are tried in order of soonest reset
+### 🐛 Censor Tab Fixed
+- **`WhisperModelC` typo fixed** — the class is `WhisperModel`, the `C` on the end doesn't exist. This caused an `AttributeError` immediately, fell back to whisper.cpp which has no word timestamps, resulting in out-of-sync or missing censoring
+- **`_FWC` undefined variable fixed** — even if the import hadn't crashed, `_fwc = _FWC(...)` would have thrown `NameError` since the variable was named `_FW` on the line above
+- **GPU device detection added to Censor** — was hardcoded to CPU even on AMD/NVIDIA/Intel GPUs. Now calls `_detect_whisper_device()` same as the main transcription path
+- **Better fallback logging** — now clearly logs which fallback path was taken so issues are easier to diagnose
 
-### 📤📥 Encrypted Key Export / Import
-- New **Export All Keys** and **Import All Keys** buttons in the AI Provider API Keys section header
-- Keys are encrypted with a user-set password using SHA-256 derived XOR cipher
-- Saves as `.cfkeys` file — portable between installs, safe to back up
-- Import automatically applies all keys including extra keys (Key 2, Key 3) and refreshes the UI
-- Useful for switching machines or backing up your key setup
+### 🖼️ Pexels & Pixabay API Keys Added
+- Two new thumbnail search providers added to Settings → AI Provider API Keys
+- Pexels and Pixabay keys integrate with the Thumbnail Finder tab for more image sources
+- Image API keys correctly have no ＋ multi-key button (only AI providers need key rotation)
 
-### 🐛 Bug Fixes
-- **OpenRouter `NoneType` crash fixed** — when `_r.choices` returned an empty list (malformed response), `choices[0]` would crash. Now checks for empty choices and skips to next model
-- **OpenRouter dead model reset** — if all models get marked dead in a session, the dead list now auto-clears and retries fresh instead of failing permanently
-- **Settings UI alignment fixed** — AI Provider key rows now use character-unit Label widths instead of pixel-width frames with `pack_propagate(False)`. This permanently fixes the left/right column clipping that appeared at different window sizes and DPI settings
-- **Version bump** — all version strings updated to 1.3.1
+### 🎨 Settings UI Alignment Fixed (Again, Properly)
+- Extra key rows (↳ Key 2, ↳ Key 3) now match primary row width exactly
+- Right side of extra rows mirrors primary rows: blank spacer where "Get key →" is, blank label where hint text is, ✕ where ＋ is
+- No more extra rows stretching wider than primary rows
 
 ---
 
-## v1.3 — Stable
+## v1.3.1
+*April 2026*
+
+### 🔑 Smart Key Rotation & Rate Limit Overhaul
+- Keys shuffled randomly every run — no more always hammering Key 1 first
+- Per-key cooldown timestamps — rate-limited keys skipped until 62s reset window passes
+- Gemini model splitting — multiple keys assigned different model versions (1.5-flash / 2.0-flash) with separate RPM buckets
+- Smart retry waits — calculates minimum time until next key resets instead of hardcoded 30/60/90s delays
+
+### 📤📥 Encrypted Key Export / Import
+- Export All Keys and Import All Keys buttons in the AI Provider API Keys section header
+- Password-encrypted `.cfkeys` file — portable between installs, safe to back up
+- Import automatically applies all keys including extras and refreshes the UI
+
+### 🐛 Bug Fixes
+- OpenRouter `NoneType` crash fixed — empty choices list no longer kills the run
+- OpenRouter dead model list auto-resets when all models marked unavailable
+- Settings key row alignment rebuilt using character-unit Label widths
+
+---
+
+## v1.3
 *April 2026*
 
 ### Major Features
-- **AI Music Removal tab** — Demucs stem separation, runs fully locally, no API needed. Models: htdemucs (best), mdx_extra (faster), htdemucs_ft (fine-tuned)
-- **Segment-aware clip accuracy** — verification pass rewrites clip descriptions using actual transcript text from within each clip's timestamp range
-- **Multi-key support per provider** — add Key 2, Key 3 etc. via ＋ button in Settings. Keys rotate automatically on rate limit
-- **Key rotation in `_call_provider`** — tries all keys before marking provider as rate-limited
-- **OpenRouter model rotation** — skips 404 dead models per session, never retries them
-- **Rate limit overhaul** — sequential task dispatch with 5s gap, global RL tracking, provider fallback chain
-- **Names field** — shared between Normal and Interview mode, helps AI identify who is speaking
-- **Progress bar for all operations** — unified status bar with determinate/indeterminate modes
+- **AI Music Removal tab** — Demucs stem separation, fully local, no API needed
+- **Segment-aware clip accuracy** — verification pass using actual transcript text
+- **Multi-key support per provider** — Key 2, Key 3 via ＋ button in Settings
+- **Key rotation in `_call_provider`** — tries all keys before marking provider as RL
+- **OpenRouter model rotation** — skips 404 dead models per session
+- **Rate limit overhaul** — sequential task dispatch, global RL tracking, provider fallback
+- **Names field** — shared between Normal and Interview mode
+- **Progress bar for all operations**
 
 ### Fixes & Polish
 - Censor queue fixed — correctly unpacks `(vid, out, clips)` tuple
-- AutoEdit filename suffix standardized
-- NA uploader fix in downloader
-- Encoder detecting label fixed
 - Groq 413 fix — prompts >20k chars truncated before sending
 - Better download quality — VP9 preferred, `merge_output_format=mp4`
-- Auto Edit uses GPU encoder instead of libx264 CRF 23
-- Censor timing — 0.15s pre-roll for exact and segment-level hits
-- Cancel works everywhere — checked at every major step including retry sleep (1s chunks)
-- Gemini 1.5 Flash set as default (1,500 RPD free vs 20 RPD for 2.5 Flash)
+- Auto Edit uses GPU encoder
+- Censor timing — 0.15s pre-roll for exact hits
+- Cancel works everywhere including retry sleep
+- Gemini 1.5 Flash set as default (1,500 RPD vs 20 RPD for 2.5 Flash)
 
 ---
 
@@ -62,10 +76,9 @@
 - **Smart Auto Whisper** — picks model by video duration + GPU availability
 - **Floating log panel** — Toplevel window, 500 message buffer
 - **2-column clip grid** — wider cards, more readable layout
-- **Stretched tabs** with orange active tab colors
 - **Smart file naming** — standardized across all export types
 - **Kick API naming** — correct streamer/title from Kick API v2
-- **AI response fence stripping** — removes ` ```json ``` ` wrappers from any provider
+- **AI response fence stripping** — removes backtick wrappers from any provider
 
 ---
 
