@@ -40,14 +40,14 @@ Unicode       True
 Section "ClipFinder" SecMain
     SectionIn RO
     SetOutPath "$INSTDIR"
-    File "clipfinder.exe"
-    File "clipfinder.ico"
-    File "clipfinder.py"
-    File "README.md"
-    File "CHANGELOG.md"
+    File "ClipFinder_dist\clipfinder.exe"
+    File "ClipFinder_dist\clipfinder.ico"
+    File "ClipFinder_dist\clipfinder.py"
+    File "ClipFinder_dist\README.md"
+    File "ClipFinder_dist\CHANGELOG.md"
 
     SetOutPath "$INSTDIR\python"
-    File /r "python\*.*"
+    File /r "ClipFinder_dist\python\*.*"
 
     ; Fresh install — delete stamp so packages install on first launch
     Delete "$INSTDIR\install_done.stamp"
