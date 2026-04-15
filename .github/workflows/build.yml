@@ -5,9 +5,6 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: windows-latest
@@ -39,9 +36,9 @@ jobs:
       - name: Update version in NSIS script
         run: |
           $ver = "${{ steps.version.outputs.VER }}"
-          $nsi = Get-Content installer.nsi -Raw
-          $nsi = $nsi -replace '!define APP_VER\s+"[^"]*"', "!define APP_VER `"$ver`""
-          Set-Content installer.nsi $nsi
+          $nsi = Get-Content ClipFinder.nsi -Raw
+          $nsi = $nsi -replace '!define APP_VERSION "\d+\.\d+(\.\d+)?"', "!define APP_VERSION `"$ver`""
+          Set-Content ClipFinder.nsi $nsi
         shell: pwsh
 
       - name: Build installer
@@ -50,31 +47,16 @@ jobs:
 
       - name: Compile NSIS
         run: |
-          & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+          & "C:\Program Files (x86)\NSIS\makensis.exe" ClipFinder.nsi
         shell: pwsh
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: ClipFinder v${{ steps.version.outputs.VER }}
-          body: |
-            ## ClipFinder v${{ steps.version.outputs.VER }}
-
-            ### Install
-            Download `ClipFinder_Setup.exe` below and run it.
-            - Installs to Program Files + Desktop shortcut
-            - No Python required — everything included
-
-            ### Updating from older version?
-            Just run the new installer — your API keys and settings are preserved automatically.
-
-            ### First time?
-            After installing, go to **⚙ Settings → API Keys** and add a free Groq or Gemini key.
-
-            ---
-            Built by [@MarsScumbags](https://x.com/MarsScumbags)
-          files: ClipFinder_Setup.exe
+          body_path: RELEASE_NOTES_v${{ steps.version.outputs.VER }}.md
+          files: ClipFinder-Setup.exe
           draft: false
-          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

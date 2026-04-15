@@ -298,11 +298,44 @@ if _hf_os.name == 'nt':
             super().__init__(*args, **kwargs)
 
     _sp_patch.run         = _silent_run
+
     _sp_patch.check_call  = _silent_check_call
     _sp_patch.Popen       = _SilentPopen
     subprocess.run        = _silent_run
     subprocess.check_call = _silent_check_call
     subprocess.Popen      = _SilentPopen
+
+# Pre-patch curl_cffi — install a meta path finder that stubs ANY missing
+# curl_cffi submodule (aio, const, etc.) so broken installs still work
+try:
+    import sys as _sys_cffi, types as _types_cffi, importlib.abc as _iabc, importlib.machinery as _imach
+    class _CurlCffiSubmoduleFinder(_iabc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname.startswith('curl_cffi.') and fullname not in _sys_cffi.modules:
+                try:
+                    # Try real import first
+                    return None
+                except Exception:
+                    pass
+            return None
+        def find_module(self, fullname, path=None):
+            if fullname.startswith('curl_cffi.'):
+                return self
+            return None
+        def load_module(self, fullname):
+            if fullname not in _sys_cffi.modules:
+                _stub = _types_cffi.ModuleType(fullname)
+                # Add common attributes that curl_cffi submodules export
+                class _Stub: pass
+                for _attr in ('AsyncCurl', 'Curl', 'CurlInfo', 'CurlOpt',
+                              'CurlHttpVersion', 'CurlWsFlag', 'CURL_HTTP_VERSION_2'):
+                    setattr(_stub, _attr, _Stub)
+                _sys_cffi.modules[fullname] = _stub
+            return _sys_cffi.modules[fullname]
+    # Only add if not already there
+    if not any(isinstance(f, _CurlCffiSubmoduleFinder) for f in _sys_cffi.meta_path):
+        _sys_cffi.meta_path.append(_CurlCffiSubmoduleFinder())
+except Exception: pass
 
 def auto_install_gpu_whisper():
     """Detect GPU and install the right acceleration package for faster-whisper.
@@ -497,22 +530,17 @@ FONT_MONO_S = ('Consolas', 9)
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': [
-            'gemini-2.5-flash-preview-04-17',  # latest, best quality Apr 2025
-            'gemini-2.0-flash',                 # fast, reliable
-            'gemini-2.0-flash-lite',            # lightest/fastest
-            'gemini-1.5-flash',                 # legacy fallback
-        ],
+        'models': ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'],
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
     'Groq (Free)': {
         'lib':    'groq',
         'models': [
-            'llama-3.3-70b-versatile',  # best quality, good limits
-            'llama-3.1-8b-instant',     # highest free RPM, fast
-            'llama3-8b-8192',           # high limits fallback
-            'gemma2-9b-it',             # Google Gemma via Groq
+            'llama-3.1-8b-instant',    # highest free limits, fast
+            'llama3-8b-8192',          # very high limits
+            'llama-3.3-70b-versatile', # smarter but lower daily limit
+            'mixtral-8x7b-32768',      # good context window
         ],
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
@@ -520,12 +548,11 @@ PROVIDERS = {
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
         'models': [
+                        'qwen/qwen3.6-plus:free',
+            'nvidia/nemotron-3-super-120b-a12b:free',
             'meta-llama/llama-3.3-70b-instruct:free',
-            'qwen/qwen3-235b-a22b:free',
-            'deepseek/deepseek-r1-0528:free',
-            'google/gemma-3-27b-it:free',
-            'mistralai/mistral-7b-instruct:free',
             'meta-llama/llama-3.1-8b-instruct:free',
+            'google/gemma-3-12b-it:free',
         ],
         'url':    'https://openrouter.ai/keys',
         'note':   '50+ free models — no credit card needed',
@@ -569,14 +596,14 @@ AI_PROMPT = """You are an expert viral clip editor for a drama/streaming/gaming 
 Find the 3-6 BEST moments to clip. Quality over quantity — 3 great clips beats 8 mediocre ones.
 
 ━━━ CLIP LENGTH — NON-NEGOTIABLE ━━━
-MINIMUM: 2 minutes 30 seconds (150 seconds) — NO EXCEPTIONS
-MAXIMUM: 3 minutes 30 seconds (210 seconds)
-IDEAL:   2:45 to 3:10 — enough room for full setup + escalation + payoff + reaction
+MINIMUM: 1 minute 00 seconds (60 seconds) — NO EXCEPTIONS
+MAXIMUM: 2 minutes 40 seconds (160 seconds)
+IDEAL:   1:30 to 2:00 — enough room for full setup + escalation + payoff
 
-If a juicy moment is only 60 seconds, DO NOT clip it alone.
-Instead, include the 60-90 seconds BEFORE it (the lead-up/context/setup) to hit minimum length.
-If a moment runs over 3:30, find the natural END POINT before the 3:30 mark.
-REJECT any clip under 150 seconds (2:30) — do not output it.
+If a juicy moment is only 20 seconds, DO NOT clip it alone.
+Instead, include the 30-40 seconds BEFORE it (the lead-up/context) to hit minimum length.
+If a moment runs over 2:40, find the natural END POINT before the 2:40 mark.
+REJECT any clip under 60 seconds — do not output it.
 
 ━━━ SELF-CONTAINED RULE ━━━
 Every clip must make sense to someone who has NEVER seen this stream.
@@ -602,8 +629,8 @@ Every clip must make sense to someone who has NEVER seen this stream.
 
 TITLE: News headline style — "Mizkif admits the prank went too far" not "Funny clip"
 
-LENGTH CHECK: Before outputting, verify each clip is between 150-210 seconds.
-Calculate: convert end and start to seconds, subtract. If under 150s (2:30), extend or drop it.
+LENGTH CHECK: Before outputting, verify each clip is between 60-160 seconds.
+Calculate: convert end and start to seconds, subtract. If under 60s, extend or drop it.
 
 Return ONLY a raw JSON array — no markdown, no backticks, no explanation:
 [
@@ -637,11 +664,11 @@ Your job:
 3. For each clip, note which person is the subject
 
 CLIP LENGTH — NON-NEGOTIABLE:
-- MINIMUM 150 seconds (2 min 30 sec) — no exceptions, extend into lead-up/setup if needed
-- MAXIMUM 210 seconds (3 min 30 sec)
-- IDEAL 160-180 seconds — full question + complete answer + reaction + follow-up
+- MINIMUM 60 seconds (1 full minute) — no exceptions, extend into lead-up if needed
+- MAXIMUM 160 seconds (2 min 40 sec)
+- IDEAL 90-120 seconds — question + full answer + reaction
 - Never cut mid-sentence — end after the person fully completes their thought and any reaction
-- If an answer is short, include more of the question/setup/context before it to reach 150s minimum
+- If an answer is short, include more of the question/setup before it to reach 60s minimum
 
 Score each clip 1-10 for viral/drama potential.
 
@@ -1772,8 +1799,6 @@ class App(tk.Tk):
             'OpenRouter (Free models)':self.cfg.get('key_openrouter', ''),
             '_brave_search':           self.cfg.get('key_brave_search', ''),
             '_unsplash':               self.cfg.get('key_unsplash', ''),
-            '_pexels':                 self.cfg.get('key_pexels', ''),
-            '_pixabay':                self.cfg.get('key_pixabay', ''),
         }
         # StringVars for settings tab key editing
         self.v_keys = {
@@ -1861,6 +1886,12 @@ class App(tk.Tk):
         self.after(300, self._fix_all_scrollbars)
         self.after(400, self._bind_global_mousewheel)
         self.after(800, self._check_first_run)
+
+        def _on_close():
+            try: self.destroy()
+            except: pass
+            import os as _osx; _osx._exit(0)
+        self.protocol("WM_DELETE_WINDOW", _on_close)
         # Pre-check ffmpeg — FIND ONLY, never download at startup
         def _check_for_update():
             """Silently check GitHub for newer version on launch."""
@@ -4270,28 +4301,14 @@ class App(tk.Tk):
                     raw = None
                     for try_model in try_models:
                         try:
-                            # google-genai ≥0.8 uses GenerateContentConfig dataclass
-                            try:
-                                from google.genai import types as _gnt
-                                _cfg = _gnt.GenerateContentConfig(
-                                    temperature=0.3, max_output_tokens=8192)
-                                resp = client.models.generate_content(
-                                    model=try_model, contents=prompt,
-                                    config=_cfg)
-                            except (ImportError, AttributeError, TypeError):
-                                # Older SDK path — plain dict config
-                                resp = client.models.generate_content(
-                                    model=try_model, contents=prompt,
-                                    config={'temperature': 0.3, 'max_output_tokens': 8192})
+                            resp = client.models.generate_content(
+                                model=try_model, contents=prompt,
+                                config={'temperature': 0.3, 'max_output_tokens': 4096})
                             raw = resp.text.strip()
                             last_merr = None
                             break
                         except Exception as _e:
-                            _es = str(_e)
-                            if any(x in _es for x in ['429','RESOURCE_EXHAUSTED','quota','rate']):
-                                last_merr = _e; continue
-                            if any(x in _es for x in ['404','not found','deprecated','invalid']):
-                                self.log(f'[Gemini] {try_model} unavailable, trying next...', YELLOW)
+                            if '429' in str(_e) or 'RESOURCE_EXHAUSTED' in str(_e):
                                 last_merr = _e; continue
                             raise
                     if last_merr is not None:
@@ -5528,12 +5545,12 @@ class App(tk.Tk):
             else:
                 start, end = raw_start, raw_end
 
-            # Enforce minimum 150s (2:30) matching AI prompt rules
+            # Enforce minimum 60s (1 min) matching AI prompt rules
             dur = _to_sec(end) - _to_sec(start)
-            if dur < 150:
-                end = ts(_to_sec(start) + 150)
+            if dur < 60:
+                end = ts(_to_sec(start) + 60)
                 end = self._snap_to_segment(end, snap='end')
-                self.log(f'Clip extended from {dur:.0f}s to 150s minimum (2:30)')
+                self.log(f'Clip extended from {dur:.0f}s to 60s minimum')
 
             # Use custom filename if provided, else AI title
             if '_name_var' in clip and clip['_name_var'].get().strip():
@@ -5821,6 +5838,35 @@ class App(tk.Tk):
                  font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left', padx=8)
         div()
 
+        # Batch queue box
+        q_hdr = tk.Frame(p, bg=BG); q_hdr.pack(fill='x', padx=20, pady=(0,4))
+        tk.Label(q_hdr, text='📋  BATCH QUEUE', font=('Segoe UI',9,'bold'),
+                 fg=ACCENT, bg=BG).pack(side='left')
+        tk.Label(q_hdr, text='  paste one URL per line — downloads in order',
+                 font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        self._dl_queue_status = tk.Label(q_hdr, text='', font=FONT_SMALL, fg=FG2, bg=BG)
+        self._dl_queue_status.pack(side='right')
+        q_frame = tk.Frame(p, bg=BG3, highlightbackground=BORDER, highlightthickness=1)
+        q_frame.pack(fill='x', padx=20, pady=(0,4))
+        self._dl_queue_box = tk.Text(q_frame, height=6, font=FONT_MONO_S,
+                 bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat',
+                 bd=6, wrap='none')
+        self._dl_queue_box.pack(side='left', fill='both', expand=True)
+        _qs = tk.Scrollbar(q_frame, command=self._dl_queue_box.yview)
+        _qs.pack(side='right', fill='y')
+        self._dl_queue_box.config(yscrollcommand=_qs.set)
+        q_btn_row = tk.Frame(p, bg=BG); q_btn_row.pack(fill='x', padx=20, pady=(0,4))
+        self._dl_queue_btn = tk.Button(q_btn_row, text='⬇  Download Queue',
+                  font=('Segoe UI',9,'bold'), bg=ACCENT2, fg='#000',
+                  relief='flat', bd=0, cursor='hand2', padx=14, pady=6,
+                  command=self._dl_start_queue)
+        self._dl_queue_btn.pack(side='left')
+        tk.Button(q_btn_row, text='✕ Clear', font=FONT_SMALL,
+                  bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=10, pady=6,
+                  command=lambda: self._dl_queue_box.delete('1.0', 'end')
+                  ).pack(side='left', padx=6)
+        div()
+
         # URL
         sec('URL')
         ur = tk.Frame(p, bg=BG); ur.pack(fill='x', padx=20, pady=(4,0))
@@ -5958,14 +6004,18 @@ class App(tk.Tk):
         self.log(text, color)
 
     def _dl_cancel(self):
-        """Cancel current download."""
+        """Cancel current download and stop queue if running."""
         self._dl_cancel_requested = True
+        self._dl_queue_cancel = True  # stop queue loop too
         self._dl_log_write('⛔ Download cancelled', YELLOW)
         self._dl_set_busy(False)
+        self.set_progress('', pct=0)
 
     def _dl_set_busy(self, busy):
         """Toggle Download ↔ Cancel button in downloader tab."""
-        self._dl_cancel_requested = not busy  # reset when starting
+        # Don't reset cancel_requested during a queue run — queue manages its own state
+        if not getattr(self, '_in_queue', False):
+            self._dl_cancel_requested = not busy
         try:
             if busy:
                 self._dl_go_btn.pack_forget()
@@ -5974,6 +6024,49 @@ class App(tk.Tk):
                 self._dl_cancel_btn.pack_forget()
                 self._dl_go_btn.pack(side='right', padx=(8,0))
         except: pass
+
+    def _dl_start_queue(self):
+        """Download all URLs from the queue box in order."""
+        try:
+            raw = self._dl_queue_box.get('1.0', 'end').strip()
+        except: raw = ''
+        urls = [u.strip() for u in raw.splitlines() if u.strip().startswith('http')]
+        if not urls:
+            messagebox.showerror('Empty Queue', 'Paste at least one URL in the queue box.')
+            return
+        self._dl_queue_btn.config(state='disabled', text='⬇ Downloading...')
+        self._dl_queue_cancel = False  # queue-level cancel flag
+        def _run_queue():
+            for i, url in enumerate(urls):
+                if self._dl_queue_cancel:
+                    self._dl_log_write('⛔ Queue cancelled', YELLOW)
+                    break
+                self.after(0, lambda u=url, n=i+1, t=len(urls): (
+                    self._dl_queue_status.config(text=f'({n}/{t}) downloading...'),
+                    self.v_dl_url.set(u),
+                ))
+                self._dl_cancel_requested = False
+                self._in_queue = True  # flag: suppress per-item done popup
+                folder = self.v_dl_folder.get().strip()
+                Path(folder).mkdir(parents=True, exist_ok=True)
+                self._dl_log_write(f'\n[Queue {i+1}/{len(urls)}] {url}', ACCENT2)
+                self._dl_log_write(f'Starting download...', FG2)
+                self._dl_log_write(f'URL: {url}', FG2)
+                try:
+                    self._dl_run(url, folder)
+                except Exception as _qe:
+                    self._dl_log_write(f'❌ Queue item {i+1} failed: {_qe}', RED)
+                self._in_queue = True  # keep flag set until loop ends
+                import time; time.sleep(0.5)
+            self._in_queue = False
+            self.after(0, lambda: (
+                self._dl_queue_btn.config(state='normal', text='⬇  Download Queue'),
+                self._dl_queue_status.config(
+                    text=f'✅ {len(urls)} done' if not self._dl_queue_cancel else '⛔ Cancelled'),
+                self.set_progress('', pct=0),
+            ))
+        import threading
+        threading.Thread(target=_run_queue, daemon=True).start()
 
     def _dl_start(self):
         url = self.v_dl_url.get().strip()
@@ -6070,10 +6163,9 @@ class App(tk.Tk):
             if ffmpeg_loc:
                 ydl_opts['ffmpeg_location'] = ffmpeg_loc
 
-            # Kick.com — needs Cloudflare bypass via curl_cffi impersonation
+            # Kick.com — curl_cffi Chrome impersonation to bypass Cloudflare
             if 'kick.com' in url.lower():
                 video_url = None
-                # Detect clip vs VOD
                 clip_match = _re.search(r'clips/(clip_[A-Za-z0-9]+)', url)
                 vod_match  = _re.search(r'/videos/([a-f0-9-]{36})', url)
                 try:
@@ -6091,7 +6183,6 @@ class App(tk.Tk):
                             cd = _resp.json()
                             video_url = (cd.get('clip_url') or cd.get('video_url') or
                                         (cd.get('clip') or {}).get('video_url'))
-                            # Grab streamer + title for filename
                             _kick_streamer = (cd.get('channel', {}).get('slug') or
                                              cd.get('broadcaster', {}).get('username') or
                                              cd.get('streamer', {}).get('username'))
@@ -6338,7 +6429,10 @@ class App(tk.Tk):
         save_cfg(self.cfg)
 
     def _dl_done_popup(self, filepath):
-        dlg = tk.Toplevel(self)
+        # Skip popup when downloading as part of a queue
+        if getattr(self, '_in_queue', False):
+            self._dl_log_write(f'✅  Saved: {Path(filepath).name}', GREEN)
+            return
         dlg.title('Download Complete')
         dlg.configure(bg=BG2)
         dlg.resizable(False, False)
@@ -6558,10 +6652,10 @@ class App(tk.Tk):
 
             pref_suffix = {
                 'reaction': 'reaction expression',
-                'hd':       'HD streamer',
+                'hd':       'HD',
                 'drama':    'drama intense',
             }.get(pref, '')
-            full_query = f'{query} {pref_suffix}'.strip() if pref_suffix else query
+            full_query = f'{query} {pref_suffix} streamer'
 
             self._thumb_set_status(f'Searching: "{full_query}"...')
             self.log(f'[Thumbnails] Searching: {full_query}')
@@ -6576,20 +6670,8 @@ class App(tk.Tk):
 
             image_urls = self._thumb_search(sess, full_query, max_results=80)
 
-            # Fallback: try simpler queries if primary returned nothing
-            if not image_urls and pref_suffix:
-                self.log(f'[Thumbnails] Primary query failed, trying: {query}')
-                self._thumb_set_status(f'Retrying with: "{query}"...')
-                image_urls = self._thumb_search(sess, query, max_results=80)
-
             if not image_urls:
-                raise ValueError(
-                    'No images found.\n\n'
-                    'Add a free API key in Settings → API Keys for guaranteed results:\n'
-                    '• Unsplash (unsplash.com/developers) — free, 50/hr\n'
-                    '• Pexels (pexels.com/api) — free, 200/hr\n'
-                    '• Pixabay (pixabay.com/api/docs) — free, 100/hr'
-                )
+                raise ValueError('No images found.\n\nTip: Add a free Unsplash API key in the Thumbnails tab for guaranteed results.\nSign up free at unsplash.com/developers')
 
             self.log(f'[Thumbnails] Got {len(image_urls)} URLs, downloading...')
 
@@ -6665,238 +6747,156 @@ class App(tk.Tk):
                 state='normal', text='🔍  FIND THUMBNAILS'))
 
     def _thumb_search(self, sess, query, max_results=40):
-        import urllib.parse as _up, json as _js, re as _re, time as _time
+        import urllib.parse as _up, json as _js, re as _re
 
-        results = []
-
-        def _dedup(lst):
-            seen = set(); out = []
-            for item in lst:
-                if item[0] not in seen:
-                    seen.add(item[0]); out.append(item)
-            return out
-
-        # ── 1. Unsplash API (free 50/hr, best quality) ────────────────────────
-        unsplash_key = (self._keys.get('_unsplash','') or
+        # ── 1. Unsplash API (free 50/hr, best quality) ───────────────────────
+        # Try _keys first, then fall back to cfg directly (in case settings tab not opened)
+        unsplash_key = (self._keys.get('_unsplash','') or 
                         self.cfg.get('key_unsplash','')).strip()
         if unsplash_key:
             try:
                 self.log('[Thumbnails] Trying Unsplash API...')
+                # Use original query term only (strip pref suffixes — Unsplash is photos not streamers)
                 raw_q = self.thumb_query_var.get().strip()
                 r = sess.get('https://api.unsplash.com/search/photos',
-                    params={'query': raw_q, 'per_page': min(max_results, 30),
+                    params={'query': raw_q, 'per_page': max_results,
                             'order_by': 'relevant', 'orientation': 'landscape',
                             'content_filter': 'low'},
                     headers={'Authorization': f'Client-ID {unsplash_key}',
                              'Accept-Version': 'v1'},
-                    timeout=12, verify=False)
+                    timeout=10, verify=False)
                 self.log(f'[Thumbnails] Unsplash status: {r.status_code}')
                 if r.status_code == 200:
                     items = r.json().get('results', [])
                     self.log(f'[Thumbnails] Unsplash results: {len(items)}')
+                    results = []
                     for item in items:
                         urls = item.get('urls', {})
-                        url = urls.get('full') or urls.get('regular', '')
-                        if url:
-                            results.append((url, item.get('width', 1920), item.get('height', 1080)))
+                        url  = urls.get('full') or urls.get('regular','')
+                        w    = item.get('width', 1920)
+                        h    = item.get('height', 1080)
+                        if url: results.append((url, w, h))
                     if results: return results[:max_results]
             except Exception as ex:
                 self.log(f'[Thumbnails] Unsplash error: {ex}', YELLOW)
 
-        # ── 2. DuckDuckGo Images (updated token extraction 2025) ──────────────
+        # ── 2. DuckDuckGo (proper session with cookies) ───────────────────────
         try:
             self.log('[Thumbnails] Trying DuckDuckGo...')
-            # Step 1: get fresh session cookies
-            _ddg_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                              'AppleWebKit/537.36 (KHTML, like Gecko) '
-                              'Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'DNT': '1',
-            }
-            sess.get('https://duckduckgo.com/', headers=_ddg_headers, timeout=8, verify=False)
-            _time.sleep(0.5)
-            # Step 2: get vqd token — DDG now embeds it in the initial page JS
+            # Warm up session with a real browser visit first
+            sess.get('https://duckduckgo.com/', timeout=8, verify=False)
+            import time as _t; _t.sleep(0.3)
             r1 = sess.get('https://duckduckgo.com/',
                 params={'q': query, 'iax': 'images', 'ia': 'images'},
-                headers=_ddg_headers, timeout=10, verify=False)
+                timeout=10, verify=False)
             self.log(f'[Thumbnails] DDG html: {r1.status_code}, {len(r1.text)}ch')
-            # Multiple token patterns DDG has used over time
-            vqd_val = None
-            for pat in [
-                r'vqd=(["\']?)([0-9\-]+)\1',
-                r'"vqd"\s*:\s*"([^"]+)"',
-                r"vqd='([^']+)'",
-                r'vqd%3D([0-9\-]+)',
-            ]:
-                m = _re.search(pat, r1.text)
-                if m:
-                    vqd_val = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1)
-                    break
-            self.log(f'[Thumbnails] DDG vqd: {vqd_val or "NOT FOUND"}')
-            if vqd_val:
-                _time.sleep(0.4)
+            vqd = _re.search(r'vqd=([0-9-]+)', r1.text)
+            if not vqd:
+                # Try alternate token location
+                vqd = _re.search(r'"vqd":"([^"]+)"', r1.text)
+            self.log(f'[Thumbnails] DDG vqd: {vqd.group(1) if vqd else "NOT FOUND"}')
+            if vqd:
+                import time as _t2; _t2.sleep(0.5)
                 r2 = sess.get('https://duckduckgo.com/i.js',
-                    params={'q': query, 'o': 'json', 'vqd': vqd_val,
-                            'f': ',,,,,', 'p': '1', 'l': 'us-en'},
-                    headers={**_ddg_headers,
-                             'Referer': 'https://duckduckgo.com/',
-                             'Accept': 'application/json, text/javascript, */*; q=0.01',
-                             'X-Requested-With': 'XMLHttpRequest'},
-                    timeout=12, verify=False)
+                    params={'q': query, 'o': 'json', 'vqd': vqd.group(1),
+                            'f': ',,,,,', 'p': '1', 'l': 'wt-wt'},
+                    headers={
+                        'Referer': 'https://duckduckgo.com/',
+                        'Accept': 'application/json, text/javascript, */*; q=0.01',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'same-origin',
+                    },
+                    timeout=10, verify=False)
                 self.log(f'[Thumbnails] DDG api: {r2.status_code}')
                 if r2.status_code == 200:
-                    try:
-                        items = r2.json().get('results', [])
-                        self.log(f'[Thumbnails] DDG results: {len(items)}')
-                        for i in items:
-                            img = i.get('image') or i.get('thumbnail','')
-                            if img: results.append((img, i.get('width',1280), i.get('height',720)))
-                        if results: return _dedup(results)[:max_results]
-                    except Exception: pass
+                    items = r2.json().get('results', [])
+                    self.log(f'[Thumbnails] DDG results: {len(items)}')
+                    results = [(i['image'], i.get('width',1280), i.get('height',720))
+                               for i in items if i.get('image')]
+                    if results: return results[:max_results]
         except Exception as ex:
             self.log(f'[Thumbnails] DDG error: {ex}', YELLOW)
 
-        # ── 3. Bing Images (updated scraping patterns 2025) ───────────────────
+        # ── 3. Bing (with warmed session) ─────────────────────────────────────
         try:
             self.log('[Thumbnails] Trying Bing...')
-            _bing_hdrs = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                              'AppleWebKit/537.36 (KHTML, like Gecko) '
-                              'Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://www.bing.com/',
-            }
-            # Warm up
-            sess.get('https://www.bing.com/', headers=_bing_hdrs, timeout=8, verify=False)
-            _time.sleep(0.5)
+            sess.get('https://www.bing.com/', timeout=8, verify=False)
+            import time as _t; _t.sleep(0.4)
             r = sess.get('https://www.bing.com/images/search',
-                params={'q': query, 'form': 'HDRSC2', 'first': '1', 'scenario': 'ImageBasicHover'},
-                headers=_bing_hdrs, timeout=15, verify=False)
+                params={'q': query, 'qft': '+filterui:imagesize-large', 'FORM':'IRFLTR'},
+                headers={'Referer': 'https://www.bing.com/',
+                         'Accept': 'text/html,application/xhtml+xml'},
+                timeout=12, verify=False)
             self.log(f'[Thumbnails] Bing: {r.status_code}, {len(r.text)}ch')
-            _bing_results = []
-            # Pattern 1: mediaurl (the actual full image URL, most reliable)
-            for m in _re.finditer(r'"mediaurl"\s*:\s*"(https?://[^"]+)"', r.text, _re.IGNORECASE):
-                url = m.group(1).replace('\\u0026','&').replace('\\/', '/')
-                if not any(x in url.lower() for x in ['bing.com','microsoft.com','msn.com']):
-                    _bing_results.append((url, 1280, 720))
-            # Pattern 2: murl (original image)
-            for m in _re.finditer(r'"murl"\s*:\s*"(https?://[^"]+)"', r.text):
-                url = m.group(1).replace('\\u0026','&').replace('\\/', '/')
-                if not any(x in url.lower() for x in ['bing.com','microsoft.com','msn.com','th.bing']):
-                    _bing_results.append((url, 1280, 720))
-            # Pattern 3: turl (thumbnail — fallback)
-            for m in _re.finditer(r'"turl"\s*:\s*"(https?://[^"]+)"', r.text):
-                url = m.group(1).replace('\\u0026','&').replace('\\/', '/')
-                if 'tse' in url or 'mm' in url:  # Bing CDN thumbnails are OK
-                    _bing_results.append((url, 474, 266))
-            _bing_results = _dedup(_bing_results)
-            self.log(f'[Thumbnails] Bing urls found: {len(_bing_results)}')
-            if _bing_results:
-                results.extend(_bing_results)
-                return _dedup(results)[:max_results]
+            results = []
+            # Pattern 1: murl JSON field
+            for m in _re.finditer(r'"murl":"(https?://[^"]+)"', r.text):
+                url = m.group(1)
+                if not any(x in url for x in ['bing.com','microsoft.com','msn.com','th.bing']):
+                    results.append((url, 1280, 720))
+            # Pattern 2: iurl field (image url)
+            for m in _re.finditer(r'"iurl":"(https?://[^"]+)"', r.text):
+                url = m.group(1)
+                if not any(x in url for x in ['bing.com','microsoft.com','msn.com','th.bing']):
+                    results.append((url, 1280, 720))
+            # Pattern 3: data-src on img tags
+            for m in _re.finditer(r'data-src="(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', r.text):
+                url = m.group(1)
+                if 'bing' not in url:
+                    results.append((url, 1280, 720))
+            # Deduplicate
+            seen = set(); deduped = []
+            for item in results:
+                if item[0] not in seen:
+                    seen.add(item[0]); deduped.append(item)
+            results = deduped
+            self.log(f'[Thumbnails] Bing urls found: {len(results)}')
+            if results: return results[:max_results]
         except Exception as ex:
             self.log(f'[Thumbnails] Bing error: {ex}', YELLOW)
 
-        # ── 4. Google Images (improved scraping, handles encoding) ────────────
-        try:
-            self.log('[Thumbnails] Trying Google Images...')
-            _gq = _up.quote_plus(query)
-            _g_hdrs = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                              'AppleWebKit/537.36 (KHTML, like Gecko) '
-                              'Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }
-            _gr = sess.get(
-                f'https://www.google.com/search?q={_gq}&tbm=isch&hl=en&gl=us&num=30',
-                headers=_g_hdrs, timeout=12, verify=False)
-            _g_results = []
-            # Pattern 1: AF_initDataCallback blocks contain full-size image URLs
-            for blk in _re.findall(r'AF_initDataCallback\(({.*?})\)', _gr.text, _re.DOTALL):
-                for _u in _re.findall(r'https?://[^\s"\'\\]+\.(?:jpg|jpeg|png|webp)', blk):
-                    if len(_u) < 400 and not any(x in _u for x in ['google.com','gstatic.com','googleapis']):
-                        _g_results.append((_u, 1280, 720))
-            # Pattern 2: ou field in JSON (original URL)
-            for m in _re.finditer(r'"ou"\s*:\s*"(https?://[^"]+)"', _gr.text):
-                url = m.group(1).replace('\\u003d','=').replace('\\u0026','&')
-                if not any(x in url for x in ['google.com','gstatic.com']):
-                    _g_results.append((url, 1280, 720))
-            # Pattern 3: data-src img tags
-            for m in _re.finditer(r'data-src="(https?://[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"', _gr.text):
-                url = m.group(1)
-                if not any(x in url for x in ['google','gstatic']):
-                    _g_results.append((url, 640, 480))
-            _g_results = _dedup(_g_results)
-            self.log(f'[Thumbnails] Google Images: {len(_g_results)} urls')
-            if _g_results:
-                results.extend(_g_results)
-                return _dedup(results)[:max_results]
-        except Exception as ex:
-            self.log(f'[Thumbnails] Google Images error: {ex}', YELLOW)
-
-        # ── 5. Pixabay API (free key or scrape fallback) ──────────────────────
+        # ── 4. Pixabay (scrape) ───────────────────────────────────────────────
         try:
             self.log('[Thumbnails] Trying Pixabay...')
-            pixabay_key = self.cfg.get('key_pixabay', '').strip()
-            if pixabay_key:
-                r = sess.get('https://pixabay.com/api/',
-                    params={'key': pixabay_key, 'q': query, 'image_type': 'photo',
-                            'per_page': min(max_results, 20), 'safesearch': 'false',
-                            'orientation': 'horizontal'},
-                    timeout=12, verify=False)
-                if r.status_code == 200:
-                    items = r.json().get('hits', [])
-                    for item in items:
-                        url = item.get('largeImageURL') or item.get('webformatURL','')
-                        if url: results.append((url, item.get('imageWidth',1280), item.get('imageHeight',720)))
-                    if results:
-                        self.log(f'[Thumbnails] Pixabay API: {len(results)} results')
-                        return _dedup(results)[:max_results]
-            else:
-                # Scrape fallback
-                r = sess.get(f'https://pixabay.com/images/search/{_up.quote(query)}/',
-                    timeout=12, verify=False)
-                self.log(f'[Thumbnails] Pixabay scrape: {r.status_code}, {len(r.text)}ch')
-                for m in _re.finditer(r'"largeImageURL"\s*:\s*"(https?://[^"]+)"', r.text):
-                    results.append((m.group(1), 1920, 1080))
-                for m in _re.finditer(r'"webformatURL"\s*:\s*"(https?://[^"]+)"', r.text):
-                    results.append((m.group(1), 1280, 720))
-                if results:
-                    self.log(f'[Thumbnails] Pixabay scrape: {len(results)} urls')
-                    return _dedup(results)[:max_results]
+            r = sess.get(f'https://pixabay.com/images/search/{_up.quote(query)}/',
+                timeout=12, verify=False)
+            self.log(f'[Thumbnails] Pixabay: {r.status_code}, {len(r.text)}ch')
+            results = []
+            for m in _re.finditer(r'"largeImageURL":"(https?://[^"]+)"', r.text):
+                results.append((m.group(1), 1920, 1080))
+            for m in _re.finditer(r'"webformatURL":"(https?://[^"]+)"', r.text):
+                results.append((m.group(1), 1280, 720))
+            self.log(f'[Thumbnails] Pixabay urls: {len(results)}')
+            if results: return list(dict.fromkeys(results))[:max_results]
         except Exception as ex:
             self.log(f'[Thumbnails] Pixabay error: {ex}', YELLOW)
 
-        # ── 6. Pexels API (free, no credit card) ─────────────────────────────
-        pexels_key = self.cfg.get('key_pexels', '').strip()
-        if pexels_key:
-            try:
-                self.log('[Thumbnails] Trying Pexels API...')
-                r = sess.get('https://api.pexels.com/v1/search',
-                    params={'query': query, 'per_page': min(max_results, 40),
-                            'orientation': 'landscape', 'size': 'large'},
-                    headers={'Authorization': pexels_key},
-                    timeout=12, verify=False)
-                if r.status_code == 200:
-                    for photo in r.json().get('photos', []):
-                        src = photo.get('src', {})
-                        url = src.get('original') or src.get('large2x') or src.get('large','')
-                        if url:
-                            results.append((url, photo.get('width',1920), photo.get('height',1080)))
-                    if results:
-                        self.log(f'[Thumbnails] Pexels: {len(results)} results')
-                        return _dedup(results)[:max_results]
-            except Exception as ex:
-                self.log(f'[Thumbnails] Pexels error: {ex}', YELLOW)
 
-        self.log('[Thumbnails] ALL BACKENDS FAILED. Tips to fix:', RED)
-        self.log('  • Add a free Unsplash key (unsplash.com/developers) in Thumbnails tab', YELLOW)
-        self.log('  • Or add a free Pexels key (pexels.com/api) in Settings → API Keys', YELLOW)
-        self.log('  • Or add a free Pixabay key (pixabay.com/api/docs) in Settings → API Keys', YELLOW)
+        # Try Google Images as last resort
+        try:
+            self.log('[Thumbnails] Trying Google Images...')
+            import urllib.parse as _up2, re as _re2
+            _gq = _up2.quote_plus(query)
+            _gh = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            _gr = sess.get(f'https://www.google.com/search?q={_gq}&tbm=isch&num=10',
+                          headers=_gh, timeout=10, verify=False)
+            _gurls = _re2.findall(r'"(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', _gr.text)
+            _gurls = [u for u in _gurls if len(u) < 300 and 'gstatic' not in u][:max_results]
+            self.log(f'[Thumbnails] Google Images: {len(_gurls)} urls')
+            for _gu in _gurls:
+                try:
+                    _ir = sess.get(_gu, timeout=8, verify=False)
+                    if _ir.status_code == 200 and len(_ir.content) > 5000:
+                        results.append((_gu, 1280, 720))
+                        if len(results) >= max_results: break
+                except: continue
+            if results: return list(dict.fromkeys(results))[:max_results]
+        except Exception as _ge:
+            self.log(f'[Thumbnails] Google Images error: {_ge}')
+
+        self.log('[Thumbnails] ALL BACKENDS FAILED. Add a free Unsplash key for best results.', RED)
         return []
 
     def _thumb_render(self):
@@ -8069,17 +8069,32 @@ class App(tk.Tk):
             return e
 
         # ── API Keys ──
-        s1 = section('🔑  AI Provider API Keys',
-                     'Keys are saved locally — never sent anywhere except the AI provider you choose')
+        # Build section header manually so we can add Export/Import buttons to it
+        _s1_outer = tk.Frame(inner, bg=BG3, highlightbackground=BG4, highlightthickness=1)
+        _s1_outer.pack(fill='x', padx=14, pady=(10,0))
+        _s1_hd = tk.Frame(_s1_outer, bg=BG4); _s1_hd.pack(fill='x')
+        tk.Frame(_s1_hd, bg=ACCENT, width=3).pack(side='left', fill='y')
+        _s1_hd_inner = tk.Frame(_s1_hd, bg=BG4); _s1_hd_inner.pack(side='left', padx=10, pady=7, fill='x', expand=True)
+        tk.Label(_s1_hd_inner, text='🔑  AI Provider API Keys', font=('Segoe UI', 10, 'bold'), fg=FG, bg=BG4).pack(anchor='w')
+        tk.Label(_s1_hd_inner, text='Keys are saved locally — never sent anywhere except the AI provider you choose',
+                 font=('Segoe UI', 8), fg=FG2, bg=BG4).pack(anchor='w')
+        # Export / Import buttons in the header — right side
+        _s1_btn_frame = tk.Frame(_s1_hd, bg=BG4)
+        _s1_btn_frame.pack(side='right', padx=10, pady=7)
+        _export_btn = tk.Button(_s1_btn_frame, text='📤  Export All Keys', font=('Segoe UI', 8),
+                 bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10, pady=4)
+        _export_btn.pack(side='left', padx=(0,6))
+        _import_btn = tk.Button(_s1_btn_frame, text='📥  Import All Keys', font=('Segoe UI', 8),
+                 bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10, pady=4)
+        _import_btn.pack(side='left')
+        s1 = tk.Frame(_s1_outer, bg=BG3); s1.pack(fill='x', padx=12, pady=8)
 
-        # All providers use identical layout — order: Gemini, Unsplash, Groq, OpenRouter, Pexels, Pixabay
+        # All 4 providers use identical layout — order: Gemini, Unsplash, Groq, OpenRouter
         _all_providers = [
-            ('Google Gemini (Free)',     'Gemini',      'Free · best for long videos',          'https://aistudio.google.com/app/apikey'),
-            ('_unsplash',               'Unsplash',    'Free · 50 req/hr · thumbnail search',  'https://unsplash.com/oauth/applications'),
-            ('Groq (Free)',             'Groq',        'Free · fastest inference',              'https://console.groq.com/keys'),
-            ('OpenRouter (Free models)','OpenRouter',  'Free models available',                 'https://openrouter.ai/keys'),
-            ('_pexels',                 'Pexels',      'Free · thumbnails · pexels.com/api',    'https://www.pexels.com/api/'),
-            ('_pixabay',                'Pixabay',     'Free · thumbnails · pixabay.com/api',   'https://pixabay.com/api/docs/'),
+            ('Google Gemini (Free)',     'Gemini',      'Free · best for long videos',        'https://aistudio.google.com/app/apikey'),
+            ('_unsplash',               'Unsplash',    'Free · 50 req/hr · thumbnail search', 'https://unsplash.com/oauth/applications'),
+            ('Groq (Free)',             'Groq',        'Free · fastest inference',             'https://console.groq.com/keys'),
+            ('OpenRouter (Free models)','OpenRouter',  'Free models available',                'https://openrouter.ai/keys'),
         ]
 
         # Ensure Unsplash var exists
@@ -8094,70 +8109,61 @@ class App(tk.Tk):
             def _t(): entry.config(show='' if entry.cget('show')=='•' else '•')
             return _t
 
-        # Character-unit widths on Labels — never clips regardless of DPI or canvas size
-        _COL_NAME  = 16   # chars: left name column
-        _COL_RIGHT = 32   # chars: right hint column
+        # Fixed column widths so ALL rows (primary + extra) align perfectly
+        # Using character units on Labels directly — immune to canvas sizing issues
+        _COL_NAME  = 14   # chars for left name column
+        _COL_RIGHT = 32   # chars for right hint column
 
         for pkey, display, hint, url in _all_providers:
             if pkey == '_unsplash':
                 _var = self.v_unsplash_key
-            elif pkey == '_pexels':
-                if not hasattr(self, 'v_pexels_key'):
-                    self.v_pexels_key = tk.StringVar(value=self._keys.get('_pexels',''))
-                _var = self.v_pexels_key
-            elif pkey == '_pixabay':
-                if not hasattr(self, 'v_pixabay_key'):
-                    self.v_pixabay_key = tk.StringVar(value=self._keys.get('_pixabay',''))
-                _var = self.v_pixabay_key
             else:
                 _var = self.v_keys.get(pkey, tk.StringVar())
             _has = bool(_var.get().strip())
-            _is_image_api = pkey in ('_unsplash', '_pexels', '_pixabay', '_brave_search')
 
             # ── Primary key row ───────────────────────────────────────────────
-            pr = tk.Frame(s1, bg=BG3); pr.pack(fill='x', pady=2)
+            pr = tk.Frame(s1, bg=BG3); pr.pack(fill='x', pady=3)
 
-            # LEFT: fixed char-width label — dot + name, always visible
-            tk.Label(pr, text=('\u25cf ' if _has else '\u25cb ') + display,
+            # LEFT: single label, character width — no frame needed
+            tk.Label(pr, text=f'{"●" if _has else "○"} {display}',
                      font=('Segoe UI',9,'bold'),
                      fg=GREEN if _has else FG3, bg=BG3,
-                     width=_COL_NAME, anchor='w').pack(side='left', padx=(6,0))
+                     width=_COL_NAME, anchor='w').pack(side='left', padx=(4,0))
 
-            # RIGHT: packed before entry so they always claim their space
-            tk.Button(pr, text='Get key \u2192', font=('Segoe UI',7),
+            # RIGHT: hint + Get key — packed before entry so they claim space first
+            tk.Button(pr, text='Get key →', font=('Segoe UI',7),
                      bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=6,
-                     command=lambda u=url: __import__('webbrowser').open(u)
-                     ).pack(side='right', padx=(0,6))
+                     command=lambda u=url: __import__('webbrowser').open(u)).pack(side='right', padx=(0,6))
             tk.Label(pr, text=hint, font=('Segoe UI',7), fg=FG2, bg=BG3,
                      width=_COL_RIGHT, anchor='e').pack(side='right')
 
-            # + button — AI providers only
-            if not _is_image_api:
-                _plus_btn = tk.Button(pr, text='\uff0b', font=('Segoe UI',9,'bold'),
-                                      bg=BG3, fg=ACCENT2, relief='flat', bd=0,
-                                      cursor='hand2', padx=6)
-                _plus_btn.pack(side='right', padx=2)
+            # RIGHT: + button (fixed, before entry)
+            _plus_holder = tk.Frame(pr, bg=BG3, width=28)
+            _plus_holder.pack(side='right'); _plus_holder.pack_propagate(False)
+            _plus_btn = tk.Button(_plus_holder, text='＋', font=('Segoe UI',9,'bold'),
+                                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2')
+            _plus_btn.pack(expand=True)
 
             # MIDDLE: entry expands to fill
             ef = tk.Frame(pr, bg=BG4)
             ef.pack(side='left', fill='x', expand=True, padx=6)
             e = tk.Entry(ef, textvariable=_var, font=('Consolas',9),
-                        bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='\u2022')
+                        bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='•')
             e.pack(side='left', fill='x', expand=True)
-            tk.Button(ef, text='\U0001f441', font=('Segoe UI',8), bg=BG4, fg=FG2,
+            tk.Button(ef, text='👁', font=('Segoe UI',8), bg=BG4, fg=FG2,
                      relief='flat', bd=0, cursor='hand2', padx=4,
                      command=_make_eye_toggle(e)).pack(side='right')
             _provider_entries[pkey] = _var
 
-            # ── Extra key rows — AI providers only ───────────────────────────
+            # ── Extra key rows container ──────────────────────────────────────
             _extra_key_vars[pkey] = []
-            if _is_image_api:
-                continue  # no multi-key for image APIs
-
+            _extra_key_frames[pkey] = tk.Frame(s1, bg=BG3)
+            _extra_key_frames[pkey].pack(fill='x')
             _cfg_extra_k = {
-                'Google Gemini (Free)':     'key_gemini_extra',
-                'Groq (Free)':              'key_groq_extra',
-                'OpenRouter (Free models)': 'key_openrouter_extra',
+                'Google Gemini (Free)':'key_gemini_extra',
+                'Groq (Free)':'key_groq_extra',
+                'OpenRouter (Free models)':'key_openrouter_extra',
+                '_unsplash':'key_unsplash_extra'
             }.get(pkey, '')
             _existing_extras = [k.strip() for k in self.cfg.get(_cfg_extra_k,'').split(',') if k.strip()]
 
@@ -8165,37 +8171,40 @@ class App(tk.Tk):
                 _ev = tk.StringVar(value=val)
                 _extra_key_vars[pk].append(_ev)
                 _kidx = len(_extra_key_vars[pk])
-                _erow = tk.Frame(s1, bg=BG3); _erow.pack(fill='x', pady=1)
 
-                # LEFT: same char width as primary name col
-                tk.Label(_erow, text=f'  \u21b3 Key {_kidx+1}',
-                         font=('Segoe UI',8), fg=ACCENT2, bg=BG3,
-                         width=_COL_NAME, anchor='w').pack(side='left', padx=(6,0))
+                # Same parent as primary rows
+                _erow = tk.Frame(s1, bg=BG3)
+                _erow.pack(fill='x', pady=1)
 
-                # RIGHT: mirrors primary row exactly — ✕ where ＋ is, blank where hint is, blank where Get key is
-                tk.Label(_erow, text='', bg=BG3, padx=6).pack(side='right', padx=(0,6))  # matches Get key → width
-                tk.Label(_erow, text='', bg=BG3, width=_COL_RIGHT).pack(side='right')    # matches hint label
+                # LEFT: character-width label — matches primary row exactly
+                tk.Label(_erow, text=f'  ↳ Key {_kidx+1}',
+                        font=('Segoe UI',8), fg=ACCENT2, bg=BG3,
+                        width=_COL_NAME, anchor='w').pack(side='left', padx=(4,0))
+
+                # RIGHT: spacer + ✕ button — packed before entry same as primary
                 tk.Button(_erow, text='✕', font=('Segoe UI',9,'bold'),
                          bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=6,
                          command=lambda r=_erow, v=_ev, pk2=pk: (
                              r.destroy(), _extra_key_vars[pk2].remove(v)
-                         )).pack(side='right', padx=2)                                    # matches ＋ button
+                         )).pack(side='right', padx=(0,6))
+                # Blank spacer same width as hint column keeps entry aligned with primary
+                tk.Label(_erow, text='', bg=BG3,
+                         width=_COL_RIGHT).pack(side='right')
 
-                # MIDDLE: orange-bordered entry
+                # MIDDLE: orange-bordered entry — same padx=6 as primary
                 _eef = tk.Frame(_erow, bg=ACCENT, padx=1, pady=1)
                 _eef.pack(side='left', fill='x', expand=True, padx=6)
                 _einn = tk.Frame(_eef, bg=BG4); _einn.pack(fill='both', expand=True)
                 _ee = tk.Entry(_einn, textvariable=_ev, font=('Consolas',9),
-                              bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='\u2022')
+                              bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='•')
                 _ee.pack(side='left', fill='x', expand=True)
-                tk.Button(_einn, text='\U0001f441', font=('Segoe UI',8), bg=BG4, fg=FG2,
+                tk.Button(_einn, text='👁', font=('Segoe UI',8), bg=BG4, fg=FG2,
                          relief='flat', bd=0, cursor='hand2', padx=4,
                          command=_make_eye_toggle(_ee)).pack(side='right')
 
             for _ev_val in _existing_extras:
                 _add_extra_row(pkey, _ev_val)
             _plus_btn.config(command=lambda pk=pkey: _add_extra_row(pk))
-
 
         def _save_keys():
             for pkey, var in _provider_entries.items():
@@ -8205,12 +8214,6 @@ class App(tk.Tk):
                     self.cfg['key_unsplash'] = val
                     if hasattr(self, 'thumb_unsplash_var'):
                         self.thumb_unsplash_var.set(val)
-                elif pkey == '_pexels':
-                    self._keys['_pexels'] = val
-                    self.cfg['key_pexels'] = val
-                elif pkey == '_pixabay':
-                    self._keys['_pixabay'] = val
-                    self.cfg['key_pixabay'] = val
                 else:
                     self._keys[pkey] = val
             # Save extra keys
@@ -8228,6 +8231,89 @@ class App(tk.Tk):
             save_cfg(self.cfg)
             self._auto_select_provider()
             self.log(f'✅ API keys saved', GREEN)
+
+        def _export_keys():
+            import json as _j, base64 as _b64, hashlib as _hs
+            from tkinter import simpledialog as _sd, filedialog as _fd
+            _save_keys()
+            _bundle = {'v': 1, 'keys': {
+                'key_gemini':           self._keys.get('Google Gemini (Free)', ''),
+                'key_gemini_extra':     self.cfg.get('key_gemini_extra', ''),
+                'key_groq':             self._keys.get('Groq (Free)', ''),
+                'key_groq_extra':       self.cfg.get('key_groq_extra', ''),
+                'key_openrouter':       self._keys.get('OpenRouter (Free models)', ''),
+                'key_openrouter_extra': self.cfg.get('key_openrouter_extra', ''),
+                'key_unsplash':         self._keys.get('_unsplash', ''),
+            }}
+            pw = _sd.askstring('Export Keys', 'Set a password to encrypt your keys:', show='*', parent=self)
+            if not pw: return
+            dest = _fd.asksaveasfilename(title='Save encrypted key bundle',
+                defaultextension='.cfkeys', initialfile='clipfinder_keys.cfkeys',
+                filetypes=[('ClipFinder Keys', '*.cfkeys'), ('All', '*.*')])
+            if not dest: return
+            try:
+                _key = _hs.sha256(pw.encode()).digest()
+                _data = _j.dumps(_bundle).encode()
+                _cipher = bytearray()
+                _ks = _key
+                for i, b in enumerate(_data):
+                    if i % 32 == 0 and i > 0: _ks = _hs.sha256(_ks).digest()
+                    _cipher.append(b ^ _ks[i % 32])
+                with open(dest, 'wb') as _f:
+                    _f.write(_b64.b64encode(b'CFKEYS1:' + bytes(_cipher)))
+                messagebox.showinfo('Exported', f'Keys saved to:\n{dest}\n\nKeep this file and your password safe!')
+                self.log(f'✅ Keys exported to {dest}', GREEN)
+            except Exception as ex:
+                messagebox.showerror('Export failed', str(ex))
+
+        def _import_keys():
+            import json as _j, base64 as _b64, hashlib as _hs
+            from tkinter import simpledialog as _sd, filedialog as _fd
+            src = _fd.askopenfilename(title='Select encrypted key bundle',
+                filetypes=[('ClipFinder Keys', '*.cfkeys'), ('All', '*.*')])
+            if not src: return
+            pw = _sd.askstring('Import Keys', 'Enter the password for this key bundle:', show='*', parent=self)
+            if not pw: return
+            try:
+                with open(src, 'rb') as _f: _raw = _b64.b64decode(_f.read())
+                _magic = b'CFKEYS1:'
+                if not _raw.startswith(_magic):
+                    messagebox.showerror('Import failed', 'Not a valid ClipFinder key bundle.'); return
+                _cipher = _raw[len(_magic):]
+                _key = _hs.sha256(pw.encode()).digest()
+                _plain = bytearray()
+                _ks = _key
+                for i, b in enumerate(_cipher):
+                    if i % 32 == 0 and i > 0: _ks = _hs.sha256(_ks).digest()
+                    _plain.append(b ^ _ks[i % 32])
+                _bundle = _j.loads(_plain.decode())
+                if _bundle.get('v') != 1:
+                    messagebox.showerror('Import failed', 'Unknown bundle version.'); return
+                _kd = _bundle.get('keys', {})
+                self._keys['Google Gemini (Free)']     = _kd.get('key_gemini', '')
+                self._keys['Groq (Free)']              = _kd.get('key_groq', '')
+                self._keys['OpenRouter (Free models)'] = _kd.get('key_openrouter', '')
+                self._keys['_unsplash']                = _kd.get('key_unsplash', '')
+                self.cfg.update({k: _kd.get(k, '') for k in [
+                    'key_gemini','key_gemini_extra','key_groq','key_groq_extra',
+                    'key_openrouter','key_openrouter_extra','key_unsplash']})
+                save_cfg(self.cfg)
+                for _pk, _ck in [('Google Gemini (Free)','key_gemini'),
+                                  ('Groq (Free)','key_groq'),
+                                  ('OpenRouter (Free models)','key_openrouter')]:
+                    if _pk in self.v_keys: self.v_keys[_pk].set(_kd.get(_ck, ''))
+                if hasattr(self, 'v_unsplash_key'): self.v_unsplash_key.set(_kd.get('key_unsplash',''))
+                self._auto_select_provider()
+                messagebox.showinfo('Imported', 'All keys imported!\nExtra keys (Key 2, Key 3) reload on next Settings open.')
+                self.log('✅ Keys imported successfully', GREEN)
+            except (ValueError, KeyError):
+                messagebox.showerror('Import failed', 'Wrong password or corrupted file.')
+            except Exception as ex:
+                messagebox.showerror('Import failed', str(ex))
+
+        # Wire export/import to the header buttons created earlier
+        _export_btn.config(command=_export_keys)
+        _import_btn.config(command=_import_keys)
 
         # Save & Apply button
         btn_row = tk.Frame(s1, bg=BG3); btn_row.pack(fill='x', pady=(10,0))
@@ -8480,89 +8566,25 @@ class App(tk.Tk):
         # Packages that need --no-deps to avoid DLL permission conflicts
         _NODEPS_PKGS = {'faster-whisper', 'openai-whisper'}
 
+        _UPDATE_FLAG = USER_DIR / 'pending_update.flag'
+
+        def _request_update_on_reboot(pkg='all'):
+            try:
+                existing = set(_UPDATE_FLAG.read_text().splitlines()) if _UPDATE_FLAG.exists() else set()
+                existing.add(pkg)
+                _UPDATE_FLAG.write_text('\n'.join(sorted(existing)))
+            except: pass
+
         def _update_pkg(pkg_name, btn):
-            btn.config(text='⟳ Updating...', state='disabled', bg=BG4)
-            self.set_busy(True)
-            self.set_progress(f'⬇ Updating {pkg_name}...', pct=10)
-            def _do():
-                import subprocess as _sp
-                try:
-                    _pkg_parts = pkg_name.split()
-                    base_cmd = _pip_cmd([_pkg_parts[0]], _pkg_parts[1:] if len(_pkg_parts) > 1 else [])
-                    if base_cmd is None:
-                        self.after(0, lambda: (btn.config(text='❌ No Python 3.12', bg=RED, fg=FG, state='normal'),
-                                               self.log('❌ Python 3.12 not found — install from python.org', RED)))
-                        return
-                    if pkg_name in _NODEPS_PKGS:
-                        r = _sp.run(base_cmd + ['--no-deps'],
-                                   capture_output=True, text=True, timeout=120)
-                        if r.returncode != 0:
-                            r = _sp.run(base_cmd, capture_output=True, text=True, timeout=120)
-                    else:
-                        r = _sp.run(base_cmd, capture_output=True, text=True, timeout=120)
-                    if r.returncode == 0:
-                        self.after(0, lambda: (
-                            btn.config(text='✅ Updated', bg='#1a3a1a', fg=GREEN, state='normal'),
-                            self.log(f'✅ Updated {pkg_name}', GREEN),
-                            self.set_busy(False),
-                            self.set_progress(f'✅ {pkg_name} updated', pct=100),
-                        ))
-                    else:
-                        err = (r.stderr or '')[-120:].strip()
-                        self.after(0, lambda e=err: (
-                            btn.config(text='❌ Failed', bg='#3a1a1a', fg=RED, state='normal'),
-                            self.log(f'❌ Update {pkg_name}: {e}', RED),
-                            self.set_busy(False),
-                            self.set_progress(f'❌ {pkg_name} failed', pct=0),
-                        ))
-                except Exception as ex:
-                    self.after(0, lambda e=ex: (
-                        btn.config(text='❌ Error', bg='#3a1a1a', fg=RED, state='normal'),
-                        self.log(f'❌ {pkg_name}: {e}', RED),
-                        self.set_busy(False),
-                        self.set_progress(f'❌ {pkg_name} error', pct=0),
-                    ))
-            import threading; threading.Thread(target=_do, daemon=True).start()
+            _request_update_on_reboot(pkg_name)
+            btn.config(text='⏳ On reboot', bg='#2a2000', fg=ACCENT2, state='normal')
+            self.log(f'📋 {pkg_name} queued — restart ClipFinder to install', ACCENT2)
+            messagebox.showinfo('Queued', f'{pkg_name} will install on next launch.\nRestart ClipFinder now to apply.')
 
         def _update_all():
-            all_pkgs = [p for _,p,_ in mods]
-            n = len(all_pkgs)
-            self.set_busy(True)
-            self.set_progress('🔄 Updating packages...', pct=2)
-            def _do_all():
-                import subprocess as _sp
-                self.log(f'🔄 Updating {n} packages...', ACCENT2)
-                ok_count = 0
-                for i, pkg in enumerate(all_pkgs):
-                    pct = max(2, int(i / n * 95))
-                    self.after(0, lambda p=pkg, pc=pct:
-                        self.set_progress(f'⬇ Updating {p}...', pct=pc))
-                    self.log(f'  → {pkg}...', FG2)
-                    _nodeps = pkg in {'faster-whisper', 'openai-whisper'}
-                    _pkg_parts2 = pkg.split()
-                    _locked_pkg = {'google-genai','curl-cffi','opencv-python','soundfile','requests'}
-                    _nd = ['--no-deps'] if _pkg_parts2[0] in _locked_pkg else []
-                    _cmd = _pip_cmd([_pkg_parts2[0]], _nd + (_pkg_parts2[1:] if len(_pkg_parts2)>1 else []))
-                    if _cmd is None: continue
-                    if _nodeps:
-                        r = _sp.run(_cmd + ['--no-deps'], capture_output=True, text=True, timeout=120)
-                        if r.returncode != 0:
-                            r = _sp.run(_cmd, capture_output=True, text=True, timeout=120)
-                    else:
-                        r = _sp.run(_cmd, capture_output=True, text=True, timeout=120)
-                    _ok = r.returncode == 0
-                    if _ok: ok_count += 1
-                    if not _ok:
-                        _err_tail = (r.stderr or '')[-150:].strip()
-                        self.after(0, lambda p=pkg, e=_err_tail: self.log(f'  ❌ {p}: {e}', RED))
-                    else:
-                        self.after(0, lambda p=pkg: self.log(f'  ✅ {p}', GREEN))
-                self.after(0, lambda: (
-                    self.log(f'✅ All packages updated! ({ok_count}/{n})', GREEN),
-                    self.set_busy(False),
-                    self.set_progress(f'✅ {ok_count}/{n} packages updated', pct=100),
-                ))
-            import threading; threading.Thread(target=_do_all, daemon=True).start()
+            _request_update_on_reboot('all')
+            self.log('📋 All packages queued — restart ClipFinder to install', ACCENT2)
+            messagebox.showinfo('Queued', 'All packages will install on next launch.\nRestart ClipFinder now to apply.')
 
         # Grid of packages
 
@@ -8582,7 +8604,11 @@ class App(tk.Tk):
                 'torchaudio': 'torchaudio',
             }
             mod = _imp_map.get(pkg_name, pkg_name.replace('-','_').lower())
-            try: _il.import_module(mod); return True
+            try:
+                m = _il.import_module(mod)
+                if mod == 'pydantic_core': _il.import_module('pydantic_core.core_schema')
+                if mod in ('torch','torchaudio'): _ = m.__version__
+                return True
             except: return False
 
         for i, (pkg, pkg_pip, desc) in enumerate(mods):
@@ -9188,7 +9214,9 @@ class App(tk.Tk):
                 import tempfile as _tmp2
                 _launcher = str(Path(_tmp2.gettempdir()) / 'cf_demucs_launcher.py')
                 with open(_launcher, 'w') as _lf:
-                    _lf.write("""import sys
+                    _pkgs_path = str(PKGS_DIR)
+                    _lf.write(f"""import sys
+sys.path.insert(0, r'{_pkgs_path}')
 import soundfile as sf
 import torch
 import torchaudio
@@ -9685,17 +9713,9 @@ sys.exit(main())
                     # whisper.cpp doesn't return word-level timestamps in its JSON output
                     self.log(f'[Censor] Using faster-whisper (word timestamps required)')
                     try:
-                        _FW = _fresh_import('faster_whisper').WhisperModel  # fixed: was WhisperModelC
-                        # Detect best available device (same logic as main transcription)
-                        _censor_device, _censor_compute, _censor_dev_label = _detect_whisper_device()
-                        # whisper.cpp label means AMD/Intel — fall back to CPU int8 for faster-whisper
-                        if 'whisper.cpp' in _censor_dev_label or _censor_device == 'directml':
-                            _censor_device = 'cpu'
-                            _censor_compute = 'int8'
-                        self.log(f'[Censor] Device: {_censor_dev_label} → {_censor_device}/{_censor_compute}')
-                        _fwc = _FW(_censor_model, device=_censor_device, compute_type=_censor_compute,
-                                   download_root=str(_app_path('whisper_models')))
-                        # Extract audio to wav first — faster-whisper works better on wav than mp4
+                        _FW = _fresh_import('faster_whisper').WhisperModel
+                        _fwc = _FWC(_censor_model, device='cpu', compute_type='int8')
+                        # Extract audio first
                         import tempfile as _tmpc
                         _wav_tmp = str(Path(_tmpc.gettempdir()) / 'cf_censor_fw.wav')
                         subprocess.run([ff, '-y', '-i', vid, '-vn', '-ar', '16000',
@@ -9704,8 +9724,7 @@ sys.exit(main())
                         _segs_iter, _info = _fwc.transcribe(
                             _wav_tmp, word_timestamps=True,
                             initial_prompt='Transcribe every word exactly as spoken including profanity.',
-                            language=None, vad_filter=True,
-                            beam_size=5, best_of=5, temperature=0.0)
+                            language=None, vad_filter=True)
                         _segs = []
                         for _seg in _segs_iter:
                             _sd = {'start': _seg.start, 'end': _seg.end, 'text': _seg.text}
@@ -9716,9 +9735,9 @@ sys.exit(main())
                         result = {'segments': _segs, 'language': _info.language}
                         try: Path(_wav_tmp).unlink()
                         except: pass
-                        self.log(f'[Censor] faster-whisper done: {len(_segs)} segs, lang={_info.language}')
+                        self.log(f'[Censor] faster-whisper done: {len(_segs)} segs')
                     except Exception as _fwe:
-                        self.log(f'[Censor] faster-whisper failed ({_fwe}), falling back to _do_transcribe', YELLOW)
+                        self.log(f'[Censor] faster-whisper failed ({_fwe}), falling back to whisper.cpp')
                         result = _do_transcribe(vid, _censor_model,
                             initial_prompt='Transcribe every word exactly as spoken including profanity.',
                             ffmpeg_path=ff, use_word_timestamps=True,
@@ -10072,5 +10091,91 @@ where "keep" = words to censor, "remove" = false positives to skip."""
     # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
+    def _prelaunch_install():
+        import subprocess as _sp2, sys as _sys2, tempfile as _tf2, os as _os2, threading as _thr3
+        _CNW = 0x08000000
+        _flag  = USER_DIR / 'pending_update.flag'
+        _stamp = USER_DIR / 'install_done.stamp'
+        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic')]
+        _force = _flag.exists() or not _stamp.exists()
+        if not _force:
+            _miss = []
+            for _m, _p in _ALL:
+                try: __import__(_m.split('.')[0])
+                except: _miss.append(_p)
+            try: import pydantic_core.core_schema
+            except:
+                if 'pydantic-core' not in [x.split()[0] for x in _miss]: _miss.append('pydantic-core')
+            if not _miss: return
+        _req = set()
+        if _flag.exists():
+            try: _req = set(_flag.read_text().strip().splitlines())
+            except: pass
+            try: _flag.unlink()
+            except: pass
+        if 'all' in _req or not _stamp.exists():
+            _todo = [p for _, p in _ALL]
+        else:
+            _todo = list(_req)
+            for _m, _p in _ALL:
+                try: __import__(_m.split('.')[0])
+                except:
+                    if _p not in _todo: _todo.append(_p)
+        if not _todo: _stamp.touch(); return
+        _lines = [
+            'import subprocess, sys',
+            'pkgs_dir = ' + repr(str(PKGS_DIR)),
+            'todo = ' + repr(_todo),
+            'total = len(todo)',
+            'for i, pkg in enumerate(todo):',
+            '    parts = pkg.split()',
+            '    print(f"PROGRESS:{i}:{total}:{parts[0]}", flush=True)',
+            '    cmd = [sys.executable, "-m", "pip", "install"] + parts + ["--target", pkgs_dir, "--upgrade", "--quiet", "--no-warn-script-location"]',
+            '    subprocess.run(cmd, timeout=300, creationflags=0x08000000)',
+            'print("DONE", flush=True)',
+        ]
+        _tf = _tf2.mktemp(suffix='_cf.py')
+        try:
+            with open(_tf, 'w', encoding='utf-8') as _f: _f.write('\n'.join(_lines))
+            import tkinter as _tk2, tkinter.ttk as _ttk2
+            _s = _tk2.Tk(); _s.overrideredirect(True); _s.configure(bg='#111111')
+            _s.attributes('-topmost', True)
+            _sw, _sh = 540, 150
+            _s.geometry(str(_sw)+'x'+str(_sh)+'+'+str((_s.winfo_screenwidth()-_sw)//2)+'+'+str((_s.winfo_screenheight()-_sh)//2))
+            _brd = _tk2.Frame(_s, bg='#ff8c00', padx=1, pady=1); _brd.pack(fill='both', expand=True, padx=8, pady=8)
+            _inn = _tk2.Frame(_brd, bg='#111111'); _inn.pack(fill='both', expand=True)
+            _tk2.Label(_inn, text='✂  ClipFinder', font=('Segoe UI',13,'bold'), fg='#ff8c00', bg='#111111').pack(pady=(12,2))
+            _sv = _tk2.StringVar(value='Installing '+str(len(_todo))+' package'+('s' if len(_todo)!=1 else '')+'...')
+            _tk2.Label(_inn, textvariable=_sv, font=('Segoe UI',9), fg='#cccccc', bg='#111111').pack()
+            _pb = _ttk2.Progressbar(_inn, length=460, mode='indeterminate'); _pb.pack(pady=(8,2), padx=20); _pb.start(15)
+            _bv = _tk2.StringVar(value='Starting...')
+            _tk2.Label(_inn, textvariable=_bv, font=('Segoe UI',7), fg='#666', bg='#111111').pack()
+            _tk2.Label(_inn, text='(background processes are hidden — this is normal)',
+                font=('Segoe UI',7), fg='#333', bg='#111111').pack(pady=(1,0))
+            _s.update()
+            _n = len(_todo)
+            _proc = _sp2.Popen([_sys2.executable, _tf], stdout=_sp2.PIPE, stderr=_sp2.DEVNULL,
+                text=True, bufsize=1, creationflags=_CNW)
+            def _read():
+                for _ln in _proc.stdout:
+                    _ln = _ln.strip()
+                    if _ln.startswith('PROGRESS:'):
+                        try:
+                            _, _i, _t, _nm = _ln.split(':', 3)
+                            def _upd(p=int(_i), t=int(_t), n=_nm):
+                                _pb.stop(); _pb.config(mode='determinate'); _pb['value'] = int(p/t*100)
+                                _sv.set(f'Installing ({p+1}/{t})...'); _bv.set(n); _s.update()
+                            _s.after(0, _upd)
+                        except: pass
+            _t2 = _thr3.Thread(target=_read, daemon=True); _t2.start()
+            _proc.wait(); _t2.join(timeout=2)
+            _pb['value'] = 100; _sv.set('Done! Launching ClipFinder...'); _bv.set(''); _s.update()
+            _stamp.touch()
+            _s.after(800, _s.destroy); _s.mainloop()
+        except Exception: pass
+        finally:
+            try: _os2.unlink(_tf)
+            except: pass
+    _prelaunch_install()
     app = App()
     app.mainloop()
