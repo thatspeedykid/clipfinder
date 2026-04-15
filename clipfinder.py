@@ -10138,10 +10138,15 @@ if __name__ == '__main__':
         try:
             with open(_tf, 'w', encoding='utf-8') as _f: _f.write('\n'.join(_lines))
             import tkinter as _tk2, tkinter.ttk as _ttk2
-            _s = _tk2.Tk(); _s.overrideredirect(True); _s.configure(bg='#111111')
+            _s = _tk2.Tk()
+            _s.title('ClipFinder — Setting Up')
+            _s.configure(bg='#111111')
+            _s.resizable(False, False)
             _s.attributes('-topmost', True)
-            _sw, _sh = 540, 150
-            _s.geometry(str(_sw)+'x'+str(_sh)+'+'+str((_s.winfo_screenwidth()-_sw)//2)+'+'+str((_s.winfo_screenheight()-_sh)//2))
+            _sw, _sh = 540, 175
+            _sx = (_s.winfo_screenwidth()-_sw)//2
+            _sy = (_s.winfo_screenheight()-_sh)//2
+            _s.geometry(str(_sw)+'x'+str(_sh)+'+'+str(_sx)+'+'+str(_sy))
             _brd = _tk2.Frame(_s, bg='#ff8c00', padx=1, pady=1); _brd.pack(fill='both', expand=True, padx=8, pady=8)
             _inn = _tk2.Frame(_brd, bg='#111111'); _inn.pack(fill='both', expand=True)
             _tk2.Label(_inn, text='✂  ClipFinder', font=('Segoe UI',13,'bold'), fg='#ff8c00', bg='#111111').pack(pady=(12,2))
@@ -10150,28 +10155,53 @@ if __name__ == '__main__':
             _pb = _ttk2.Progressbar(_inn, length=460, mode='indeterminate'); _pb.pack(pady=(8,2), padx=20); _pb.start(15)
             _bv = _tk2.StringVar(value='Starting...')
             _tk2.Label(_inn, textvariable=_bv, font=('Segoe UI',7), fg='#666', bg='#111111').pack()
-            _tk2.Label(_inn, text='(background processes are hidden — this is normal)',
-                font=('Segoe UI',7), fg='#333', bg='#111111').pack(pady=(1,0))
+            _tk2.Label(_inn, text='⚠  May appear frozen — this is normal. Takes 3–5 min on first launch only.',
+                font=('Segoe UI',7), fg='#ff8c00', bg='#111111').pack(pady=(2,0))
+            _tk2.Label(_inn, text='ClipFinder will open automatically when done.',
+                font=('Segoe UI',7), fg='#444', bg='#111111').pack()
             _s.update()
             _n = len(_todo)
             _proc = _sp2.Popen([_sys2.executable, _tf], stdout=_sp2.PIPE, stderr=_sp2.DEVNULL,
                 text=True, bufsize=1, creationflags=_CNW)
+
+            # Read stdout in a thread, update UI via queue (not after() — mainloop not running yet)
+            import queue as _q2
+            _updates = _q2.Queue()
             def _read():
                 for _ln in _proc.stdout:
                     _ln = _ln.strip()
                     if _ln.startswith('PROGRESS:'):
                         try:
                             _, _i, _t, _nm = _ln.split(':', 3)
-                            def _upd(p=int(_i), t=int(_t), n=_nm):
-                                _pb.stop(); _pb.config(mode='determinate'); _pb['value'] = int(p/t*100)
-                                _sv.set(f'Installing ({p+1}/{t})...'); _bv.set(n); _s.update()
-                            _s.after(0, _upd)
+                            _updates.put((int(_i), int(_t), _nm))
                         except: pass
-            _t2 = _thr3.Thread(target=_read, daemon=True); _t2.start()
-            _proc.wait(); _t2.join(timeout=2)
-            _pb['value'] = 100; _sv.set('Done! Launching ClipFinder...'); _bv.set(''); _s.update()
+                _updates.put(None)  # signal done
+            _thr3.Thread(target=_read, daemon=True).start()
+
+            # Poll loop — keeps tkinter alive and drains the update queue
+            while True:
+                try:
+                    _msg = _updates.get_nowait()
+                    if _msg is None:
+                        break
+                    _pi, _pt, _pn = _msg
+                    _pb.stop(); _pb.config(mode='determinate')
+                    _pb['value'] = int(_pi / _pt * 100)
+                    _sv.set(f'Installing ({_pi+1}/{_pt})...')
+                    _bv.set(_pn)
+                except _q2.Empty:
+                    pass
+                _s.update()
+                _sp2.time.sleep(0.05) if hasattr(_sp2, 'time') else None
+                import time as _t2; _t2.sleep(0.05)
+
+            _proc.wait()
+            _pb['value'] = 100
+            _sv.set('Done! Launching ClipFinder...')
+            _bv.set('ClipFinder will open automatically')
+            _s.update()
             _stamp.touch()
-            _s.after(800, _s.destroy); _s.mainloop()
+            _s.after(1200, _s.destroy); _s.mainloop()
         except Exception: pass
         finally:
             try: _os2.unlink(_tf)
