@@ -95,3 +95,30 @@
 - 16:9 and 9:16 export with face tracking
 - yt-dlp downloader (YouTube, Twitch, Twitter/X, Kick)
 - Tweet generator, Word censor, Thumbnail finder, Image Studio
+
+---
+
+## v1.3.3 — Current Release
+*April 2026*
+
+### 🔤 Burn Subtitles (Beta)
+- New sub-tab inside Transcript tab — burn captions directly onto video
+- Built-in transcription with word-level timestamps — no need to visit Transcript tab first
+- Pause detection — subtitles clear during silence gaps
+- Karaoke mode — each word highlights as spoken with customizable color
+- Font, size, bold/italic, ALL CAPS, text/outline/background colors
+- 3x3 position grid, 5 style presets (Standard, Karaoke, Cinematic, Minimal, TikTok)
+- TikTok preset forces 3 words at a time
+- Live preview from real video frame
+
+### ⚡ Tweet Generator — 3 Options
+- Single Generate click produces 3 different tweets (Drama / Viral / Thread opener)
+- Smarter prompt: reads transcript for specific quotes, never generates #gaming unless relevant
+- Hashtags match actual people named in context and transcript
+
+### 📝 Transcript Tab
+- Sub-tab structure: Transcript & Tweet | Burn Subtitles (Beta)
+- Tweet output tabbed: Option 1 / Option 2 / Option 3
+
+### 🐛 Fixes
+- fonttools import detection fixed (fontTools capital T)

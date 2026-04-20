@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 
 import subprocess
 import sys
@@ -688,38 +688,55 @@ TRANSCRIPT:
 {transcript}
 """
 
-TWEET_PROMPT = """You write viral Twitter/X posts for a drama channel covering streaming and gaming (@MarsScumbags style).
+TWEET_PROMPT = """You are a social media writer for @MarsScumbags, a streaming drama/clip channel on X/Twitter.
+Read the transcript carefully. Identify WHO is involved, WHAT happened, and the most shocking/quotable moment.
 
-Given this transcript and optional context, write a Twitter post in the EXACT format shown below.
-Match the tone: punchy, real, like a person not a bot. Use emojis naturally for impact.
+== PEOPLE & CONTEXT ==
+{context}
 
-Context: {context}
-Tone: {tone}
-
-Transcript:
+== TRANSCRIPT ==
 {transcript}
 
-Write the post in this format:
+== TONE ==
+{tone}
 
-[EMOJI] HEADLINE IN CAPS [EMOJI]
-One sentence setup explaining what happened [emoji]
+== OUTPUT FORMAT ==
+Write EXACTLY this — no preamble, no labels other than OPTION 1/2/3:
 
-[EMOJI] What they said/did:
-• Key quote or action 1
-• Key quote or action 2
-• Key detail 3
+OPTION 1
+[DRAMATIC DRAMA ACCOUNT STYLE — like a real tea/drama Twitter page]
+Format it like this:
+🚨 SHOCKING HEADLINE IN CAPS 🚨
+One sentence setup explaining what happened and why it matters.
 
-[EMOJI] Overall:
-One punchy takeaway sentence [emoji]
+🚫 The tea: [pull an ACTUAL quote or specific detail from the transcript in quotes]
 
-#Hashtag1 #Hashtag2 #Hashtag3
+The take: [one punchy opinion sentence] [emoji]
 
-Rules:
-- Max 280 chars per tweet if single tweet, or short thread if needed
-- End with exactly 3 hashtags based on the people and topics involved (names, platform, drama type)
-- Sound like a real person, not AI
-- Emojis used for emphasis not decoration
-- Reference specific quotes or moments from the transcript
+#Name1 #Name2 #RelevantTag
+
+OPTION 2
+[VIRAL/MEME ENERGY — short, chaotic, makes people stop scrolling. Think "bro said what 💀" energy. Under 220 chars. No bullet points. Could be a reaction, a quote with reaction, or a spicy take. Something people screenshot and repost.]
+[hashtags on same line or next line]
+
+OPTION 3
+[THREAD OPENER — 240-280 chars. Strong hook that makes people NEED to click or reply. Can end with a cliffhanger or ask a question to drive engagement.]
+[hashtags]
+
+== HASHTAG RULES — CRITICAL ==
+- Use ACTUAL NAMES from the context as hashtags (#Mizkif #Alinity #xQc)
+- Use platform only if relevant (#Kick #Twitch #YouTube)
+- Use drama type if it fits (#Exposed #Drama #Beef #Leaked #Scandal)
+- NEVER use #gaming #gamingscandal #gamer #streamer unless the clip is literally about gameplay
+- Each option gets its OWN hashtags matching what THAT tweet says
+- 3-5 hashtags max per option
+- If context says "Mizkif reacting to MrBeast" use #Mizkif #MrBeast NOT #gaming
+
+== RULES ==
+- Option 1 MUST reference a specific quote or moment from the transcript — not vague
+- Option 2 should feel like a real person tweeting, not a press release
+- Each option must feel COMPLETELY different in vibe and structure
+- Do NOT write "Option 1:" as a label — just write the content after the OPTION 1 header
 """
 
 
@@ -1756,7 +1773,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.3.2 — AI Clip Extractor')
+        self.title('ClipFinder 1.3.3 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -3306,6 +3323,41 @@ class App(tk.Tk):
         threading.Thread(target=_run, daemon=True).start()
 
     def _build_trans_tab(self, p):
+
+        # ── Sub-tab bar (top, matches AI Clips / Auto Edit style) ────────────
+        sub_bar = tk.Frame(p, bg=BG3)
+        sub_bar.pack(fill='x')
+        self._trans_sub_frames = {}
+        self._trans_sub_btns   = {}
+
+        def _switch_trans_sub(key):
+            for k, f in self._trans_sub_frames.items():
+                f.pack_forget()
+            self._trans_sub_frames[key].pack(fill='both', expand=True)
+            for k, b in self._trans_sub_btns.items():
+                b.config(bg=ACCENT if k == key else BG3,
+                         fg='#000' if k == key else ACCENT2,
+                         font=('Segoe UI',8,'bold') if k == key else ('Segoe UI',8))
+
+        for _sk, _sl in [('transcript','📝  Transcript & Tweet'), ('subtitles','🔤  Burn Subtitles  ⚠ Beta')]:
+            _sb = tk.Button(sub_bar, text=_sl, font=('Segoe UI',8),
+                           relief='flat', bd=0, cursor='hand2',
+                           padx=20, pady=6, bg=BG3, fg=FG2,
+                           command=lambda k=_sk: _switch_trans_sub(k))
+            _sb.pack(side='left', fill='x', expand=True)
+            self._trans_sub_btns[_sk] = _sb
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+
+        # Sub-frames — both sit directly under p
+        _trans_p = tk.Frame(p, bg=BG)
+        _sub_p   = tk.Frame(p, bg=BG)
+        self._trans_sub_frames['transcript'] = _trans_p
+        self._trans_sub_frames['subtitles']  = _sub_p
+
+        # Show transcript first
+        _switch_trans_sub('transcript')
+        p = _trans_p  # redirect so file picker + transcript/tweet content lands here
+
         # ── Top bar: standalone video input ──────────────────────────────────
         top = tk.Frame(p, bg=BG2)
         top.pack(fill='x', padx=0)
@@ -3422,19 +3474,41 @@ class App(tk.Tk):
 
         tk.Frame(right, bg=BORDER, height=1).pack(fill='x', pady=6)
 
-        # Output box header
+        # 3-tab output area
         out_hdr = tk.Frame(right, bg=BG)
         out_hdr.pack(fill='x', pady=(0, 4))
-        tk.Label(out_hdr, text='GENERATED TWEET', font=('Segoe UI', 8, 'bold'),
+        tk.Label(out_hdr, text='GENERATED TWEETS', font=('Segoe UI', 8, 'bold'),
                  fg=FG2, bg=BG).pack(side='left')
-        tk.Button(out_hdr, text='Copy', font=FONT_SMALL, bg=BG3, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=8, pady=2,
-                  command=self._copy_tweet).pack(side='right')
-        tk.Button(out_hdr, text='Regenerate', font=FONT_SMALL, bg=BG3, fg=FG2,
+        tk.Button(out_hdr, text='Regenerate All', font=FONT_SMALL, bg=BG3, fg=FG2,
                   relief='flat', bd=0, cursor='hand2', padx=8, pady=2,
                   command=self._generate_tweet).pack(side='right', padx=4)
 
-        # Output text box (editable so user can tweak)
+        # Tab bar for 3 options
+        self._tweet_tab_idx = 0
+        self.tweet_tabs_data = ['', '', '']  # store text for each tab
+        tab_bar = tk.Frame(right, bg=BG2)
+        tab_bar.pack(fill='x')
+        self._tweet_tab_btns = []
+        def _switch_tweet_tab(i):
+            self._tweet_tab_idx = i
+            for j, tb in enumerate(self._tweet_tab_btns):
+                tb.config(bg=ACCENT if j == i else BG3,
+                          fg='#000' if j == i else FG2)
+            txt = self.tweet_tabs_data[i]
+            self.tweet_out.config(state='normal')
+            self.tweet_out.delete('1.0', 'end')
+            self.tweet_out.insert('1.0', txt if txt else 'Hit ⚡ Generate Tweet to get options.')
+            _update_char_count()
+        for i, lbl in enumerate(['Option 1', 'Option 2', 'Option 3']):
+            tb = tk.Button(tab_bar, text=lbl, font=FONT_SMALL,
+                           bg=ACCENT if i == 0 else BG3,
+                           fg='#000' if i == 0 else FG2,
+                           relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
+                           command=lambda idx=i: _switch_tweet_tab(idx))
+            tb.pack(side='left', padx=(0,2))
+            self._tweet_tab_btns.append(tb)
+
+        # Output text box (editable)
         tw = tk.Frame(right, bg=BG3)
         tw.pack(fill='both', expand=True)
         self.tweet_out = tk.Text(tw, font=FONT_MONO_S, bg=BG3, fg=FG,
@@ -3442,13 +3516,254 @@ class App(tk.Tk):
                                  wrap='word')
         _make_scrollbar(tw, self.tweet_out)
         self.tweet_out.pack(side='left', fill='both', expand=True)
-        self.tweet_out.insert('1.0', 'Transcribe a video then click ⚡ Generate Tweet.')
+        self.tweet_out.insert('1.0', 'Hit ⚡ Generate Tweet to get 3 different options.')
 
-        # Char count
-        self.tweet_char_lbl = tk.Label(right, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='e')
-        self.tweet_char_lbl.pack(fill='x', pady=(3, 0))
-        # Copy on double-click anywhere in tweet output
-        self.tweet_out.bind('<Double-Button-1>', lambda e: (self.clipboard_clear(), self.clipboard_append(self.tweet_out.get('1.0','end').strip()), self.tweet_gen_lbl.config(text='Copied!', fg=GREEN)))
+        # Char count + copy row
+        bot_row = tk.Frame(right, bg=BG); bot_row.pack(fill='x', pady=(3,0))
+        self.tweet_char_lbl = tk.Label(bot_row, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
+        self.tweet_char_lbl.pack(side='left')
+        tk.Button(bot_row, text='Copy This', font=FONT_SMALL, bg=BG3, fg=FG2,
+                  relief='flat', bd=0, cursor='hand2', padx=10, pady=2,
+                  command=self._copy_tweet).pack(side='right')
+
+        def _update_char_count(*_):
+            txt = self.tweet_out.get('1.0', 'end').strip()
+            chars = len(txt)
+            self.tweet_char_lbl.config(
+                text=f'{chars} chars',
+                fg=GREEN if chars <= 280 else YELLOW if chars <= 500 else ACCENT)
+        self.tweet_out.bind('<KeyRelease>', _update_char_count)
+        self.tweet_out.bind('<Double-Button-1>', lambda e: (
+            self.clipboard_clear(),
+            self.clipboard_append(self.tweet_out.get('1.0','end').strip()),
+            self.tweet_gen_lbl.config(text='Copied!', fg=GREEN)))
+
+        # ── BURN SUBTITLES sub-tab content ────────────────────────────────────
+        sub_body = tk.Frame(_sub_p, bg=BG); sub_body.pack(fill='both', expand=True, padx=20, pady=8)
+
+        # Row 1: Video input with browse + transcribe button built-in
+        io_row = tk.Frame(sub_body, bg=BG); io_row.pack(fill='x', pady=(0, 4))
+        tk.Label(io_row, text='Video:', font=FONT_SMALL, fg=FG2, bg=BG, width=7, anchor='w').pack(side='left')
+        self.v_sub_input = tk.StringVar()
+        inp_f = tk.Frame(io_row, bg=BG3); inp_f.pack(side='left', fill='x', expand=True, padx=(0, 6))
+        tk.Entry(inp_f, textvariable=self.v_sub_input, font=FONT_SMALL,
+                 bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4).pack(side='left', fill='x', expand=True)
+        tk.Button(inp_f, text='...', font=FONT_SMALL, bg=BG2, fg=FG2,
+                  relief='flat', bd=0, cursor='hand2', padx=5,
+                  command=lambda: self.v_sub_input.set(
+                      filedialog.askopenfilename(filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')]
+                      ) or self.v_sub_input.get())).pack(side='right')
+        tk.Button(io_row, text='\U0001f4cb Use Clip Finder', font=FONT_SMALL,
+                  bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=lambda: self.v_sub_input.set(self.v_video.get() or self.v_trans_file.get())).pack(side='left', padx=(0, 4))
+        self.sub_trans_btn = tk.Button(io_row, text='\U0001f4dd Transcribe',
+                  font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0,
+                  cursor='hand2', padx=10, pady=3, command=self._sub_transcribe)
+        self.sub_trans_btn.pack(side='left')
+        self.sub_trans_lbl = tk.Label(io_row, text='Transcribe the video first', font=FONT_SMALL, fg=YELLOW, bg=BG)
+        self.sub_trans_lbl.pack(side='left', padx=6)
+
+        # Output folder
+        out_row2 = tk.Frame(sub_body, bg=BG); out_row2.pack(fill='x', pady=(0, 8))
+        tk.Label(out_row2, text='Save to:', font=FONT_SMALL, fg=FG2, bg=BG, width=7, anchor='w').pack(side='left')
+        self.v_sub_outdir = tk.StringVar(value=self.cfg.get('sub_outdir', str(Path.home() / 'Downloads')))
+        out_f2 = tk.Frame(out_row2, bg=BG3); out_f2.pack(side='left', fill='x', expand=True, padx=(0, 6))
+        tk.Entry(out_f2, textvariable=self.v_sub_outdir, font=FONT_SMALL,
+                 bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4).pack(side='left', fill='x', expand=True)
+        tk.Button(out_f2, text='...', font=FONT_SMALL, bg=BG2, fg=FG2,
+                  relief='flat', bd=0, cursor='hand2', padx=5,
+                  command=lambda: self.v_sub_outdir.set(
+                      filedialog.askdirectory() or self.v_sub_outdir.get())).pack(side='right')
+
+        # Row 2: Style options
+        style_row = tk.Frame(sub_body, bg=BG); style_row.pack(fill='x', pady=(0, 6))
+
+        # Font family
+        tk.Label(style_row, text='Font:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        self.v_sub_font = tk.StringVar(value='Arial')
+        font_opts = ['Arial', 'Impact', 'Helvetica', 'Roboto', 'Oswald',
+                     'Anton', 'Bebas Neue', 'Comic Sans MS', 'Verdana', 'Tahoma']
+        tk.OptionMenu(style_row, self.v_sub_font, *font_opts).configure(
+            bg=BG3, fg=FG, font=FONT_SMALL, relief='flat', bd=0,
+            activebackground=BG4, highlightthickness=0)
+        om = tk.OptionMenu(style_row, self.v_sub_font, *font_opts)
+        om.config(bg=BG3, fg=FG, font=FONT_SMALL, relief='flat', bd=0,
+                  activebackground=BG4, highlightthickness=0, cursor='hand2')
+        om.pack(side='left', padx=(4, 12))
+
+        # Font size
+        tk.Label(style_row, text='Size:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        self.v_sub_size = tk.IntVar(value=48)
+        tk.Spinbox(style_row, from_=16, to=120, textvariable=self.v_sub_size,
+                   width=4, font=FONT_SMALL, bg=BG3, fg=FG, relief='flat',
+                   buttonbackground=BG4, insertbackground=ACCENT).pack(side='left', padx=(4, 12))
+
+        # Bold / Italic
+        self.v_sub_bold   = tk.BooleanVar(value=True)
+        self.v_sub_italic = tk.BooleanVar(value=False)
+        tk.Checkbutton(style_row, text='Bold', variable=self.v_sub_bold,
+                       font=FONT_SMALL, fg=FG, bg=BG, selectcolor=BG3,
+                       activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0, 6))
+        tk.Checkbutton(style_row, text='Italic', variable=self.v_sub_italic,
+                       font=FONT_SMALL, fg=FG, bg=BG, selectcolor=BG3,
+                       activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0, 12))
+        # All caps
+        self.v_sub_caps = tk.BooleanVar(value=False)
+        tk.Checkbutton(style_row, text='ALL CAPS', variable=self.v_sub_caps,
+                       font=FONT_SMALL, fg=FG, bg=BG, selectcolor=BG3,
+                       activebackground=BG, relief='flat', cursor='hand2').pack(side='left')
+
+        # Row 3: Colors
+        color_row = tk.Frame(sub_body, bg=BG); color_row.pack(fill='x', pady=(0, 6))
+        self.v_sub_color      = tk.StringVar(value='#FFFFFF')
+        self.v_sub_outline    = tk.StringVar(value='#000000')
+        self.v_sub_bg_col     = tk.StringVar(value='#000000')
+        self.v_sub_highlight  = tk.StringVar(value='#FFE000')  # karaoke word color
+        self.v_sub_bg_on      = tk.BooleanVar(value=True)
+        self.v_sub_bg_opacity = tk.IntVar(value=60)
+        self.v_sub_karaoke    = tk.BooleanVar(value=False)
+
+        def _pick_color(var, btn):
+            import tkinter.colorchooser as _cc
+            c = _cc.askcolor(color=var.get(), title='Pick colour')[1]
+            if c: var.set(c); btn.config(bg=c)
+
+        # Text color
+        tk.Label(color_row, text='Text:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        _tc_btn = tk.Button(color_row, bg='#FFFFFF', width=3, relief='flat', cursor='hand2',
+                            command=lambda: _pick_color(self.v_sub_color, _tc_btn))
+        _tc_btn.pack(side='left', padx=(4, 8))
+
+        # Outline color
+        tk.Label(color_row, text='Outline:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        _oc_btn = tk.Button(color_row, bg='#000000', width=3, relief='flat', cursor='hand2',
+                            command=lambda: _pick_color(self.v_sub_outline, _oc_btn))
+        _oc_btn.pack(side='left', padx=(4, 8))
+
+        # Outline thickness
+        tk.Label(color_row, text='Stroke:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        self.v_sub_stroke = tk.IntVar(value=3)
+        tk.Spinbox(color_row, from_=0, to=10, textvariable=self.v_sub_stroke,
+                   width=3, font=FONT_SMALL, bg=BG3, fg=FG, relief='flat',
+                   buttonbackground=BG4).pack(side='left', padx=(4, 8))
+
+        # Karaoke highlight toggle + color
+        tk.Checkbutton(color_row, text='Karaoke', variable=self.v_sub_karaoke,
+                       font=FONT_SMALL, fg=FG, bg=BG, selectcolor=BG3,
+                       activebackground=BG, relief='flat', cursor='hand2').pack(side='left')
+        _hc_btn = tk.Button(color_row, bg='#FFE000', width=3, relief='flat', cursor='hand2',
+                            command=lambda: _pick_color(self.v_sub_highlight, _hc_btn))
+        _hc_btn.pack(side='left', padx=(4, 10))
+
+        # Background box
+        tk.Checkbutton(color_row, text='BG Box', variable=self.v_sub_bg_on,
+                       font=FONT_SMALL, fg=FG, bg=BG, selectcolor=BG3,
+                       activebackground=BG, relief='flat', cursor='hand2').pack(side='left')
+        _bc_btn = tk.Button(color_row, bg='#000000', width=3, relief='flat', cursor='hand2',
+                            command=lambda: _pick_color(self.v_sub_bg_col, _bc_btn))
+        _bc_btn.pack(side='left', padx=(4, 4))
+        tk.Label(color_row, text='Opacity:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        tk.Spinbox(color_row, from_=0, to=100, textvariable=self.v_sub_bg_opacity,
+                   width=4, font=FONT_SMALL, bg=BG3, fg=FG, relief='flat',
+                   buttonbackground=BG4).pack(side='left', padx=(4, 0))
+        tk.Label(color_row, text='%', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+
+        # Row 4: Position grid + style presets
+        pos_preset_row = tk.Frame(sub_body, bg=BG); pos_preset_row.pack(fill='x', pady=(0, 6))
+
+        # Position grid (3x3)
+        tk.Label(pos_preset_row, text='Position:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left', padx=(0, 6))
+        self.v_sub_position = tk.StringVar(value='bottom-center')
+        _pos_grid = tk.Frame(pos_preset_row, bg=BG2)
+        _pos_grid.pack(side='left', padx=(0, 16))
+        _positions = [
+            ('top-left',    '↖'), ('top-center',    '↑'), ('top-right',    '↗'),
+            ('mid-left',    '←'), ('mid-center',    '·'), ('mid-right',    '→'),
+            ('bottom-left', '↙'), ('bottom-center', '↓'), ('bottom-right', '↘'),
+        ]
+        _pos_btns = {}
+        def _set_pos(pos):
+            self.v_sub_position.set(pos)
+            for p2, b2 in _pos_btns.items():
+                b2.config(bg=ACCENT if p2 == pos else BG3, fg='#000' if p2 == pos else FG)
+        for idx, (pos, sym) in enumerate(_positions):
+            r, c = divmod(idx, 3)
+            b = tk.Button(_pos_grid, text=sym, font=('Segoe UI', 8),
+                          bg=ACCENT if pos == 'bottom-center' else BG3,
+                          fg='#000' if pos == 'bottom-center' else FG,
+                          relief='flat', bd=1, cursor='hand2', width=2, height=1,
+                          command=lambda p=pos: _set_pos(p))
+            b.grid(row=r, column=c, padx=1, pady=1)
+            _pos_btns[pos] = b
+
+        # Style presets
+        tk.Label(pos_preset_row, text='Style:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left', padx=(0, 6))
+        self.v_sub_style_preset = tk.StringVar(value='standard')
+        _preset_btns = {}
+        def _apply_preset(preset):
+            self.v_sub_style_preset.set(preset)
+            presets = {
+                'standard':  {'bold': True, 'italic': False, 'caps': False, 'color': '#FFFFFF', 'outline': '#000000', 'stroke': 3, 'bg': True,  'bg_opacity': 0,  'size': 48},
+                'karaoke':   {'bold': True, 'italic': False, 'caps': False, 'color': '#FFE000', 'outline': '#000000', 'stroke': 4, 'bg': False, 'bg_opacity': 0,  'size': 52},
+                'cinematic': {'bold': False,'italic': False, 'caps': True,  'color': '#FFFFFF', 'outline': '#000000', 'stroke': 2, 'bg': True,  'bg_opacity': 70, 'size': 44},
+                'minimal':   {'bold': False,'italic': False, 'caps': False, 'color': '#FFFFFF', 'outline': '#000000', 'stroke': 1, 'bg': False, 'bg_opacity': 0,  'size': 36},
+                'tiktok':    {'bold': True, 'italic': False, 'caps': True,  'color': '#FFFFFF', 'outline': '#FF0050', 'stroke': 5, 'bg': False, 'bg_opacity': 0,  'size': 56, 'words': 3},
+            }
+            p = presets.get(preset, presets['standard'])
+            self.v_sub_bold.set(p['bold']); self.v_sub_italic.set(p['italic'])
+            self.v_sub_caps.set(p['caps']); self.v_sub_color.set(p['color'])
+            self.v_sub_outline.set(p['outline']); self.v_sub_stroke.set(p['stroke'])
+            self.v_sub_bg_on.set(p['bg']); self.v_sub_bg_opacity.set(p['bg_opacity'])
+            self.v_sub_size.set(p['size'])
+            if 'words' in p: self.v_sub_words.set(p['words'])
+            _tc_btn.config(bg=p['color']); _oc_btn.config(bg=p['outline'])
+            # Update button highlights
+            for pr, pb in _preset_btns.items():
+                pb.config(bg=ACCENT if pr == preset else BG3,
+                          fg='#000' if pr == preset else FG)
+            self._render_sub_preview()
+        for preset, plbl in [('standard','Standard'),('karaoke','Karaoke'),
+                              ('cinematic','Cinematic'),('minimal','Minimal'),('tiktok','TikTok')]:
+            _pb = tk.Button(pos_preset_row, text=plbl, font=FONT_SMALL,
+                      bg=ACCENT if preset == 'standard' else BG3,
+                      fg='#000' if preset == 'standard' else FG,
+                      relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                      command=lambda pr=preset: _apply_preset(pr))
+            _pb.pack(side='left', padx=(0, 3))
+            _preset_btns[preset] = _pb
+
+        # Row 5: Words per line + Preview + Burn button
+        action_row = tk.Frame(sub_body, bg=BG); action_row.pack(fill='x', pady=(4, 0))
+        tk.Label(action_row, text='Words/line:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        self.v_sub_words = tk.IntVar(value=6)
+        tk.Spinbox(action_row, from_=1, to=20, textvariable=self.v_sub_words,
+                   width=3, font=FONT_SMALL, bg=BG3, fg=FG, relief='flat',
+                   buttonbackground=BG4).pack(side='left', padx=(4, 12))
+
+        self.sub_preview_btn = tk.Button(action_row, text='👁  Preview Frame',
+                  font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0,
+                  cursor='hand2', padx=10, pady=5,
+                  command=self._sub_preview_frame)
+        self.sub_preview_btn.pack(side='left', padx=(0, 8))
+
+        self.sub_burn_btn = tk.Button(action_row, text='🔤  BURN SUBTITLES',
+                  font=('Segoe UI', 9, 'bold'), bg=ACCENT, fg='#000',
+                  relief='flat', bd=0, cursor='hand2', padx=14, pady=6,
+                  activebackground=ACCENT2,
+                  command=self._burn_subtitles)
+        self.sub_burn_btn.pack(side='left')
+
+        self.sub_status_lbl = tk.Label(action_row, text='', font=FONT_SMALL, fg=FG2, bg=BG)
+        self.sub_status_lbl.pack(side='left', padx=10)
+
+        # Preview canvas (hidden until user clicks Preview)
+        self._sub_preview_frame_widget = tk.Label(sub_body, bg=BG2, text='', cursor='hand2')
+        tk.Label(sub_body, text='⚠  Burn Subtitles is in beta — timing and styling may not be perfect. Report issues to @MarsScumbags.',
+                 font=('Segoe UI', 7), fg=YELLOW, bg=BG, wraplength=900, anchor='w', justify='left'
+                 ).pack(fill='x', pady=(6, 0))
+        tk.Label(sub_body, text='This feature is still in the works — more improvements coming in future updates.',
+                 font=('Segoe UI', 7), fg=FG2, bg=BG, anchor='w'
+                 ).pack(fill='x')
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     def _on_clips_canvas_resize(self, event):
@@ -5753,17 +6068,31 @@ class App(tk.Tk):
             if raw is None:
                 raise ValueError('All providers and models failed. Check your API keys.')
 
+            # Parse 3 options from the raw response
+            import re as _re_tw
+            _parts = _re_tw.split(r'OPTION\s*[123]\s*\n', raw)
+            _parts = [p.strip() for p in _parts if p.strip()]
+            # Pad to 3 in case AI didn't produce all 3
+            while len(_parts) < 3:
+                _parts.append('')
+            _opt1, _opt2, _opt3 = _parts[0], _parts[1], _parts[2]
+
             def _update():
+                self.tweet_tabs_data = [_opt1, _opt2, _opt3]
+                # Show option 1 by default, reset tab selection
+                for j, tb in enumerate(self._tweet_tab_btns):
+                    tb.config(bg=ACCENT if j == 0 else BG3,
+                              fg='#000' if j == 0 else FG2)
+                self._tweet_tab_idx = 0
                 self.tweet_out.config(state='normal')
                 self.tweet_out.delete('1.0', 'end')
-                self.tweet_out.insert('1.0', raw)
-                self.tweet_out.config(state='normal')  # keep editable
-                chars = len(raw)
+                self.tweet_out.insert('1.0', _opt1 or raw)
+                chars = len(self.tweet_out.get('1.0','end').strip())
                 self.tweet_char_lbl.config(
                     text=f'{chars} chars',
                     fg=GREEN if chars <= 280 else YELLOW if chars <= 500 else ACCENT)
                 self.tweet_gen_btn.config(state='normal', text='⚡  GENERATE TWEET')
-                self.tweet_gen_lbl.config(text=f'Done via {prov}')
+                self.tweet_gen_lbl.config(text=f'Done via {prov} — 3 options generated')
             self.after(0, _update)
 
         except Exception:
@@ -5780,6 +6109,427 @@ class App(tk.Tk):
             self.clipboard_clear()
             self.clipboard_append(t)
             self.tweet_gen_lbl.config(text='Copied to clipboard!', fg=GREEN)
+
+    # ── Subtitle burn-in ──────────────────────────────────────────────────────
+    def _get_sub_settings(self):
+        """Return current subtitle style settings as a dict."""
+        return {
+            'font':       self.v_sub_font.get(),
+            'size':       self.v_sub_size.get(),
+            'bold':       self.v_sub_bold.get(),
+            'italic':     self.v_sub_italic.get(),
+            'caps':       self.v_sub_caps.get(),
+            'color':      self.v_sub_color.get(),
+            'outline':    self.v_sub_outline.get(),
+            'stroke':     self.v_sub_stroke.get(),
+            'bg_on':      self.v_sub_bg_on.get(),
+            'bg_color':   self.v_sub_bg_col.get(),
+            'bg_opacity': self.v_sub_bg_opacity.get(),
+            'position':   self.v_sub_position.get(),
+            'words':      self.v_sub_words.get(),
+            'karaoke':    getattr(self, 'v_sub_karaoke', None) and self.v_sub_karaoke.get(),
+            'highlight':  getattr(self, 'v_sub_highlight', None) and self.v_sub_highlight.get() or '#FFE000',
+        }
+
+    def _hex_to_ass_color(self, hex_col, alpha=0):
+        """Convert #RRGGBB to ASS &HAABBGGRR format."""
+        h = hex_col.lstrip('#')
+        r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+        return f'&H{alpha:02X}{b:02X}{g:02X}{r:02X}'
+
+    def _transcript_to_ass(self, s):
+        """Convert whisper segments to ASS with pause detection and karaoke word highlight."""
+        import re as _re
+
+        segs = getattr(self, '_whisper_segments', [])
+        if not segs:
+            srt = getattr(self, 'srt_result', {})
+            segs = srt.get('segments', []) if srt else []
+        if not segs:
+            _ts_re = _re.compile(r'^\[(\d+[\d:.]+)\]\s*(.*)')
+            parsed = []
+            for line in self.transcript.split('\n'):
+                m = _ts_re.match(line.strip())
+                if m:
+                    _p = m.group(1).split(':')
+                    t = int(_p[0])*60+float(_p[1]) if len(_p)==2 else int(_p[0])*3600+int(_p[1])*60+float(_p[2])
+                    parsed.append({'start': t, 'end': None, 'text': m.group(2)})
+            for i, sg in enumerate(parsed):
+                sg['end'] = parsed[i+1]['start'] if i+1<len(parsed) else sg['start']+3.0
+            segs = parsed
+
+        words_per = s['words']
+        caps      = s['caps']
+        karaoke   = s.get('karaoke', False)
+        hi_color  = s.get('highlight', '#FFE000')
+        PAUSE_GAP = 0.4  # seconds of silence = end subtitle group
+
+        pos_map = {
+            'top-left':     (r'\an7',60,50),   'top-center':    (r'\an8',960,50),   'top-right':    (r'\an9',1860,50),
+            'mid-left':     (r'\an4',60,540),  'mid-center':    (r'\an5',960,540),  'mid-right':    (r'\an6',1860,540),
+            'bottom-left':  (r'\an1',60,1000), 'bottom-center': (r'\an2',960,1000), 'bottom-right': (r'\an3',1860,1000),
+        }
+        an_tag = pos_map.get(s['position'], (r'\an2', 960, 1000))[0]
+
+        tc = self._hex_to_ass_color(s['color'])
+        hc = self._hex_to_ass_color(hi_color)
+        oc = self._hex_to_ass_color(s['outline'])
+        bg_alpha = max(0, 255 - int(s['bg_opacity'] / 100 * 255)) if s['bg_on'] else 255
+        bc = self._hex_to_ass_color(s['bg_color'], alpha=bg_alpha)
+
+        def _ts(t):
+            h=int(t//3600); m=int((t%3600)//60); sc=t%60
+            return f'{h}:{m:02d}:{sc:05.2f}'
+
+        ass = (
+            '[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n'
+            '[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, '
+            'OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, '
+            'Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n'
+            f'Style: Default,{s["font"]},{s["size"]},{tc},{hc},{oc},{bc},'
+            f'{"1" if s["bold"] else "0"},{"1" if s["italic"] else "0"},0,0,100,100,0,0,1,'
+            f'{s["stroke"]},0,2,60,60,80,1\n\n'
+            '[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+        )
+
+        # Flatten all segments into word list with real timestamps
+        all_words = []
+        for seg in segs:
+            raw = _re.sub(r'^\[[\d:.\s>-]+\]\s*', '', seg.get('text','')).strip()
+            if not raw: continue
+            word_data = seg.get('words', [])
+            if word_data and all('start' in w and 'end' in w for w in word_data):
+                for w in word_data:
+                    wt = w.get('word','').strip()
+                    if wt:
+                        all_words.append({
+                            'word':  wt.upper() if caps else wt,
+                            'start': float(w['start']),
+                            'end':   float(w['end']),
+                        })
+            else:
+                seg_s = float(seg.get('start', 0))
+                seg_e = float(seg.get('end', seg_s + 3.0))
+                wl = raw.upper().split() if caps else raw.split()
+                if wl:
+                    wd = (seg_e - seg_s) / len(wl)
+                    for i, w in enumerate(wl):
+                        all_words.append({'word': w, 'start': seg_s+i*wd, 'end': seg_s+(i+1)*wd})
+
+        if not all_words:
+            return ass
+
+        # Group words into chunks, breaking at pause gaps
+        groups = []
+        i = 0
+        while i < len(all_words):
+            grp = [all_words[i]]
+            i += 1
+            while i < len(all_words) and len(grp) < words_per:
+                gap = all_words[i]['start'] - all_words[i-1]['end']
+                if gap > PAUSE_GAP:
+                    break
+                grp.append(all_words[i])
+                i += 1
+            groups.append(grp)
+
+        for grp in groups:
+            cs = grp[0]['start']
+            ce = grp[-1]['end']
+            if ce <= cs: ce = cs + 0.3
+            if karaoke:
+                line = f'{{{an_tag}}}'
+                for w in grp:
+                    dur_cs = max(1, int((w['end'] - w['start']) * 100))
+                    line += f'{{\\kf{dur_cs}}}{w["word"]} '
+                ass += f'Dialogue: 0,{_ts(cs)},{_ts(ce)},Default,,0,0,0,,{line.rstrip()}\n'
+            else:
+                line = ' '.join(w['word'] for w in grp)
+                ass += f'Dialogue: 0,{_ts(cs)},{_ts(ce)},Default,,0,0,0,,{{{an_tag}}}{line}\n'
+        return ass
+
+    def _sub_transcribe(self):
+        """Transcribe the video selected in the subtitle tab — no need to visit Transcript tab."""
+        inp = self.v_sub_input.get().strip()
+        if not inp or not Path(inp).exists():
+            messagebox.showwarning('No video', 'Select a video file first.')
+            return
+        self.sub_trans_btn.config(state='disabled', text='⏳ Transcribing...')
+        self.sub_trans_lbl.config(text='Transcribing...', fg=FG2)
+        def _run():
+            try:
+                _ensure_pkgs_on_path()
+                ff = ensure_ffmpeg()
+                _wm = self.v_whisper.get()
+                if not _wm or _wm == 'auto':
+                    _wm = 'base'
+                result = _do_transcribe(inp, _wm, ffmpeg_path=ff, use_word_timestamps=True)
+                segs_raw = result.get('segments', [])
+                self._whisper_segments = segs_raw
+                self.srt_result = result
+                self.transcript = '\n'.join(
+                    f'[{s["start"]:.2f}] {s["text"].strip()}' for s in segs_raw)
+                n = len(segs_raw)
+                def _done():
+                    self.sub_trans_btn.config(state='normal', text='📝 Transcribe')
+                    self.sub_trans_lbl.config(text=f'✅ {n} segments ready', fg=GREEN)
+                self.after(0, _done)
+            except Exception as _ex:
+                import traceback as _tb
+                _e = _tb.format_exc()
+                def _err():
+                    self.sub_trans_btn.config(state='normal', text='📝 Transcribe')
+                    self.sub_trans_lbl.config(text=f'❌ {_ex}', fg=RED)
+                    self.log(f'Subtitle transcription error:\n{_e}', RED)
+                self.after(0, _err)
+        import threading; threading.Thread(target=_run, daemon=True).start()
+
+    def _sub_preview_frame(self):
+        """Take a screenshot of the app window overlaid with subtitle style sample."""
+        inp = self.v_sub_input.get().strip()
+        if not inp or not Path(inp).exists():
+            messagebox.showwarning('No video', 'Select a video file first.')
+            return
+        s = self._get_sub_settings()
+        self.sub_status_lbl.config(text='Grabbing preview...', fg=FG2)
+        def _run():
+            try:
+                import subprocess as _sp, tempfile as _tf, os as _os, base64 as _b64
+                from PIL import Image, ImageDraw, ImageFont
+                import io as _io
+
+                _ff = ensure_ffmpeg()
+                if not _ff:
+                    self.after(0, lambda: self.sub_status_lbl.config(text='ffmpeg not found', fg=RED))
+                    return
+
+                # Get duration using ffmpeg stderr (ffprobe may not be in bundle)
+                import re as _re_dur
+                _dur_r = _sp.run([_ff, '-i', inp], capture_output=True, text=True, errors='replace')
+                _dm = _re_dur.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur_r.stderr)
+                try:
+                    _h, _m, _s2 = _dm.groups()
+                    mid = (int(_h)*3600 + int(_m)*60 + float(_s2)) / 2
+                except:
+                    mid = 5.0
+
+                tf_png = _tf.mktemp(suffix='.png')
+                _sp.run([_ff, '-ss', str(mid), '-i', inp,
+                         '-vframes', '1', '-q:v', '2', '-vf', 'scale=640:360',
+                         tf_png, '-y'], capture_output=True)
+
+                if not Path(tf_png).exists():
+                    self.after(0, lambda: self.sub_status_lbl.config(
+                        text='Could not extract frame from video', fg=RED))
+                    return
+
+                img = Image.open(tf_png).convert('RGB')
+                draw = ImageDraw.Draw(img, 'RGBA')
+
+                sample = 'This is how your subtitles look'
+                if s['caps']: sample = sample.upper()
+
+                # Load font from Windows fonts folder
+                font_size = max(14, s['size'] // 3)
+                fnt = None
+                _wf = r'C:\Windows\Fonts'
+                _name = s['font'].replace(' ', '')
+                for _fn in [
+                    _os.path.join(_wf, s['font'] + '.ttf'),
+                    _os.path.join(_wf, s['font'] + 'bd.ttf'),
+                    _os.path.join(_wf, _name + '.ttf'),
+                    _os.path.join(_wf, _name + 'bd.ttf'),
+                    _os.path.join(_wf, 'arial.ttf'),
+                    _os.path.join(_wf, 'calibri.ttf'),
+                ]:
+                    try: fnt = ImageFont.truetype(_fn, size=font_size); break
+                    except: pass
+                if fnt is None: fnt = ImageFont.load_default()
+
+                # Position map for 640x360
+                pos_map = {
+                    'top-left':     (30,  25),  'top-center':    (320, 25),  'top-right':    (610, 25),
+                    'mid-left':     (30,  180), 'mid-center':    (320, 180), 'mid-right':    (610, 180),
+                    'bottom-left':  (30,  330), 'bottom-center': (320, 330), 'bottom-right': (610, 330),
+                }
+                tx, ty = pos_map.get(s['position'], (320, 330))
+
+                def _hc(h):
+                    hx = h.lstrip('#')
+                    return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))
+
+                tc2 = _hc(s['color'])
+                oc2 = _hc(s['outline'])
+
+                try: bbox = draw.textbbox((tx, ty), sample, font=fnt, anchor='ms')
+                except: bbox = (tx-120, ty-font_size-4, tx+120, ty+4)
+
+                if s['bg_on']:
+                    pad = 6
+                    bc2 = _hc(s['bg_color'])
+                    alpha = int(s['bg_opacity'] / 100 * 255)
+                    draw.rectangle([bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad],
+                                   fill=(*bc2, alpha))
+
+                stroke = min(s['stroke'], 3)
+                if stroke > 0:
+                    for dx in range(-stroke, stroke+1):
+                        for dy in range(-stroke, stroke+1):
+                            if dx or dy:
+                                try: draw.text((tx+dx, ty+dy), sample, font=fnt, fill=(*oc2, 255), anchor='ms')
+                                except: draw.text((tx+dx, ty+dy), sample, font=fnt, fill=(*oc2, 255))
+                try: draw.text((tx, ty), sample, font=fnt, fill=(*tc2, 255), anchor='ms')
+                except: draw.text((tx, ty), sample, font=fnt, fill=(*tc2, 255))
+
+                buf = _io.BytesIO()
+                img.save(buf, format='PNG')
+                img_b64 = _b64.b64encode(buf.getvalue()).decode('ascii')
+                _os.unlink(tf_png)
+
+                def _show():
+                    import tkinter as _tk3
+                    photo = _tk3.PhotoImage(data=img_b64)
+                    self._sub_preview_frame_widget.config(image=photo, text='')
+                    self._sub_preview_frame_widget._photo = photo
+                    self._sub_preview_frame_widget.pack(fill='x', pady=(8, 4))
+                    self.sub_status_lbl.config(text='Preview ↑ — click Burn to apply', fg=GREEN)
+                self.after(0, _show)
+
+            except Exception as _ex:
+                import traceback as _tb2
+                _err2 = _tb2.format_exc()
+                self.after(0, lambda e=str(_ex), tb=_err2: (
+                    self.sub_status_lbl.config(text=f'Preview error: {e}', fg=RED),
+                    self.log(f'Preview error:\n{tb}', RED)))
+        import threading; threading.Thread(target=_run, daemon=True).start()
+
+    def _render_sub_preview(self):
+        """Regenerate preview if one is already showing."""
+        if self._sub_preview_frame_widget.winfo_ismapped():
+            self._sub_preview_frame()
+
+    def _burn_subtitles(self):
+        """Burn subtitles into video using ffmpeg ASS filter."""
+        inp = self.v_sub_input.get().strip()
+        if not inp or not Path(inp).exists():
+            messagebox.showwarning('No input', 'Select a video file first.')
+            return
+        # Auto-transcribe if no segments yet
+        if not getattr(self, '_whisper_segments', []):
+            self.sub_status_lbl.config(text='No transcript — transcribing first...', fg=YELLOW)
+            self.sub_burn_btn.config(state='disabled', text='⏳ Transcribing...')
+            def _then_burn():
+                if getattr(self, '_whisper_segments', []):
+                    self._burn_subtitles()
+                else:
+                    self.sub_burn_btn.config(state='normal', text='🔤  BURN SUBTITLES')
+                    self.sub_status_lbl.config(text='❌ Transcription failed', fg=RED)
+            def _run_trans():
+                try:
+                    _ensure_pkgs_on_path()
+                    ff = ensure_ffmpeg()
+                    _wm = self.v_whisper.get()
+                    if not _wm or _wm == 'auto': _wm = 'base'
+                    result = _do_transcribe(inp, _wm, ffmpeg_path=ff, use_word_timestamps=True)
+                    segs_raw = result.get('segments', [])
+                    self._whisper_segments = segs_raw
+                    self.srt_result = result
+                    self.transcript = '\n'.join(
+                        f'[{s["start"]:.2f}] {s["text"].strip()}' for s in segs_raw)
+                    self.after(0, lambda: (
+                        self.sub_trans_lbl.config(text=f'✅ {len(segs_raw)} segments', fg=GREEN),
+                        _then_burn()
+                    ))
+                except Exception as _ex:
+                    self.after(0, lambda e=str(_ex): (
+                        self.sub_burn_btn.config(state='normal', text='🔤  BURN SUBTITLES'),
+                        self.sub_status_lbl.config(text=f'❌ Transcription failed: {e}', fg=RED)
+                    ))
+            import threading; threading.Thread(target=_run_trans, daemon=True).start()
+            return
+        outdir = self.v_sub_outdir.get().strip()
+        Path(outdir).mkdir(parents=True, exist_ok=True)
+        stem = Path(inp).stem
+        outfile = str(Path(outdir) / f'{stem} - Subtitled - ClipFinder.mp4')
+        s = self._get_sub_settings()
+        self.sub_burn_btn.config(state='disabled', text='⏳ Burning...')
+        self.sub_status_lbl.config(text='Starting...', fg=FG2)
+        self.cfg['sub_outdir'] = outdir
+        save_cfg(self.cfg)
+
+        def _run():
+            try:
+                import subprocess as _sp, tempfile as _tf, os as _os, re as _re_sub
+                _ff = ensure_ffmpeg()
+                if not _ff:
+                    self.after(0, lambda: (
+                        self.sub_burn_btn.config(state='normal', text='🔤  BURN SUBTITLES'),
+                        self.sub_status_lbl.config(text='❌ ffmpeg not found', fg=RED)))
+                    return
+
+                # Write ASS file
+                ass_content = self._transcript_to_ass(s)
+                tf_ass = _tf.mktemp(suffix='.ass')
+                with open(tf_ass, 'w', encoding='utf-8') as _f:
+                    _f.write(ass_content)
+
+                # Get video duration for progress %
+                _dur_r = _sp.run([_ff, '-i', inp], capture_output=True, text=True)
+                _dm = _re_sub.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur_r.stderr)
+                _total_s = 1.0
+                if _dm:
+                    _h, _m, _s2 = _dm.groups()
+                    _total_s = int(_h)*3600 + int(_m)*60 + float(_s2)
+
+                # Pick encoder
+                _enc = getattr(self, '_encoder', '')
+                if 'amf' in _enc: _vcodec = ['h264_amf']
+                elif 'nvenc' in _enc: _vcodec = ['h264_nvenc']
+                elif 'qsv' in _enc: _vcodec = ['h264_qsv']
+                else: _vcodec = ['libx264', '-crf', '18', '-preset', 'fast']
+
+                ass_escaped = tf_ass.replace('\\', '/').replace(':', '\\:')
+                cmd = [_ff, '-i', inp,
+                       '-vf', f"ass='{ass_escaped}'",
+                       '-c:v'] + _vcodec + ['-c:a', 'copy', outfile, '-y']
+
+                self.after(0, lambda: self.set_progress('🔤 Burning subtitles...', pct=1))
+                proc = _sp.Popen(cmd, stderr=_sp.PIPE, text=True,
+                                 encoding='utf-8', errors='replace')
+                for line in proc.stderr:
+                    if 'time=' in line:
+                        try:
+                            _t = line.split('time=')[1].split()[0]
+                            _parts = _t.split(':')
+                            _cur = int(_parts[0])*3600 + int(_parts[1])*60 + float(_parts[2])
+                            _pct = min(99, int(_cur / _total_s * 100))
+                            self.after(0, lambda p=_pct, t=_t: (
+                                self.set_progress(f'🔤 Burning subtitles... {t}', pct=p),
+                                self.sub_status_lbl.config(text=f'Burning... {t}', fg=FG2)
+                            ))
+                        except: pass
+                proc.wait()
+                _os.unlink(tf_ass)
+
+                if proc.returncode == 0:
+                    def _done():
+                        self.sub_burn_btn.config(state='normal', text='🔤  BURN SUBTITLES')
+                        self.sub_status_lbl.config(text=f'✅ Saved: {Path(outfile).name}', fg=GREEN)
+                        self.set_progress(f'✅ Subtitles burned: {Path(outfile).name}', pct=100)
+                        self.log(f'✅ Subtitles burned: {outfile}', GREEN)
+                    self.after(0, _done)
+                else:
+                    raise RuntimeError(f'ffmpeg returned code {proc.returncode}')
+            except Exception as _ex:
+                import traceback as _tb
+                _err = _tb.format_exc()
+                def _err_ui():
+                    self.sub_burn_btn.config(state='normal', text='🔤  BURN SUBTITLES')
+                    self.sub_status_lbl.config(text='❌ Error — check log', fg=RED)
+                    self.set_progress('❌ Subtitle burn failed', pct=0)
+                    self.log(f'Subtitle burn error:\n{_err}', RED)
+                self.after(0, _err_ui)
+        import threading; threading.Thread(target=_run, daemon=True).start()
 
     def _copy_transcript(self):
         t = self.trans_box.get('1.0', 'end').strip()
@@ -8561,6 +9311,8 @@ class App(tk.Tk):
             ('demucs',         'demucs',                    'AI music removal — required for Music Removal tab'),
             ('torch',          'torch',                     'PyTorch — required by Demucs'),
             ('torchaudio',     'torchaudio',                'Audio processing — required by Demucs'),
+            # ── Subtitle Burn-in ────────────────────────────────────────────
+            ('fonttools',      'fonttools',                 'Font enumeration — required for Burn Subtitles'),
         ]
 
         # Packages that need --no-deps to avoid DLL permission conflicts
@@ -8601,7 +9353,7 @@ class App(tk.Tk):
                 'Pillow': 'PIL', 'numpy': 'numpy', 'requests': 'requests',
                 'groq': 'groq', 'openai': 'openai',
                 'torch': 'torch', 'torchaudio': 'torchaudio',
-                'torchaudio': 'torchaudio',
+                'fonttools': 'fontTools',
             }
             mod = _imp_map.get(pkg_name, pkg_name.replace('-','_').lower())
             try:
@@ -10096,7 +10848,7 @@ if __name__ == '__main__':
         _CNW = 0x08000000
         _flag  = USER_DIR / 'pending_update.flag'
         _stamp = USER_DIR / 'install_done.stamp'
-        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic')]
+        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools')]
         _force = _flag.exists() or not _stamp.exists()
         if not _force:
             _miss = []
