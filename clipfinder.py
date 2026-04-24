@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 
 import subprocess
 import sys
@@ -530,7 +530,7 @@ FONT_MONO_S = ('Consolas', 9)
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'],
+        'models': ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest'],
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
@@ -548,11 +548,13 @@ PROVIDERS = {
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
         'models': [
-                        'qwen/qwen3.6-plus:free',
-            'nvidia/nemotron-3-super-120b-a12b:free',
-            'meta-llama/llama-3.3-70b-instruct:free',
-            'meta-llama/llama-3.1-8b-instruct:free',
-            'google/gemma-3-12b-it:free',
+            'openrouter/auto',                              # OR's own free router — auto-picks best available
+            'meta-llama/llama-3.3-70b-instruct:free',      # Llama 3.3 70B — top free model
+            'nvidia/nemotron-3-super-120b-a12b:free',       # NVIDIA 120B — large context
+            'google/gemma-3-12b-it:free',                   # Gemma 3 12B
+            'meta-llama/llama-3.1-8b-instruct:free',        # Llama 3.1 8B — fast fallback
+            'mistralai/mistral-small-3.1:free',              # Mistral Small 3.1
+            'qwen/qwen3.6-plus:free',                        # Qwen — last resort
         ],
         'url':    'https://openrouter.ai/keys',
         'note':   '50+ free models — no credit card needed',
@@ -742,7 +744,8 @@ OPTION 3
 
 # Config lives next to the EXE/script so settings survive across launches
 # This ensures _setup_done, API keys, folders etc persist properly
-CONFIG_FILE = USER_DIR / 'clipfinder_config.json'
+CONFIG_FILE  = USER_DIR / 'clipfinder_config.json'
+SESSION_FILE = USER_DIR / 'clipfinder_session.json'
 
 
 def _bind_mousewheel(widget, canvas):
@@ -960,12 +963,21 @@ def find_ffmpeg():
 # Reset on launch so newly installed packages are detected
 _WHISPER_DEVICE_CACHE = None
 
-def _detect_whisper_device():
+def _detect_whisper_device(use_gpu=True):
     """Detect best available compute device for whisper transcription.
-    Returns (device, compute_type, label)"""
+    Returns (device, compute_type, label)
+    use_gpu=False forces CPU-only mode."""
     global _WHISPER_DEVICE_CACHE
-    if _WHISPER_DEVICE_CACHE:
+    if _WHISPER_DEVICE_CACHE and use_gpu:
         return _WHISPER_DEVICE_CACHE
+
+    # ── GPU disabled by user — skip all GPU checks ───────────────────────────
+    if not use_gpu:
+        try:
+            import faster_whisper as _fw_check  # noqa
+            return ('cpu', 'int8', 'CPU int8 (GPU disabled)')
+        except ImportError:
+            return ('cpu', 'int8', 'CPU (GPU disabled)')
 
     # ── 0. whisper.cpp + Vulkan (best for AMD/Intel on Windows) ──────────────
     if _find_whispercpp() and _find_whispercpp_model('base'):
@@ -1410,12 +1422,13 @@ def _find_whispercpp_model(model_size):
             if p.exists(): return str(p)
     return None
 
-def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progress_cb=None, use_word_timestamps=False):
+def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progress_cb=None, use_word_timestamps=False, use_gpu=True):
     """Transcribe with best available backend:
     1. whisper.cpp + Vulkan (AMD/Intel/NVIDIA GPU on Windows — fastest)
     2. faster-whisper + CUDA (NVIDIA only)
     3. faster-whisper CPU int8 (always works, 4x faster than openai-whisper)
     4. openai-whisper CPU fallback
+    use_gpu=False skips all GPU paths and forces CPU-only.
     """
     _ensure_pkgs_on_path()  # always check PKGS_DIR before importing whisper
     import os as _os, warnings as _wn
@@ -1430,7 +1443,8 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
         _os.environ['PATH'] = ff_dir + _os.pathsep + _os.environ.get('PATH', '')
 
     # ── 1. whisper.cpp with Vulkan — AMD/Intel/NVIDIA GPU on Windows ─────────
-    _wcpp = _find_whispercpp()
+    # Skip if GPU disabled by user
+    _wcpp = _find_whispercpp() if use_gpu else None
     _wmodel = _find_whispercpp_model(model_size) if _wcpp else None
     if _wcpp and _wmodel:
         try:
@@ -1657,7 +1671,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
     # ── 2. faster-whisper with CUDA/CPU ───────────────────────────────────────
     try:
         _FW = _fresh_import('faster_whisper').WhisperModel
-        device, compute_type, device_label = _detect_whisper_device()
+        device, compute_type, device_label = _detect_whisper_device(use_gpu=use_gpu)
         print(f'[CF] Whisper device: {device_label}')
 
         if device == 'directml':
@@ -1773,7 +1787,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.3.3 — AI Clip Extractor')
+        self.title('ClipFinder 1.3.4 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -1834,6 +1848,7 @@ class App(tk.Tk):
         self.after(500, self._auto_select_provider)
         self.v_model    = tk.StringVar(value=self.cfg.get('model', ''))
         self.v_whisper  = tk.StringVar(value=self.cfg.get('whisper', 'auto'))
+        self.v_use_gpu_whisper = tk.BooleanVar(value=self.cfg.get('use_gpu_whisper', True))
         self.v_status   = tk.StringVar(value='Ready.')
 
         self.clips      = []
@@ -1842,13 +1857,28 @@ class App(tk.Tk):
         self.srt_result = None
         self.running    = False
         self._cancel_requested = False
+        # App-level rate-limit tracking — persists across runs, visible to Settings panel
+        import threading as _thr_init
+        self._rl_provs      = set()        # providers currently rate-limited
+        self._rl_since      = {}           # prov -> time.time() when marked RL
+        self._rl_provs_lock = _thr_init.Lock()
         # Extra API keys per provider for round-robin rotation
         self._extra_keys = {
             'Google Gemini (Free)':    [k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()],
             'Groq (Free)':             [k.strip() for k in self.cfg.get('key_groq_extra','').split(',') if k.strip()],
             'OpenRouter (Free models)':[k.strip() for k in self.cfg.get('key_openrouter_extra','').split(',') if k.strip()],
         }
+        # Per-provider per-key enabled flags: cfg stores comma-sep 0/1 matching extra keys order
+        self._extra_keys_enabled = {
+            'Google Gemini (Free)':    [bool(int(x)) for x in self.cfg.get('key_gemini_extra_enabled','').split(',') if x in ('0','1')],
+            'Groq (Free)':             [bool(int(x)) for x in self.cfg.get('key_groq_extra_enabled','').split(',') if x in ('0','1')],
+            'OpenRouter (Free models)':[bool(int(x)) for x in self.cfg.get('key_openrouter_extra_enabled','').split(',') if x in ('0','1')],
+        }
         self._key_index = {}
+        # Auto-cooldown: (prov_name, key_fingerprint) -> epoch time when key re-enables
+        # Keys are auto-paused 30-40 min on 429/401 when secondary keys exist
+        self._key_cooldowns  = {}
+        self._key_cd_lock    = _thr_init.Lock()
         self._whisper_segments = []
         # Thumbnail finder state
         self._thumb_results  = []
@@ -2237,6 +2267,26 @@ class App(tk.Tk):
                            relief='flat', cursor='hand2').pack(side='left', padx=(0,6))
         tk.Label(p, text='tiny=fastest  medium=accurate',
                  font=('Segoe UI', 8), fg=FG2, bg=BG2, padx=12).pack(anchor='w')
+
+        # GPU toggle
+        gpu_row = tk.Frame(p, bg=BG2, padx=12)
+        gpu_row.pack(fill='x', pady=(4, 0))
+        gpu_cb = tk.Checkbutton(
+            gpu_row, text='⚡ Use GPU acceleration (recommended)',
+            variable=self.v_use_gpu_whisper,
+            font=FONT_SMALL, fg=FG, bg=BG2,
+            selectcolor=BG3, activebackground=BG2,
+            relief='flat', cursor='hand2',
+            command=lambda: (
+                self.cfg.update({'use_gpu_whisper': self.v_use_gpu_whisper.get()}),
+                save_cfg(self.cfg),
+                # Reset device cache so next transcription re-probes
+                globals().update({'_WHISPER_DEVICE_CACHE': None})
+            )
+        )
+        gpu_cb.pack(side='left')
+        tk.Label(p, text='Supports NVIDIA (CUDA), AMD/Intel (DirectML/Vulkan)',
+                 font=('Segoe UI', 8), fg=FG2, bg=BG2, padx=12).pack(anchor='w', pady=(1, 0))
 
         div()
 
@@ -2971,6 +3021,14 @@ class App(tk.Tk):
                   bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
                   activebackground=ACCENT2,
                   command=self._export_or_censor).pack(side='right', padx=(6,0))
+
+        # Save / Load session buttons — right of export
+        tk.Button(exp_bar, text='💾 Save Session', font=FONT_SMALL,
+                  bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10, pady=5,
+                  command=self._save_session).pack(side='right', padx=(0,4))
+        tk.Button(exp_bar, text='📂 Load Session', font=FONT_SMALL,
+                  bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10, pady=5,
+                  command=self._load_session).pack(side='right', padx=(0,2))
 
 
         # MP3 browse row — shown only when style=mp3 AND censor is on
@@ -4007,6 +4065,7 @@ class App(tk.Tk):
             'provider':          self.v_provider.get(),
             'model':             self.v_model.get(),
             'whisper':           self.v_whisper.get(),
+            'use_gpu_whisper':   self.v_use_gpu_whisper.get() if hasattr(self, 'v_use_gpu_whisper') else True,
             'tweet_context': self.tweet_context.get('1.0','end').strip() if hasattr(self,'tweet_context') else '',
             'outdir':            self.v_outdir.get().strip(),
             'key_gemini':        self._keys.get('Google Gemini (Free)', ''),
@@ -4400,15 +4459,31 @@ class App(tk.Tk):
             if model_size in ('auto', '', None):
                 # Smart auto: pick model based on video duration + GPU
                 try:
-                    import subprocess as _ffp
+                    import subprocess as _ffp, re as _re_dur
                     _ff_dur = ensure_ffmpeg()
-                    _dur_r = _ffp.run([_ff_dur, '-v', 'error', '-show_entries',
-                                       'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', vid],
-                                      capture_output=True, text=True, timeout=10)
-                    _duration = float(_dur_r.stdout.strip() or 0)
+                    _dur_r = _ffp.run([_ff_dur, '-i', vid],
+                                      capture_output=True, text=True, timeout=10,
+                                      errors='replace')
+                    _dm = _re_dur.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur_r.stderr)
+                    if _dm:
+                        _h, _m, _s2 = _dm.groups()
+                        _duration = int(_h)*3600 + int(_m)*60 + float(_s2)
+                    else:
+                        _duration = 0
                 except Exception:
                     _duration = 0
-                _has_gpu = getattr(self, '_gpu_type', 'CPU') not in ('CPU', '', None)
+                _use_gpu_auto = getattr(self, 'v_use_gpu_whisper', None)
+                _use_gpu_auto = _use_gpu_auto.get() if _use_gpu_auto else True
+                _dev_auto, _, _dev_label_auto = _detect_whisper_device(use_gpu=_use_gpu_auto)
+                _has_gpu = _use_gpu_auto and any(x in _dev_label_auto for x in ('Vulkan', 'CUDA', 'DirectML', 'GPU'))
+                if _use_gpu_auto and not _has_gpu:
+                    # Check why GPU is unavailable
+                    _wcpp = _find_whispercpp()
+                    if not _wcpp:
+                        _gpu_reason = 'whisper.cpp not installed — go to Settings → Core Dependencies'
+                    else:
+                        _gpu_reason = 'GPU not detected'
+                    _dev_label_auto += f' (⚠ {_gpu_reason})'
                 if _duration < 300:          # under 5 min
                     model_size = 'tiny' if not _has_gpu else 'base'
                 elif _duration < 1200:       # 5-20 min
@@ -4417,9 +4492,11 @@ class App(tk.Tk):
                     model_size = 'small'
                 else:                        # 60+ min VOD
                     model_size = 'medium' if _has_gpu else 'small'
-                self.log(f'[Auto] Video {_duration:.0f}s → whisper {model_size} (GPU={_has_gpu})', FG2)
+                self.log(f'[Auto] Video {_duration:.0f}s → whisper {model_size} (GPU={_has_gpu}, {_dev_label_auto})', FG2)
             self.log(f'Transcribing: {Path(vid).name}  [{model_size}]')
 
+            _use_gpu_flag = getattr(self, 'v_use_gpu_whisper', None)
+            _use_gpu_flag = _use_gpu_flag.get() if _use_gpu_flag else True
 
             _ff = ensure_ffmpeg()
             _ctx_prompt = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
@@ -4454,7 +4531,8 @@ class App(tk.Tk):
             result = _do_transcribe(vid, model_size,
                                     initial_prompt=_ctx_prompt or None,
                                     ffmpeg_path=_ff,
-                                    progress_cb=_progress_cb)
+                                    progress_cb=_progress_cb,
+                                    use_gpu=_use_gpu_flag)
             self.ticker_on = False
             self.srt_result = result
 
@@ -4540,7 +4618,9 @@ class App(tk.Tk):
                 model=model,
                 messages=[{'role': 'user', 'content': self._current_prompt}],
                 temperature=0.3, max_tokens=4096)
-            return resp.choices[0].message.content.strip()
+            if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
+                return (resp.choices[0].message.content or '').strip()
+            return ''
         elif lib == 'openrouter':
             from openai import OpenAI as _O
             _or = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
@@ -4566,12 +4646,51 @@ class App(tk.Tk):
         lib   = data['lib']
         model = self.v_model.get() if self.v_provider.get() == prov_name else data['models'][0]
 
-        # Key pool: primary + extras
-        _primary = self._keys.get(prov_name, '').strip()
-        _extras  = getattr(self, '_extra_keys', {}).get(prov_name, [])
-        _key_pool = [k for k in [_primary] + list(_extras) if k]
+        # Key pool: primary + enabled extras (disabled keys kept in cfg but skipped)
+        _primary  = self._keys.get(prov_name, '').strip()
+        _extras   = getattr(self, '_extra_keys', {}).get(prov_name, [])
+        _enabled  = getattr(self, '_extra_keys_enabled', {}).get(prov_name, [])
+        # Pad enabled list with True for any extras that don't have a flag yet
+        _enabled_padded = _enabled + [True] * max(0, len(_extras) - len(_enabled))
+        _active_extras  = [k for k, en in zip(_extras, _enabled_padded) if en and k]
+        _all_keys = [k for k in [_primary] + _active_extras if k]
+        _disabled_count = sum(1 for en in _enabled_padded[:len(_extras)] if not en)
+
+        # ── Auto-cooldown filtering ────────────────────────────────────────────
+        # Keys on cooldown are skipped — but only if other keys are available
+        import time as _ktime
+        def _key_fp(k): return k[:8] + k[-4:] if len(k) > 12 else k  # fingerprint for logging
+        def _is_on_cooldown(k):
+            _exp = self._key_cooldowns.get((prov_name, k), 0)
+            return _ktime.time() < _exp
+        def _cd_remaining(k):
+            return max(0, int(self._key_cooldowns.get((prov_name, k), 0) - _ktime.time()))
+
+        _cooled_keys = [k for k in _all_keys if _is_on_cooldown(k)]
+        _key_pool    = [k for k in _all_keys if not _is_on_cooldown(k)]
+
+        # Always log key pool state so we can diagnose issues
+        self.log(f'[{prov_name}] Key pool: {len(_all_keys)} total, {len(_key_pool)} ready, {len(_cooled_keys)} on cooldown', FG2)
+        if not _key_pool and _all_keys:
+            _soonest = min(_all_keys, key=lambda k: self._key_cooldowns.get((prov_name, k), 0))
+            _wait = _cd_remaining(_soonest)
+            self.log(f'[{prov_name}] All keys on cooldown — soonest ready in {_wait//60}m{_wait%60:02d}s. Using anyway...', YELLOW)
+            _key_pool = _all_keys
+
         if not _key_pool:
+            if _disabled_count and not _primary:
+                raise ValueError(f'No active API key for {prov_name} — all extra keys are disabled. Enable them in Settings.')
             raise ValueError(f'No API key for {prov_name}')
+
+        if _cooled_keys:
+            _total_all = len(_all_keys)
+            for _ck in _cooled_keys:
+                _rem = _cd_remaining(_ck)
+                self.log(f'[{prov_name}] Key ..{_key_fp(_ck)} auto-paused — resumes in {_rem//60}m{_rem%60:02d}s', FG2)
+            self.log(f'[{prov_name}] Using {len(_key_pool)}/{_total_all} keys ({len(_cooled_keys)} on cooldown)', FG2)
+        elif _disabled_count:
+            _total_all = 1 + len(_extras) if _primary else len(_extras)
+            self.log(f'[{prov_name}] Using {len(_key_pool)}/{_total_all} keys ({_disabled_count} disabled in Settings)', FG2)
 
         # Build prompt
         ctx_raw = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
@@ -4603,8 +4722,10 @@ class App(tk.Tk):
                                .replace('{context_block}', context_block + section_note) \
                                .replace('{names_block}', names_block)
 
-        # Try each key in pool — rotate on rate limit
+        # Try each key in pool — ONLY rotate on confirmed rate-limit (429 / RESOURCE_EXHAUSTED)
+        # Non-RL errors (auth, parse, network) raise immediately — no rotation
         _last_err = None
+        _rotated  = False  # track if we've rotated at all this call
         for _ki, key in enumerate(_key_pool):
             try:
                 if lib == 'gemini':
@@ -4614,6 +4735,7 @@ class App(tk.Tk):
                     try_models = [model] + [m for m in all_models if m != model]
                     last_merr = None
                     raw = None
+                    _all_models_rl = True  # assume all rate-limited until one succeeds
                     for try_model in try_models:
                         try:
                             resp = client.models.generate_content(
@@ -4621,13 +4743,23 @@ class App(tk.Tk):
                                 config={'temperature': 0.3, 'max_output_tokens': 4096})
                             raw = resp.text.strip()
                             last_merr = None
+                            _all_models_rl = False
                             break
                         except Exception as _e:
-                            if '429' in str(_e) or 'RESOURCE_EXHAUSTED' in str(_e):
+                            _es = str(_e)
+                            if '429' in _es or 'RESOURCE_EXHAUSTED' in _es or 'quota' in _es.lower():
                                 last_merr = _e; continue
+                            if '404' in _es or 'not_found' in _es.lower() or 'not found' in _es.lower():
+                                # Model retired/unavailable — try next model
+                                continue
+                            _all_models_rl = False
                             raise
                     if last_merr is not None:
+                        # All models rate-limited for this key — raise so outer loop tries next key
+                        self.log(f'[Google Gemini (Free)] Key {_ki+1} all models rate-limited', YELLOW)
                         raise last_merr
+                    if raw is None:
+                        raise Exception('All Gemini models unavailable (404) — update models list')
 
                 elif lib == 'groq':
                     from groq import Groq as _G
@@ -4639,55 +4771,159 @@ class App(tk.Tk):
                     resp = _G(api_key=key).chat.completions.create(
                         model=model, messages=[{'role':'user','content':_groq_prompt}],
                         temperature=0.3, max_tokens=4096)
-                    raw = resp.choices[0].message.content.strip()
+                    if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
+                        raw = (resp.choices[0].message.content or '').strip()
+                    else:
+                        raise Exception('Groq returned empty response')
 
                 elif lib == 'openrouter':
                     from openai import OpenAI as _O
                     _or = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
-                    if not hasattr(self, '_dead_or_models'): self._dead_or_models = set()
-                    _or_models = [m for m in data['models'] if m not in self._dead_or_models] or data['models']
+                    if not hasattr(self, '_dead_or_models'): self._dead_or_models = {}  # model -> expiry timestamp
+                    import time as _or_time
+                    # Clear expired entries
+                    self._dead_or_models = {m: exp for m, exp in self._dead_or_models.items() if _or_time.time() < exp}
+                    _or_models = [m for m in data['models'] if m not in self._dead_or_models] or list(data['models'])
                     _or_raw = None
                     for _orm in _or_models:
                         try:
                             _r = _or.chat.completions.create(
                                 model=_orm, messages=[{'role':'user','content':prompt}],
                                 temperature=0.3, max_tokens=8192)
-                            _or_raw = _r.choices[0].message.content.strip()
+                            # Guard against None choices (OpenRouter error responses)
+                            if not _r or not _r.choices or not _r.choices[0] or not _r.choices[0].message:
+                                self._dead_or_models[_orm] = _or_time.time() + 600  # 10 min retry
+                                self.log(f'[OpenRouter] {_orm} returned empty response, skipping...', YELLOW)
+                                continue
+                            _or_raw = _r.choices[0].message.content
+                            if _or_raw: _or_raw = _or_raw.strip()
+                            if not _or_raw:
+                                self._dead_or_models[_orm] = _or_time.time() + 1800
+                                continue
                             if _r.choices[0].finish_reason == 'length' and _or_raw:
                                 self.log('[OpenRouter] Truncated — retrying condensed', YELLOW)
                                 _r2 = _or.chat.completions.create(
                                     model=_orm,
                                     messages=[{'role':'user','content':prompt[:len(prompt)//2]+'\n\n[Top 3 clips JSON only]'}],
                                     temperature=0.3, max_tokens=4096)
-                                _or_raw = _r2.choices[0].message.content.strip()
+                                if _r2 and _r2.choices and _r2.choices[0] and _r2.choices[0].message:
+                                    _or_raw = (_r2.choices[0].message.content or '').strip()
                             break
                         except Exception as _orme:
                             _es = str(_orme).lower()
-                            if '404' in _es or 'no endpoints' in _es:
-                                self._dead_or_models.add(_orm)
-                                self.log(f'[OpenRouter] {_orm} dead, trying next...', YELLOW)
+                            _ec = str(_orme)
+                            if '404' in _ec or 'no endpoints' in _es or 'not found' in _es:
+                                self._dead_or_models[_orm] = _or_time.time() + 1800  # 30 min
+                                self.log(f'[OpenRouter] {_orm} dead (404), trying next model...', YELLOW)
+                                continue
+                            elif ('429' in _ec or 'temporarily' in _es or 'unavailable' in _es
+                                  or 'overloaded' in _es or 'provider returned error' in _es
+                                  or 'rate' in _es):
+                                # Model is rate-limited or temporarily down — try next model
+                                self._dead_or_models[_orm] = _or_time.time() + 300  # 5 min retry
+                                self.log(f'[OpenRouter] {_orm} temporarily unavailable, trying next model...', YELLOW)
                                 continue
                             raise
-                    if _or_raw is None: raise Exception('All OpenRouter models unavailable')
+                    if _or_raw is None:
+                        _dead_list = ', '.join(self._dead_or_models) if self._dead_or_models else 'unknown'
+                        raise Exception(f'All OpenRouter models unavailable (tried: {_dead_list}). '
+                                        'Free-tier models may be down. Try Gemini or Groq instead.')
                     raw = _or_raw
                 else:
                     raise ValueError(f'Unknown lib: {lib}')
 
 
-                if _ki > 0:
-                    self.log(f'[{prov_name}] Key {_ki+1} succeeded', GREEN)
+                if _rotated:
+                    self.log(f'[{prov_name}] Key {_ki+1} succeeded after rotation', GREEN)
                 break  # success — exit key loop
 
             except Exception as _ke:
                 _ks = str(_ke).lower()
-                if any(x in _ks for x in ['429','rate','quota','resource_exhausted','too many']):
-                    if _ki < len(_key_pool) - 1:
-                        self.log(f'[{prov_name}] Key {_ki+1}/{len(_key_pool)} rate-limited → trying key {_ki+2}...', YELLOW)
-                        _last_err = _ke
-                        continue
+                _ks_raw = str(_ke)
+                # Log exact error so we can diagnose
+                self.log(f'[{prov_name}] Key {_ki+1} error: {_ks_raw[:150]}', FG2)
+                # Strict rate-limit detection — only rotate on confirmed API signals
+                _is_key_rl = (
+                    ('429' in _ks and '404' not in _ks) or
+                    'resource_exhausted' in _ks or
+                    'too many requests' in _ks or
+                    'rate limit exceeded' in _ks or
+                    'rate_limit_exceeded' in _ks or
+                    ('quota' in _ks and ('exceeded' in _ks or 'exhausted' in _ks))
+                )
+                # 401 — bad/expired key: auto-pause if we have other keys, else raise
+                _is_auth_err = (
+                    '401' in _ks or 'unauthorized' in _ks or 'invalid api key' in _ks or
+                    'authentication' in _ks
+                )
+                # These are never fixable by rotation
+                _is_hard_fatal = (
+                    '403' in _ks or 'forbidden' in _ks or
+                    'could not parse' in _ks or
+                    'all openrouter models unavailable' in _ks
+                )
+                if _is_hard_fatal:
+                    raise  # raise immediately, don't try other keys
+
+                _should_pause = _is_key_rl or _is_auth_err
+                _has_more_keys = _ki < len(_key_pool) - 1
+
+        # Auto-cooldown: Gemini RPM resets in ~60s, daily quota in 24h
+        # Groq: ~60s RPM reset. OpenRouter: varies. Use short cooldown first, escalate.
+                if _should_pause and _has_more_keys:
+                    # Smart cooldown: short for RPM-based limits (Gemini/Groq), longer for quota
+                    import random as _rnd
+                    _prev_cd  = self._key_cooldowns.get((prov_name, key), 0)
+                    _has_prev = _prev_cd > _ktime.time() - 300  # was on cooldown recently
+                    if 'gemini' in prov_name.lower():
+                        _cd_secs = 90 if not _has_prev else _rnd.randint(55, 65) * 60
+                    elif 'groq' in prov_name.lower():
+                        _cd_secs = _rnd.randint(55, 70)
                     else:
-                        raise  # all keys exhausted
-                raise  # non-rate-limit error
+                        _cd_secs = _rnd.randint(30, 40) * 60
+                    _cd_disp = f'{_cd_secs//60}m{_cd_secs%60:02d}s' if _cd_secs >= 60 else f'{_cd_secs}s'
+                    with self._key_cd_lock:
+                        self._key_cooldowns[(prov_name, key)] = _ktime.time() + _cd_secs
+                    _reason = 'rate-limited (429)' if _is_key_rl else 'auth error (401)'
+                    self.log(
+                        f'[{prov_name}] Key {_ki+1}/{len(_key_pool)} {_reason} — '
+                        f'paused {_cd_disp} → trying key {_ki+2}...',
+                        YELLOW)
+                    def _schedule_resume(pn=prov_name, k=key, secs=_cd_secs):
+                        def _resume_log():
+                            import time as _rt
+                            _rt.sleep(secs)
+                            if self._key_cooldowns.get((pn, k), 0) <= _rt.time() + 5:
+                                self.after(0, lambda: self.log(
+                                    f'[{pn}] Key ..{_key_fp(k)} cooldown expired — re-enabled', GREEN))
+                                with self._key_cd_lock:
+                                    self._key_cooldowns.pop((pn, k), None)
+                        import threading as _thr_r
+                        _thr_r.Thread(target=_resume_log, daemon=True).start()
+                    _schedule_resume()
+                    _last_err = _ke
+                    _rotated  = True
+                    continue
+
+                if _should_pause and not _has_more_keys:
+                    import random as _rnd2
+                    if 'gemini' in prov_name.lower():
+                        _cd_secs2 = 90
+                    elif 'groq' in prov_name.lower():
+                        _cd_secs2 = _rnd2.randint(55, 70)
+                    else:
+                        _cd_secs2 = _rnd2.randint(30, 40) * 60
+                    _cd_disp2 = f'{_cd_secs2//60}m{_cd_secs2%60:02d}s' if _cd_secs2 >= 60 else f'{_cd_secs2}s'
+                    with self._key_cd_lock:
+                        self._key_cooldowns[(prov_name, key)] = _ktime.time() + _cd_secs2
+                    _reason2 = 'rate-limited' if _is_key_rl else 'auth error'
+                    self.log(
+                        f'[{prov_name}] Only key {_reason2} — paused {_cd_disp2} for next run',
+                        YELLOW)
+                    raise
+
+                # Unknown error — raise immediately, no rotation
+                raise
 
         # Parse JSON response
         clean = raw.strip()
@@ -4795,29 +5031,45 @@ class App(tk.Tk):
                                              'rate-limited','temporarily','upstream',
                                              'unavailable','overloaded','capacity'])
 
-            # Track which providers are rate-limited globally
-            _rl_provs = set()
-            _rl_provs_lock = __import__('threading').Lock()
+            # Use app-level rate-limit tracking (self._rl_provs) so Settings panel
+            # reflects live state and marks survive between runs for 5 minutes.
+            import time as _time_rl
+            _RL_EXPIRY = 300  # seconds before a rate-limit mark auto-clears
 
             def _mark_rl(prov):
-                with _rl_provs_lock:
-                    # Rotate to next key before marking as limited
+                with self._rl_provs_lock:
                     _pool = [k for k in [self._keys.get(prov,'').strip()] + getattr(self,'_extra_keys',{}).get(prov,[]) if k]
                     if len(_pool) > 1:
                         _cur = getattr(self, '_key_index', {}).get(prov, 0)
                         _next = (_cur + 1) % len(_pool)
                         if not hasattr(self, '_key_index'): self._key_index = {}
                         self._key_index[prov] = _next
-                        # Only mark RL if we've cycled through all keys
                         if _next != 0:
-                            return  # still have keys to try, don't mark as RL yet
-                    _rl_provs.add(prov)
+                            return  # still have keys to try
+                    self._rl_provs.add(prov)
+                    self._rl_since[prov] = _time_rl.time()
+                # Refresh Settings panel dot colour immediately
+                self.after(0, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
 
             def _clear_rl(prov):
-                with _rl_provs_lock:
-                    _rl_provs.discard(prov)
+                with self._rl_provs_lock:
+                    self._rl_provs.discard(prov)
+                    self._rl_since.pop(prov, None)
+                self.after(0, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
+
+            def _expire_rl():
+                """Auto-clear providers whose rate-limit mark is older than 5 minutes."""
+                now = _time_rl.time()
+                with self._rl_provs_lock:
+                    expired = [p for p, t in self._rl_since.items() if now - t > _RL_EXPIRY]
+                    for p in expired:
+                        self._rl_provs.discard(p)
+                        self._rl_since.pop(p, None)
+                if expired:
+                    self.after(0, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
 
             def _try_chunk(chunk, label, exclude=None, start_prov=None):
+                _expire_rl()  # auto-clear stale rate-limit marks before each attempt
                 exclude = exclude or set()
                 # Start from assigned provider, skip any currently rate-limited
                 _order = list(keyed)
@@ -4826,8 +5078,10 @@ class App(tk.Tk):
                     _order = _order[idx:] + _order[:idx]
                 # Try non-rate-limited providers first
                 _dead = getattr(self, '_dead_models', set())
-                _available = [p for p in _order if p not in _rl_provs and p not in exclude and p not in _dead]
-                _fallback  = [p for p in _order if p in _rl_provs and p not in exclude and p not in _dead]
+                _available = [p for p in _order if p not in self._rl_provs and p not in exclude and p not in _dead]
+                _fallback  = [p for p in _order if p in self._rl_provs and p not in exclude and p not in _dead]
+                _last_err  = None
+                _fatal_err = None  # non-recoverable error (bad key, parse fail)
                 for prov in _available + _fallback:
                     try:
                         self.log(f'[{label}] → {prov}...')
@@ -4837,23 +5091,48 @@ class App(tk.Tk):
                         return clips, prov
                     except Exception as ex:
                         s = str(ex).lower()
+                        _last_err = ex
                         if _is_rate_err(ex):
                             _mark_rl(prov)
                             self.log(f'[{label}] {prov} rate-limited, trying next...', YELLOW)
                             continue
-                        elif '404' in s or 'no endpoints' in s:
-                            # Dead model — add to session dead list, never try again
+                        elif 'all openrouter models unavailable' in s:
+                            # All OR models dead for this session — mark provider dead too
                             if not hasattr(self, '_dead_models'):
                                 self._dead_models = set()
                             self._dead_models.add(prov)
-                            self.log(f'[{label}] {prov} model unavailable — skipping for session', YELLOW)
+                            self.after(0, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
+                            self.log(f'[{label}] {prov} all models unavailable — marked dead for session', RED)
+                            _fatal_err = ex
+                            continue
+                        elif '404' in s or 'no endpoints' in s or 'not found' in s:
+                            if not hasattr(self, '_dead_models'):
+                                self._dead_models = set()
+                            self._dead_models.add(prov)
+                            self.after(0, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
+                            self.log(f'[{label}] {prov} model unavailable (404) — skipping for session', RED)
+                            _fatal_err = ex
+                            continue
+                        elif '401' in s or 'invalid api key' in s or 'unauthorized' in s or 'authentication' in s:
+                            self.log(f'[{label}] {prov} invalid API key — check Settings', RED)
+                            _fatal_err = ex
                             continue
                         elif '403' in s or 'access denied' in s or 'forbidden' in s:
-                            self.log(f'[{label}] {prov} access denied, skipping...', YELLOW)
+                            self.log(f'[{label}] {prov} access denied — key may lack permissions', RED)
+                            _fatal_err = ex
                             continue
-                        self.log(f'[{label}] {prov} failed: {str(ex)[:80]}', RED)
+                        elif 'no api key' in s or 'no key' in s:
+                            self.log(f'[{label}] {prov} has no API key configured', YELLOW)
+                            continue
+                        elif 'could not parse' in s or 'json' in s:
+                            self.log(f'[{label}] {prov} parse error: {str(ex)[:120]}', RED)
+                            _fatal_err = ex
+                            continue
+                        self.log(f'[{label}] {prov} error: {str(ex)[:120]}', RED)
                         continue
-                return [], None
+                # Surface the most useful error
+                _err_to_return = _fatal_err or _last_err
+                return [], _err_to_return
 
             # ── Multi-provider parallel processing ───────────────────────────
             # Strategy: always split transcript across ALL available providers
@@ -4887,35 +5166,87 @@ class App(tk.Tk):
                     result.append('\n'.join(buf))
                 return result
 
-            # Assign chunks to providers — only split if transcript is long enough
+            def _get_key_slots():
+                """Build ordered slot list: one primary per provider first, then extras.
+                Extras only used when transcript is long enough to need them.
+                Mirrors the enabled/disabled logic in _call_provider exactly."""
+                primary_slots = []
+                extra_slots   = []
+                for prov in keyed:
+                    primary  = self._keys.get(prov, '').strip()
+                    extras   = getattr(self, '_extra_keys', {}).get(prov, [])
+                    enabled  = getattr(self, '_extra_keys_enabled', {}).get(prov, [])
+                    enabled_padded = enabled + [True] * max(0, len(extras) - len(enabled))
+                    active_extras  = [k for k, en in zip(extras, enabled_padded) if en and k.strip()]
+                    if primary:
+                        primary_slots.append((prov, 0, prov.split()[0]))
+                    for ki, _ in enumerate(active_extras):
+                        lbl = f'{prov.split()[0]}[key{ki+2}]'
+                        extra_slots.append((prov, ki+1, lbl))
+                return primary_slots, extra_slots
+
+            # ── Assign chunks to providers ────────────────────────────────────
+            # Strategy:
+            # SHORT  (<40 lines):  Race mode — ONE slot per provider (primary only), first wins
+            # MEDIUM (40-300):     One slot per provider (primary key), round-robin chunks
+            # LONG   (300+ lines): One slot per provider first, then add extra keys if available
+            #                      Extras unlock in rounds: primary×N, then primary+extra1×N, etc.
             assignments = []
-            _MIN_LINES_PER_SECTION = 20  # don't split tiny transcripts across 3 providers
-            if len(keyed) == 1 or len(lines) < _MIN_LINES_PER_SECTION * 2:
-                # Short transcript or single provider — just use first available provider
-                _best_prov = keyed[0]
+            _MIN_LINES_TO_SPLIT = 40
+            _LONG_THRESHOLD     = 300  # lines before extra keys unlock
+
+            primary_slots, extra_slots = _get_key_slots()
+            n_primary = len(primary_slots)
+
+            if n_primary == 0:
+                # fallback — shouldn't happen since keyed is non-empty
                 for i, ch in enumerate(chunks):
-                    assignments.append((ch, _best_prov, f'sec{i+1}/{n_chunks}'))
-                if len(keyed) > 1 and len(lines) < _MIN_LINES_PER_SECTION * 2:
-                    self.log(f'Short transcript ({len(lines)} lines) — using single provider to save quota', FG2)
+                    assignments.append((ch, keyed[0], f'sec{i+1}/{n_chunks}'))
+
+            elif len(lines) < _MIN_LINES_TO_SPLIT and n_chunks == 1:
+                # SHORT: race mode — primary keys only, all get same chunk
+                self.log(
+                    f'Short transcript ({len(lines)} lines) — racing across '
+                    f'{n_primary} provider(s) for fastest response', FG2)
+                for prov, ki, lbl in primary_slots:
+                    assignments.append((chunks[0], prov, f'{lbl} race'))
+
             else:
-                # Long transcript — split across providers to parallelize
-                n_provs = min(len(keyed), max(1, len(lines) // _MIN_LINES_PER_SECTION))
-                active_provs = keyed[:n_provs]
-                section_size = max(1, len(lines) // n_provs)
-                for pi, prov in enumerate(active_provs):
-                    sec_start = pi * section_size
-                    sec_end   = (pi + 1) * section_size if pi < n_provs - 1 else len(lines)
+                # MEDIUM/LONG: determine active slots based on transcript length
+                # Unlock extra keys in rounds based on how many lines per slot we want
+                _lines_per_slot = 150  # target lines per worker
+                _slots_needed   = max(n_primary, min(n_primary + len(extra_slots),
+                                                      max(n_primary, len(lines) // _lines_per_slot)))
+                # Build active slots: primaries first, then extras up to slots_needed
+                active_slots = primary_slots + extra_slots[:max(0, _slots_needed - n_primary)]
+                n_slots = len(active_slots)
+
+                _prov_summary = ', '.join(
+                    f'{p.split()[0]}×{sum(1 for s in active_slots if s[0]==p)}'
+                    for p in keyed if any(s[0]==p for s in active_slots))
+                self.log(
+                    f'Splitting transcript ({len(lines)} lines) across '
+                    f'{n_slots} slot(s) ({_prov_summary})', FG2)
+                if extra_slots and n_slots > n_primary:
+                    self.log(f'  Extra keys unlocked: {n_slots - n_primary} additional slot(s)', FG2)
+
+                section_size = max(1, len(lines) // n_slots)
+                for si, (prov, ki, lbl) in enumerate(active_slots):
+                    sec_start = si * section_size
+                    sec_end   = (si + 1) * section_size if si < n_slots - 1 else len(lines)
                     sec_lines = lines[sec_start:sec_end]
-                    sec_text  = '\n'.join(sec_lines)
+                    if not sec_lines: continue
+                    sec_text   = '\n'.join(sec_lines)
                     sub_chunks = _chunks_for_prov(prov, sec_text)
-                    for si, sc in enumerate(sub_chunks):
-                        lbl = f'{prov.split()[0]} sec{pi+1}'
-                        if len(sub_chunks) > 1: lbl += f'.{si+1}'
-                        assignments.append((sc, prov, lbl))
+                    for sci, sc in enumerate(sub_chunks):
+                        full_lbl = f'{lbl} sec{si+1}'
+                        if len(sub_chunks) > 1: full_lbl += f'.{sci+1}'
+                        assignments.append((sc, prov, full_lbl))
 
             total_tasks = len(assignments)
+            _mode = 'race' if (len(keyed) > 1 and len(lines) < _MIN_LINES_TO_SPLIT and n_chunks == 1) else 'parallel'
             self.log(
-                f'Dispatching {total_tasks} task(s) across {len(keyed)} provider(s) in parallel',
+                f'Dispatching {total_tasks} task(s) across {len(keyed)} provider(s) [{_mode}]',
                 YELLOW)
 
             task_results  = [None] * total_tasks
@@ -4925,8 +5256,8 @@ class App(tk.Tk):
             _cooling_down = [False]  # shared flag — all threads wait when True
 
             def _task_worker(idx, chunk, prov, label):
-                # Stagger start to avoid thundering herd on free APIs
-                _time.sleep(idx * 0.8)
+                # Stagger start — 4s apart to avoid thundering herd on free tier APIs
+                _time.sleep(idx * 4.0)
 
                 # Check cancel before starting
                 if getattr(self, '_cancel_requested', False):
@@ -4938,33 +5269,62 @@ class App(tk.Tk):
                         return
                     _time.sleep(2)
 
-                clips, used = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+                clips, last_err = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
 
-                # Retry loop — up to 3 times with increasing cooldown
+                # Determine if the failure is fatal (no point retrying)
+                def _is_fatal(err):
+                    if err is None: return False
+                    s = str(err).lower()
+                    return any(x in s for x in [
+                        '401', 'invalid api key', 'unauthorized', 'authentication',
+                        '403', 'forbidden', 'access denied',
+                        'all openrouter models unavailable',
+                        'no api key', 'no key configured'])
+
+                # Retry loop — only for rate-limit / transient errors (not fatal ones)
                 _retry = 0
                 while not clips and _retry < 3:
-                    # Check cancel before waiting
                     if getattr(self, '_cancel_requested', False):
                         return
+                    # Don't retry fatal errors — they won't resolve with a cooldown
+                    if _is_fatal(last_err):
+                        self.log(f'[{label}] Fatal error — not retrying: {str(last_err)[:100]}', RED)
+                        break
                     _retry += 1
                     _wait = 30 * _retry  # 30s, 60s, 90s
                     with _rl_lock:
                         if not _cooling_down[0]:
                             _cooling_down[0] = True
-                            self.log(f'[{label}] All providers rate-limited — waiting {_wait}s (attempt {_retry}/3)...', YELLOW)
-                    # Sleep in small chunks so cancel works immediately
+                            self.log(f'[{label}] All providers busy — waiting {_wait}s (attempt {_retry}/3)...', YELLOW)
                     for _ in range(_wait):
                         if getattr(self, '_cancel_requested', False):
                             return
                         _time.sleep(1)
                     with _rl_lock:
                         _cooling_down[0] = False
+                    # Clear all rate-limit marks after cooldown — keys may have recovered
+                    with self._rl_provs_lock:
+                        self._rl_provs.clear()
+                        self._rl_since.clear()
+                    self.after(0, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
                     if getattr(self, '_cancel_requested', False):
                         return
-                    clips, used = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+                    clips, last_err = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
 
                 if not clips:
-                    self.log(f'[{label}] Giving up after 3 retries — skipping this section', YELLOW)
+                    if last_err:
+                        _err_msg = str(last_err)
+                        if 'all openrouter models unavailable' in _err_msg.lower():
+                            self.log(f'[{label}] OpenRouter: no working free models found. '
+                                     'Try adding an OpenRouter API key with credits, or use Gemini/Groq.', RED)
+                        elif '401' in _err_msg or 'invalid api key' in _err_msg.lower():
+                            self.log(f'[{label}] Invalid API key — open Settings and re-enter your key', RED)
+                        elif _retry >= 3:
+                            self.log(f'[{label}] Gave up after 3 retries. Last error: {_err_msg[:100]}', RED)
+                        else:
+                            self.log(f'[{label}] Skipped. Reason: {_err_msg[:120]}', RED)
+                    else:
+                        self.log(f'[{label}] Skipped — no providers available', YELLOW)
 
                 task_results[idx] = clips or []
                 completed[0] += 1
@@ -4991,18 +5351,52 @@ class App(tk.Tk):
                     break
                 _task_worker(i, ch, pv, lb)
 
-            # Merge all results, deduplicate by start timestamp
+            # Merge all results — in race mode multiple providers return clips for same content
+            # Deduplicate by start timestamp, keeping the highest-scored version of each clip
+            # (different providers may suggest the same moment with different scores/titles)
+            _best_by_start = {}  # start -> best clip seen so far
             for result_list in task_results:
                 for clip in (result_list or []):
-                    k = clip.get('start','')
-                    if k not in seen_starts:
-                        seen_starts.add(k)
-                        all_clips.append(clip)
+                    k = clip.get('start', '')
+                    if not k:
+                        continue
+                    existing = _best_by_start.get(k)
+                    if existing is None:
+                        _best_by_start[k] = clip
+                    else:
+                        # Keep higher score
+                        try:
+                            if int(clip.get('score', 5)) > int(existing.get('score', 5)):
+                                _best_by_start[k] = clip
+                        except (ValueError, TypeError):
+                            pass  # keep existing on bad score values
+
+            for k, clip in _best_by_start.items():
+                if k not in seen_starts:
+                    seen_starts.add(k)
+                    all_clips.append(clip)
 
             if not all_clips:
                 if getattr(self, '_cancel_requested', False):
                     return
-                raise Exception('All providers failed or rate-limited. Try again in a few minutes.')
+                # Build a helpful error from what we know about the session
+                _dead = getattr(self, '_dead_models', set())
+                _rl   = getattr(self, '_rl_provs', set())
+                _hint_parts = []
+                if _dead:
+                    _hint_parts.append(f'Dead/404 models: {", ".join(_dead)}')
+                if _rl:
+                    _hint_parts.append(f'Rate-limited: {", ".join(_rl)}')
+                if not keyed:
+                    _hint_parts.append('No API keys configured — add keys in Settings')
+                _hint = ' | '.join(_hint_parts) if _hint_parts else 'All providers returned no clips'
+                raise Exception(
+                    f'No clips found. {_hint}\n\n'
+                    'Suggestions:\n'
+                    '• Check Settings → AI Provider Status for red/yellow dots\n'
+                    '• OpenRouter free tier has very small context — try Gemini (free, huge context)\n'
+                    '• If all dots are red/dead, the free model may be unavailable — try again later\n'
+                    '• Verify your API key is correct in Settings')
 
             # Sort by score desc
             def _score_key(c):
@@ -5733,9 +6127,19 @@ class App(tk.Tk):
                      '-c', 'copy', str(tmp)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
-                if r.returncode == 0 and tmp.exists():
+                # Stream copy can produce tiny/broken files on some containers
+                _size = tmp.stat().st_size if tmp.exists() else 0
+                if r.returncode != 0 or _size < 10240:
+                    self.after(0, lambda: self.log('Preview stream-copy failed — re-encoding...', FG2))
+                    r = subprocess.run(
+                        [ff, '-y', '-ss', start, '-to', end, '-i', vid,
+                         '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+                         '-c:a', 'aac', '-b:a', '128k', str(tmp)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 10240:
                     import os as _os
-                    _os.startfile(str(tmp))  # Windows default player
+                    _os.startfile(str(tmp))
                     self.after(0, lambda: self.set_progress('▶ Preview opened', pct=100))
                 else:
                     self.after(0, lambda: self.log('Preview cut failed', RED))
@@ -5838,6 +6242,73 @@ class App(tk.Tk):
 
             return ts(max(0.0, segs[best_idx]['start'] - 0.1))
 
+    def _save_session(self):
+        """Save current clips + video path to session file so they can be restored later."""
+        if not self.clips:
+            import tkinter.messagebox as _mb
+            _mb.showwarning('Nothing to save', 'Find some clips first, then save the session.')
+            return
+        session = {
+            'video': self.v_video.get(),
+            'outdir': self.v_outdir.get(),
+            'clips': [
+                {
+                    'title':       c.get('title',''),
+                    'start':       c['_sv'].get() if '_sv' in c else c.get('start',''),
+                    'end':         c['_ev'].get() if '_ev' in c else c.get('end',''),
+                    'filename':    c['_name_var'].get() if '_name_var' in c else c.get('title',''),
+                    'score':       c.get('score',''),
+                    'reason':      c.get('reason',''),
+                    'summary':     c.get('summary',''),
+                    'speaker':     c.get('speaker',''),
+                    'hook':        c.get('hook',''),
+                    'engagement':  c.get('engagement',''),
+                    'shareability':c.get('shareability',''),
+                    'value':       c.get('value',''),
+                }
+                for c in self.clips
+            ],
+        }
+        try:
+            SESSION_FILE.write_text(json.dumps(session, indent=2))
+            self.log(f'Session saved — {len(self.clips)} clips ({SESSION_FILE.name})', GREEN)
+        except Exception as ex:
+            self.log(f'Session save failed: {ex}', RED)
+
+    def _load_session(self):
+        """Restore a previously saved session (clips + video path)."""
+        import tkinter.messagebox as _mb
+        if not SESSION_FILE.exists():
+            _mb.showinfo('No session', 'No saved session found.\nUse 💾 Save Session after finding clips.')
+            return
+        try:
+            session = json.loads(SESSION_FILE.read_text())
+        except Exception as ex:
+            _mb.showerror('Load failed', f'Could not read session file:\n{ex}')
+            return
+        saved_vid = session.get('video','')
+        clips_raw = session.get('clips', [])
+        if not clips_raw:
+            _mb.showinfo('Empty session', 'Session file has no clips.')
+            return
+        # Warn if video path changed
+        current_vid = self.v_video.get()
+        if saved_vid and saved_vid != current_vid:
+            if not _mb.askyesno('Different video',
+                f'Session was saved for:\n{Path(saved_vid).name}\n\n'
+                f'Currently loaded:\n{Path(current_vid).name if current_vid else "(none)"}\n\n'
+                'Load anyway?'):
+                return
+            # Restore the video path if current is empty
+            if not current_vid and saved_vid and Path(saved_vid).exists():
+                self.v_video.set(saved_vid)
+        if session.get('outdir'):
+            self.v_outdir.set(session['outdir'])
+        self.clips = clips_raw
+        self._render_clips()
+        self._switch_nb('clips')
+        self.log(f'Session loaded — {len(clips_raw)} clips restored', GREEN)
+
     def _do_export(self, clips):
         vid = self.v_video.get()
         out = self.v_outdir.get()
@@ -5884,7 +6355,7 @@ class App(tk.Tk):
             if _vcodec == 'h264_amf':
                 _hw_args = ['-hwaccel', 'auto']
             elif _vcodec == 'h264_nvenc':
-                _hw_args = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']
+                _hw_args = ['-hwaccel', 'cuda']
             elif _vcodec == 'h264_qsv':
                 _hw_args = ['-hwaccel', 'qsv']
             _crop_mode = getattr(self, 'v_crop_mode', None)
@@ -5892,7 +6363,7 @@ class App(tk.Tk):
             _base_cmd = [ff, '-y'] + _hw_args + ['-ss', start, '-to', end, '-i', vid]
 
             def _run_fmt(out_path, vertical=False, _st=start, _en=end):
-                # Build fresh command — vertical skips hwaccel (causes issues with vf filters)
+                # Build fresh command — always use _st/_en params, never outer closure vars
                 if vertical:
                     _cmd_base = [ff, '-y', '-ss', _st, '-to', _en, '-i', vid]
                     _vff = self._get_vertical_vf(vid)
@@ -5900,19 +6371,39 @@ class App(tk.Tk):
                         _vff = ['-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920']
                     _cmd = _cmd_base + ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18'] + _vff + ['-c:a', 'aac', '-b:a', '192k', out_path]
                 else:
-                    _cmd = _base_cmd + ['-c:v', _vcodec] + ['-c:a', _acodec] + _extra + [out_path]
+                    _cmd_base_local = [ff, '-y'] + _hw_args + ['-ss', _st, '-to', _en, '-i', vid]
+                    _cmd = _cmd_base_local + ['-c:v', _vcodec] + ['-c:a', _acodec] + _extra + [out_path]
                 _r = subprocess.run(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                if _r.returncode != 0:
-                    _err = _r.stderr.decode(errors='replace')[-300:] if _r.stderr else ''
-                    self.log(f'[Export] {"9:16" if vertical else "16:9"} failed: {_err[-120:]}', RED)
+                _err = _r.stderr.decode(errors='replace') if _r.stderr else ''
+                # Guard: returncode==0 but 0-frame encode writes only a header (~1KB)
+                _out_size = Path(out_path).stat().st_size if Path(out_path).exists() else 0
+                _ok = _r.returncode == 0 and _out_size > 10240
+                if not _ok:
+                    if _r.returncode != 0:
+                        self.log(f'[Export] {"9:16" if vertical else "16:9"} failed: {_err[-120:]}', RED)
+                    else:
+                        self.log(f'[Export] {"9:16" if vertical else "16:9"} produced empty file ({_out_size}B) — retrying with libx264', YELLOW)
                     if vertical:
-                        # Retry with simple center crop
-                        _cmd_base2 = [ff, '-y', '-ss', _st, '-to', _en, '-i', vid]
-                        _fallback = _cmd_base2 + ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
-                                                   '-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920',
-                                                   '-c:a', 'aac', '-b:a', '192k', out_path]
-                        _r = subprocess.run(_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return _r.returncode == 0
+                        _fallback = [ff, '-y', '-ss', _st, '-to', _en, '-i', vid,
+                                     '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+                                     '-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920',
+                                     '-c:a', 'aac', '-b:a', '192k', out_path]
+                        _r2 = subprocess.run(_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return _r2.returncode == 0
+                    else:
+                        self.log(f'[Export] Falling back to libx264 CPU encoder', YELLOW)
+                        _cmd_cpu = [ff, '-y', '-ss', _st, '-to', _en, '-i', vid,
+                                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+                                    '-movflags', '+faststart',
+                                    '-c:a', 'aac', '-b:a', '192k', out_path]
+                        _r2 = subprocess.run(_cmd_cpu, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        _out_size2 = Path(out_path).stat().st_size if Path(out_path).exists() else 0
+                        if _r2.returncode != 0 or _out_size2 <= 10240:
+                            _err2 = _r2.stderr.decode(errors='replace')[-200:] if _r2.stderr else ''
+                            self.log(f'[Export] libx264 fallback also failed: {_err2[-120:]}', RED)
+                            return False
+                        return True
+                return True
 
             dest_v = str(Path(out) / f'{title} - ClipFinder - Part {i+1} 9x16.mp4')
             if _crop_mode == 'normal':
@@ -6040,7 +6531,9 @@ class App(tk.Tk):
                                 model=try_model,
                                 messages=[{'role': 'user', 'content': prompt}],
                                 temperature=0.85, max_tokens=2000)
-                            raw = resp.choices[0].message.content.strip()
+                            if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
+                                raw = (resp.choices[0].message.content or '').strip()
+                            if not raw: continue
 
                         elif try_lib == 'openrouter':
                             from openai import OpenAI as _O
@@ -6049,7 +6542,10 @@ class App(tk.Tk):
                                 model=try_model,
                                 messages=[{'role': 'user', 'content': prompt}],
                                 temperature=0.85, max_tokens=2000)
-                            raw = resp.choices[0].message.content.strip()
+                            if not resp or not resp.choices or not resp.choices[0] or not resp.choices[0].message:
+                                continue
+                            raw = (resp.choices[0].message.content or '').strip()
+                            if not raw: continue
 
                         prov = try_prov  # update for display in status
                         model = try_model
@@ -6590,58 +7086,42 @@ class App(tk.Tk):
 
         # Batch queue box
         q_hdr = tk.Frame(p, bg=BG); q_hdr.pack(fill='x', padx=20, pady=(0,4))
-        tk.Label(q_hdr, text='📋  BATCH QUEUE', font=('Segoe UI',9,'bold'),
+        tk.Label(q_hdr, text='📋  DOWNLOAD LINKS', font=('Segoe UI',9,'bold'),
                  fg=ACCENT, bg=BG).pack(side='left')
-        tk.Label(q_hdr, text='  paste one URL per line — downloads in order',
+        tk.Label(q_hdr, text='  paste URLs one per line — YouTube · Twitch · Kick · X/Twitter · TikTok',
                  font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
         self._dl_queue_status = tk.Label(q_hdr, text='', font=FONT_SMALL, fg=FG2, bg=BG)
         self._dl_queue_status.pack(side='right')
         q_frame = tk.Frame(p, bg=BG3, highlightbackground=BORDER, highlightthickness=1)
         q_frame.pack(fill='x', padx=20, pady=(0,4))
-        self._dl_queue_box = tk.Text(q_frame, height=6, font=FONT_MONO_S,
+        self._dl_queue_box = tk.Text(q_frame, height=10, font=FONT_MONO_S,
                  bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat',
                  bd=6, wrap='none')
         self._dl_queue_box.pack(side='left', fill='both', expand=True)
         _qs = tk.Scrollbar(q_frame, command=self._dl_queue_box.yview)
         _qs.pack(side='right', fill='y')
         self._dl_queue_box.config(yscrollcommand=_qs.set)
-        q_btn_row = tk.Frame(p, bg=BG); q_btn_row.pack(fill='x', padx=20, pady=(0,4))
-        self._dl_queue_btn = tk.Button(q_btn_row, text='⬇  Download Queue',
-                  font=('Segoe UI',9,'bold'), bg=ACCENT2, fg='#000',
+
+        # Single action row — one download button, cancel, clear, auto-load
+        dl_act_row = tk.Frame(p, bg=BG); dl_act_row.pack(fill='x', padx=20, pady=(4,6))
+        self._dl_go_btn = tk.Button(dl_act_row, text='⬇  Download All',
+                  font=('Segoe UI',9,'bold'), bg=ACCENT, fg='#000',
                   relief='flat', bd=0, cursor='hand2', padx=14, pady=6,
-                  command=self._dl_start_queue)
-        self._dl_queue_btn.pack(side='left')
-        tk.Button(q_btn_row, text='✕ Clear', font=FONT_SMALL,
+                  activebackground=ACCENT2, command=self._dl_start_queue)
+        self._dl_go_btn.pack(side='left')
+        self._dl_cancel_btn = tk.Button(dl_act_row, text='✕ Cancel', font=FONT_SMALL,
+                  bg=RED, fg='#fff', relief='flat', bd=0, cursor='hand2', padx=10, pady=6,
+                  command=self._dl_cancel)
+        tk.Button(dl_act_row, text='✕ Clear', font=FONT_SMALL,
                   bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=10, pady=6,
                   command=lambda: self._dl_queue_box.delete('1.0', 'end')
                   ).pack(side='left', padx=6)
-        div()
-
-        # URL
-        sec('URL')
-        ur = tk.Frame(p, bg=BG); ur.pack(fill='x', padx=20, pady=(4,0))
-        url_e = tk.Entry(ur, textvariable=self.v_dl_url, font=FONT_MONO_S,
-                         bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=6)
-        url_e.pack(side='left', fill='x', expand=True)
-        self._dl_go_btn = tk.Button(ur, text='⬇  Download', font=FONT_SMALL,
-                  bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2',
-                  padx=10, pady=6, activebackground=ACCENT2,
-                  command=self._dl_start)
-        self._dl_go_btn.pack(side='right', padx=(8,0))
-        self._dl_cancel_btn = tk.Button(ur, text='✕ Cancel', font=FONT_SMALL,
-                  bg=RED, fg='#fff', relief='flat', bd=0, cursor='hand2',
-                  padx=10, pady=6,
-                  command=self._dl_cancel)
-        # shown/hidden by _dl_set_busy
-        tk.Label(p, text='YouTube · Twitch · Twitter/X · Kick · TikTok and more',
-                 font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', padx=20, pady=(3,0))
-
-        # Auto-load checkbox
-        al_row = tk.Frame(p, bg=BG); al_row.pack(fill='x', padx=20, pady=(6,0))
-        tk.Checkbutton(al_row, text='Auto-load into Clip Finder after download',
+        tk.Checkbutton(dl_act_row, text='Auto-load into Clip Finder after download',
                        variable=self.v_auto_load, font=FONT_SMALL, fg=FG2, bg=BG,
                        selectcolor=BG3, activebackground=BG, relief='flat',
-                       cursor='hand2').pack(side='left')
+                       cursor='hand2').pack(side='left', padx=12)
+        # Keep _dl_queue_btn as alias so existing code doesn't break
+        self._dl_queue_btn = self._dl_go_btn
         div()
 
         # Save folder
@@ -7252,6 +7732,9 @@ class App(tk.Tk):
         lbl('THUMBNAIL FINDER', font=('Segoe UI', 11, 'bold'), fg=ACCENT, pady=(12,2))
         lbl('Search the web for HD images of\nany streamer or person',
             font=FONT_SMALL, fg=FG2, justify='left')
+        tk.Label(left, text='⚠ Thumbnail search is still in beta — results may vary',
+                 font=('Segoe UI', 7), fg=YELLOW, bg=BG, anchor='w'
+                 ).pack(fill='x', padx=14, pady=(0,2))
         div()
 
         # Search box
@@ -7266,17 +7749,7 @@ class App(tk.Tk):
             font=FONT_SMALL, fg=FG2, pady=(2,0))
         div()
 
-        # Unsplash key now in Settings tab
         self.thumb_unsplash_var = tk.StringVar(value=self._keys.get('_unsplash',''))
-        _unsplash_status = '✅ Unsplash key set' if self._keys.get('_unsplash','').strip() else '⚠️ No Unsplash key — add in ⚙ Settings for better results'
-        _uc = ACCENT2 if '⚠' in _unsplash_status else GREEN
-        ur_row = tk.Frame(left, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
-        ur_row.pack(fill='x', padx=14, pady=(0,4))
-        tk.Label(ur_row, text=_unsplash_status, font=('Segoe UI',8), fg=_uc, bg=BG2).pack(side='left', padx=8, pady=6)
-        tk.Button(ur_row, text='⚙ Settings', font=('Segoe UI',8), bg=BG2, fg=ACCENT2,
-                 relief='flat', bd=0, cursor='hand2', padx=8,
-                 command=lambda: self._switch_nb('settings')).pack(side='right', padx=6)
-        div()
 
         # Count
         sec('HOW MANY')
@@ -7290,12 +7763,26 @@ class App(tk.Tk):
         div()
 
         # Prefer
-        sec('PREFER')
-        self.thumb_pref_var = tk.StringVar(value='reaction')
-        for val, lbl_text in [('reaction','😮 Reactions / expressions'),
-                               ('hd','📸 Highest resolution'),
-                               ('drama','🔥 Drama / intense moments')]:
-            tk.Radiobutton(left, text=lbl_text, variable=self.thumb_pref_var, value=val,
+        sec('QUALITY')
+        self.thumb_pref_var = tk.StringVar(value='hd')
+        pref_row = tk.Frame(left, bg=BG); pref_row.pack(anchor='w', padx=14)
+        for val, lbl_text in [('hd', '📸 HD'), ('sd', '🖼 SD')]:
+            tk.Radiobutton(pref_row, text=lbl_text, variable=self.thumb_pref_var, value=val,
+                           font=FONT_SMALL, fg=FG, bg=BG, selectcolor=BG3,
+                           activebackground=BG, relief='flat', cursor='hand2'
+                           ).pack(side='left', padx=(0,16))
+        div()
+
+        # Image type
+        sec('IMAGE TYPE')
+        self.v_thumb_imgtype = tk.StringVar(value='portrait')
+        for val, lbl_text in [
+            ('portrait',   '🧑 Portrait / solo'),
+            ('group',      '👥 Group photo'),
+            ('screenshot', '🖥 Stream screenshot'),
+            ('any',        '🔀 Any'),
+        ]:
+            tk.Radiobutton(left, text=lbl_text, variable=self.v_thumb_imgtype, value=val,
                            font=FONT_SMALL, fg=FG, bg=BG, selectcolor=BG3,
                            activebackground=BG, relief='flat', cursor='hand2'
                            ).pack(anchor='w', padx=14)
@@ -7320,10 +7807,31 @@ class App(tk.Tk):
                                       bg=ACCENT, fg='#000', relief='flat', bd=0,
                                       cursor='hand2', pady=10, activebackground=ACCENT2,
                                       command=self._thumb_start)
-        self.thumb_go_btn.pack(fill='x', padx=14, pady=(4,4))
+        self.thumb_go_btn.pack(fill='x', padx=14, pady=(4,2))
+
+        # Stock toggle right below Find button
+        self.v_thumb_stock_only = tk.BooleanVar(value=False)
+        tk.Checkbutton(left, text='📦 Stock photos only (needs Unsplash key)',
+                       variable=self.v_thumb_stock_only,
+                       font=('Segoe UI', 7), fg=FG2, bg=BG, selectcolor=BG3,
+                       activebackground=BG, relief='flat', cursor='hand2'
+                       ).pack(anchor='w', padx=14, pady=(0,6))
+        div()
+
+        # Save All HD
         tk.Button(left, text='💾  SAVE ALL HD', font=FONT_SMALL,
                   bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', pady=6,
                   command=self._thumb_save_all).pack(fill='x', padx=14)
+
+        # Key status below Save All HD
+        _us_key = self._keys.get('_unsplash','') or self.cfg.get('key_unsplash','')
+        _us_has = bool(_us_key.strip())
+        _arow = tk.Frame(left, bg=BG); _arow.pack(fill='x', padx=14, pady=(4,0))
+        tk.Label(_arow, text='🔍 Image search: DuckDuckGo (no key needed)', font=('Segoe UI',7), fg=GREEN, bg=BG).pack(side='left')
+        _arow2 = tk.Frame(left, bg=BG); _arow2.pack(fill='x', padx=14, pady=(2,0))
+        tk.Label(_arow2, text='🔑 Unsplash (stock mode only):', font=('Segoe UI',7), fg=FG2, bg=BG).pack(side='left')
+        tk.Label(_arow2, text='✅ Set' if _us_has else '○ Not set',
+                 font=('Segoe UI',7,'bold'), fg=GREEN if _us_has else FG3, bg=BG).pack(side='left', padx=3)
 
         self.thumb_status_lbl = tk.Label(left, text='', font=FONT_SMALL,
                                          fg=FG2, bg=BG, wraplength=265, justify='left')
@@ -7391,39 +7899,56 @@ class App(tk.Tk):
     def _thumb_run(self):
         try:
             from PIL import Image
-            import requests as _req
             import urllib3; urllib3.disable_warnings()
             import warnings as _warn; _warn.filterwarnings('ignore', category=DeprecationWarning)
             import io, json as _json, re as _re
 
             query = self.thumb_query_var.get().strip()
             count = self.thumb_count_var.get()
-            pref  = self.thumb_pref_var.get()
+            pref  = self.thumb_pref_var.get()  # 'hd' or 'sd'
 
-            pref_suffix = {
-                'reaction': 'reaction expression',
-                'hd':       'HD',
-                'drama':    'drama intense',
-            }.get(pref, '')
-            full_query = f'{query} {pref_suffix} streamer'
+            # Clean query — just the name, no extra fluff
+            full_query = query
 
             self._thumb_set_status(f'Searching: "{full_query}"...')
             self.log(f'[Thumbnails] Searching: {full_query}')
 
-            sess = _req.Session()
-            sess.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                              'AppleWebKit/537.36 (KHTML, like Gecko) '
-                              'Chrome/124.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            })
+            # Use curl_cffi if available (bypasses browser fingerprint blocks)
+            # Falls back to requests if not installed
+            sess = None
+            try:
+                from curl_cffi import requests as _cf
+                sess = _cf.Session(impersonate='chrome124')
+                self.log('[Thumbnails] Using curl_cffi session (browser mode)', FG2)
+            except ImportError:
+                pass
+            if sess is None:
+                import requests as _req
+                sess = _req.Session()
+                sess.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                                  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                })
 
             image_urls = self._thumb_search(sess, full_query, max_results=80)
 
             if not image_urls:
-                raise ValueError('No images found.\n\nTip: Add a free Unsplash API key in the Thumbnails tab for guaranteed results.\nSign up free at unsplash.com/developers')
+                raise ValueError(
+                    'No images found.\n'
+                    'Try a shorter search term e.g. "mizkif" not "mizkif streamer"\n'
+                    'For stock photos toggle the checkbox and add an Unsplash key in Settings.')
 
             self.log(f'[Thumbnails] Got {len(image_urls)} URLs, downloading...')
+
+            # Use a plain requests session for downloading — curl_cffi doesn't support stream well
+            import requests as _req_dl
+            dl_sess = _req_dl.Session()
+            dl_sess.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                'Referer': 'https://duckduckgo.com/',
+            })
 
             scored = []
             ok = 0
@@ -7432,8 +7957,7 @@ class App(tk.Tk):
                     self._thumb_set_status(
                         f'Checking image {idx+1}/{len(image_urls)} '
                         f'({ok} good so far)...')
-                    resp = sess.get(img_url, timeout=7, verify=False,
-                                    stream=True)
+                    resp = dl_sess.get(img_url, timeout=7, verify=False)
                     if resp.status_code != 200:
                         continue
                     data = resp.content
@@ -7497,156 +8021,81 @@ class App(tk.Tk):
                 state='normal', text='🔍  FIND THUMBNAILS'))
 
     def _thumb_search(self, sess, query, max_results=40):
-        import urllib.parse as _up, json as _js, re as _re
+        """Image search using ddgs (DuckDuckGo) — zero setup, no API key needed.
+        Stock mode uses Unsplash (optional free key)."""
+        stock_only   = getattr(self, 'v_thumb_stock_only', None)
+        stock_only   = stock_only.get() if stock_only else False
+        unsplash_key = (self._keys.get('_unsplash','') or self.cfg.get('key_unsplash','')).strip()
+        pref         = getattr(self, 'thumb_pref_var', None)
+        hd_only      = (pref.get() == 'hd') if pref else True
 
-        # ── 1. Unsplash API (free 50/hr, best quality) ───────────────────────
-        # Try _keys first, then fall back to cfg directly (in case settings tab not opened)
-        unsplash_key = (self._keys.get('_unsplash','') or 
-                        self.cfg.get('key_unsplash','')).strip()
-        if unsplash_key:
+        # ── STOCK PHOTOS MODE (Unsplash) ──────────────────────────────────────
+        if stock_only:
+            if not unsplash_key:
+                raise ValueError(
+                    'Stock photos mode needs an Unsplash API key.\n'
+                    'Sign up free at unsplash.com/developers then add the key in Settings.')
             try:
-                self.log('[Thumbnails] Trying Unsplash API...')
-                # Use original query term only (strip pref suffixes — Unsplash is photos not streamers)
-                raw_q = self.thumb_query_var.get().strip()
+                self.log('[Thumbnails] Stock mode: Unsplash...', FG2)
                 r = sess.get('https://api.unsplash.com/search/photos',
-                    params={'query': raw_q, 'per_page': max_results,
-                            'order_by': 'relevant', 'orientation': 'landscape',
-                            'content_filter': 'low'},
-                    headers={'Authorization': f'Client-ID {unsplash_key}',
-                             'Accept-Version': 'v1'},
-                    timeout=10, verify=False)
-                self.log(f'[Thumbnails] Unsplash status: {r.status_code}')
+                    params={'query': query, 'per_page': max_results, 'order_by': 'relevant'},
+                    headers={'Authorization': f'Client-ID {unsplash_key}', 'Accept-Version': 'v1'},
+                    timeout=10)
                 if r.status_code == 200:
-                    items = r.json().get('results', [])
-                    self.log(f'[Thumbnails] Unsplash results: {len(items)}')
-                    results = []
-                    for item in items:
-                        urls = item.get('urls', {})
-                        url  = urls.get('full') or urls.get('regular','')
-                        w    = item.get('width', 1920)
-                        h    = item.get('height', 1080)
-                        if url: results.append((url, w, h))
-                    if results: return results[:max_results]
+                    results = [(i['urls'].get('full') or i['urls'].get('regular',''),
+                                i.get('width',1920), i.get('height',1080))
+                               for i in r.json().get('results',[]) if i.get('urls')]
+                    results = [x for x in results if x[0]]
+                    self.log(f'[Thumbnails] Unsplash: {len(results)} results', FG2)
+                    return results[:max_results]
             except Exception as ex:
                 self.log(f'[Thumbnails] Unsplash error: {ex}', YELLOW)
+            return []
 
-        # ── 2. DuckDuckGo (proper session with cookies) ───────────────────────
+        # ── REAL PEOPLE MODE — DuckDuckGo via ddgs library (no key needed) ────
         try:
-            self.log('[Thumbnails] Trying DuckDuckGo...')
-            # Warm up session with a real browser visit first
-            sess.get('https://duckduckgo.com/', timeout=8, verify=False)
-            import time as _t; _t.sleep(0.3)
-            r1 = sess.get('https://duckduckgo.com/',
-                params={'q': query, 'iax': 'images', 'ia': 'images'},
-                timeout=10, verify=False)
-            self.log(f'[Thumbnails] DDG html: {r1.status_code}, {len(r1.text)}ch')
-            vqd = _re.search(r'vqd=([0-9-]+)', r1.text)
-            if not vqd:
-                # Try alternate token location
-                vqd = _re.search(r'"vqd":"([^"]+)"', r1.text)
-            self.log(f'[Thumbnails] DDG vqd: {vqd.group(1) if vqd else "NOT FOUND"}')
-            if vqd:
-                import time as _t2; _t2.sleep(0.5)
-                r2 = sess.get('https://duckduckgo.com/i.js',
-                    params={'q': query, 'o': 'json', 'vqd': vqd.group(1),
-                            'f': ',,,,,', 'p': '1', 'l': 'wt-wt'},
-                    headers={
-                        'Referer': 'https://duckduckgo.com/',
-                        'Accept': 'application/json, text/javascript, */*; q=0.01',
-                        'X-Requested-With': 'XMLHttpRequest',
-                        'Sec-Fetch-Dest': 'empty',
-                        'Sec-Fetch-Mode': 'cors',
-                        'Sec-Fetch-Site': 'same-origin',
-                    },
-                    timeout=10, verify=False)
-                self.log(f'[Thumbnails] DDG api: {r2.status_code}')
-                if r2.status_code == 200:
-                    items = r2.json().get('results', [])
-                    self.log(f'[Thumbnails] DDG results: {len(items)}')
-                    results = [(i['image'], i.get('width',1280), i.get('height',720))
-                               for i in items if i.get('image')]
-                    if results: return results[:max_results]
+            from ddgs import DDGS
+        except ImportError:
+            raise ValueError(
+                'The ddgs package is not installed.\n'
+                'Go to Settings → Update Modules and click Update All Packages.')
+
+        try:
+            self.log('[Thumbnails] Searching DuckDuckGo Images (ddgs)...', FG2)
+            size = 'Large' if hd_only else None
+
+            # Build query based on image type preference
+            img_type = getattr(self, 'v_thumb_imgtype', None)
+            img_type = img_type.get() if img_type else 'portrait'
+            type_queries = {
+                'portrait':   f'{query} face photo headshot',
+                'group':      f'{query} group photo',
+                'screenshot': f'{query} stream screenshot twitch',
+                'any':        query,
+            }
+            search_query = type_queries.get(img_type, f'{query} portrait')
+            layout = 'Tall' if img_type == 'portrait' else None
+
+            items = DDGS().images(
+                search_query,
+                region='us-en',
+                safesearch='off',
+                size=size,
+                type_image='photo',
+                layout=layout,
+                max_results=max_results,
+            )
+            results = [(i['image'], i.get('width', 1280), i.get('height', 720))
+                       for i in items if i.get('image')]
+            self.log(f'[Thumbnails] DuckDuckGo: {len(results)} results', FG2)
+            return results[:max_results]
         except Exception as ex:
+            _es = str(ex)
+            if 'ratelimit' in _es.lower() or '403' in _es:
+                raise ValueError(
+                    'DuckDuckGo temporarily blocked the search.\n'
+                    'Wait a few seconds and try again.')
             self.log(f'[Thumbnails] DDG error: {ex}', YELLOW)
-
-        # ── 3. Bing (with warmed session) ─────────────────────────────────────
-        try:
-            self.log('[Thumbnails] Trying Bing...')
-            sess.get('https://www.bing.com/', timeout=8, verify=False)
-            import time as _t; _t.sleep(0.4)
-            r = sess.get('https://www.bing.com/images/search',
-                params={'q': query, 'qft': '+filterui:imagesize-large', 'FORM':'IRFLTR'},
-                headers={'Referer': 'https://www.bing.com/',
-                         'Accept': 'text/html,application/xhtml+xml'},
-                timeout=12, verify=False)
-            self.log(f'[Thumbnails] Bing: {r.status_code}, {len(r.text)}ch')
-            results = []
-            # Pattern 1: murl JSON field
-            for m in _re.finditer(r'"murl":"(https?://[^"]+)"', r.text):
-                url = m.group(1)
-                if not any(x in url for x in ['bing.com','microsoft.com','msn.com','th.bing']):
-                    results.append((url, 1280, 720))
-            # Pattern 2: iurl field (image url)
-            for m in _re.finditer(r'"iurl":"(https?://[^"]+)"', r.text):
-                url = m.group(1)
-                if not any(x in url for x in ['bing.com','microsoft.com','msn.com','th.bing']):
-                    results.append((url, 1280, 720))
-            # Pattern 3: data-src on img tags
-            for m in _re.finditer(r'data-src="(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', r.text):
-                url = m.group(1)
-                if 'bing' not in url:
-                    results.append((url, 1280, 720))
-            # Deduplicate
-            seen = set(); deduped = []
-            for item in results:
-                if item[0] not in seen:
-                    seen.add(item[0]); deduped.append(item)
-            results = deduped
-            self.log(f'[Thumbnails] Bing urls found: {len(results)}')
-            if results: return results[:max_results]
-        except Exception as ex:
-            self.log(f'[Thumbnails] Bing error: {ex}', YELLOW)
-
-        # ── 4. Pixabay (scrape) ───────────────────────────────────────────────
-        try:
-            self.log('[Thumbnails] Trying Pixabay...')
-            r = sess.get(f'https://pixabay.com/images/search/{_up.quote(query)}/',
-                timeout=12, verify=False)
-            self.log(f'[Thumbnails] Pixabay: {r.status_code}, {len(r.text)}ch')
-            results = []
-            for m in _re.finditer(r'"largeImageURL":"(https?://[^"]+)"', r.text):
-                results.append((m.group(1), 1920, 1080))
-            for m in _re.finditer(r'"webformatURL":"(https?://[^"]+)"', r.text):
-                results.append((m.group(1), 1280, 720))
-            self.log(f'[Thumbnails] Pixabay urls: {len(results)}')
-            if results: return list(dict.fromkeys(results))[:max_results]
-        except Exception as ex:
-            self.log(f'[Thumbnails] Pixabay error: {ex}', YELLOW)
-
-
-        # Try Google Images as last resort
-        try:
-            self.log('[Thumbnails] Trying Google Images...')
-            import urllib.parse as _up2, re as _re2
-            _gq = _up2.quote_plus(query)
-            _gh = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            _gr = sess.get(f'https://www.google.com/search?q={_gq}&tbm=isch&num=10',
-                          headers=_gh, timeout=10, verify=False)
-            _gurls = _re2.findall(r'"(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', _gr.text)
-            _gurls = [u for u in _gurls if len(u) < 300 and 'gstatic' not in u][:max_results]
-            self.log(f'[Thumbnails] Google Images: {len(_gurls)} urls')
-            for _gu in _gurls:
-                try:
-                    _ir = sess.get(_gu, timeout=8, verify=False)
-                    if _ir.status_code == 200 and len(_ir.content) > 5000:
-                        results.append((_gu, 1280, 720))
-                        if len(results) >= max_results: break
-                except: continue
-            if results: return list(dict.fromkeys(results))[:max_results]
-        except Exception as _ge:
-            self.log(f'[Thumbnails] Google Images error: {_ge}')
-
-        self.log('[Thumbnails] ALL BACKENDS FAILED. Add a free Unsplash key for best results.', RED)
         return []
 
     def _thumb_render(self):
@@ -8842,18 +9291,18 @@ class App(tk.Tk):
         # All 4 providers use identical layout — order: Gemini, Unsplash, Groq, OpenRouter
         _all_providers = [
             ('Google Gemini (Free)',     'Gemini',      'Free · best for long videos',        'https://aistudio.google.com/app/apikey'),
-            ('_unsplash',               'Unsplash',    'Free · 50 req/hr · thumbnail search', 'https://unsplash.com/oauth/applications'),
+            ('_unsplash',               'Unsplash',      'Free · stock photos (thumbnail stock mode)', 'https://unsplash.com/oauth/applications'),
             ('Groq (Free)',             'Groq',        'Free · fastest inference',             'https://console.groq.com/keys'),
             ('OpenRouter (Free models)','OpenRouter',  'Free models available',                'https://openrouter.ai/keys'),
         ]
 
-        # Ensure Unsplash var exists
         if not hasattr(self, 'v_unsplash_key'):
             self.v_unsplash_key = tk.StringVar(value=self._keys.get('_unsplash',''))
 
         _provider_entries = {}
-        _extra_key_vars = {}  # pkey -> list of StringVars for extra keys
-        _extra_key_frames = {}  # pkey -> frame containing extra rows
+        _extra_key_vars    = {}  # pkey -> list of StringVars for extra keys
+        _extra_key_enabled = {}  # pkey -> list of BooleanVars (enabled/disabled)
+        _extra_key_frames  = {}  # pkey -> frame containing extra rows
 
         def _make_eye_toggle(entry):
             def _t(): entry.config(show='' if entry.cget('show')=='•' else '•')
@@ -8887,12 +9336,13 @@ class App(tk.Tk):
             tk.Label(pr, text=hint, font=('Segoe UI',7), fg=FG2, bg=BG3,
                      width=_COL_RIGHT, anchor='e').pack(side='right')
 
-            # RIGHT: + button (fixed, before entry)
+            # RIGHT: + button (fixed, before entry) — hide for single-key services
             _plus_holder = tk.Frame(pr, bg=BG3, width=28)
             _plus_holder.pack(side='right'); _plus_holder.pack_propagate(False)
             _plus_btn = tk.Button(_plus_holder, text='＋', font=('Segoe UI',9,'bold'),
                                  bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2')
-            _plus_btn.pack(expand=True)
+            if pkey not in ('_unsplash',):
+                _plus_btn.pack(expand=True)
 
             # MIDDLE: entry expands to fill
             ef = tk.Frame(pr, bg=BG4)
@@ -8906,55 +9356,120 @@ class App(tk.Tk):
             _provider_entries[pkey] = _var
 
             # ── Extra key rows container ──────────────────────────────────────
-            _extra_key_vars[pkey] = []
-            _extra_key_frames[pkey] = tk.Frame(s1, bg=BG3)
+            _extra_key_vars[pkey]    = []
+            _extra_key_enabled[pkey] = []
+            _extra_key_frames[pkey]  = tk.Frame(s1, bg=BG3)
             _extra_key_frames[pkey].pack(fill='x')
-            _cfg_extra_k = {
-                'Google Gemini (Free)':'key_gemini_extra',
-                'Groq (Free)':'key_groq_extra',
-                'OpenRouter (Free models)':'key_openrouter_extra',
-                '_unsplash':'key_unsplash_extra'
-            }.get(pkey, '')
+            _cfg_map_k = {
+                'Google Gemini (Free)':     ('key_gemini_extra',     'key_gemini_extra_enabled'),
+                'Groq (Free)':              ('key_groq_extra',       'key_groq_extra_enabled'),
+                'OpenRouter (Free models)': ('key_openrouter_extra', 'key_openrouter_extra_enabled'),
+                '_unsplash':                ('key_unsplash_extra',   'key_unsplash_extra_enabled'),
+            }
+            _cfg_extra_k, _cfg_en_k = _cfg_map_k.get(pkey, ('', ''))
             _existing_extras = [k.strip() for k in self.cfg.get(_cfg_extra_k,'').split(',') if k.strip()]
+            _existing_en_raw  = [x for x in self.cfg.get(_cfg_en_k,'').split(',') if x in ('0','1')]
+            # Pad with 1 (enabled) if no flags stored yet
+            _existing_enabled = [bool(int(x)) for x in _existing_en_raw] + [True]*max(0, len(_existing_extras)-len(_existing_en_raw))
 
-            def _add_extra_row(pk=pkey, val=''):
-                _ev = tk.StringVar(value=val)
+            def _add_extra_row(pk=pkey, val='', enabled=True):
+                _ev  = tk.StringVar(value=val)
+                _ben = tk.BooleanVar(value=enabled)
                 _extra_key_vars[pk].append(_ev)
+                _extra_key_enabled[pk].append(_ben)
                 _kidx = len(_extra_key_vars[pk])
 
                 # Same parent as primary rows
                 _erow = tk.Frame(s1, bg=BG3)
                 _erow.pack(fill='x', pady=1)
 
-                # LEFT: character-width label — matches primary row exactly
-                tk.Label(_erow, text=f'  ↳ Key {_kidx+1}',
+                def _remove_row(r=_erow, v=_ev, b=_ben, pk2=pk):
+                    r.destroy()
+                    if v in _extra_key_vars[pk2]:    _extra_key_vars[pk2].remove(v)
+                    if b in _extra_key_enabled[pk2]: _extra_key_enabled[pk2].remove(b)
+
+                # LEFT: label
+                _lbl_var = tk.StringVar(value=f'  ↳ Key {_kidx+1}')
+                tk.Label(_erow, textvariable=_lbl_var,
                         font=('Segoe UI',8), fg=ACCENT2, bg=BG3,
                         width=_COL_NAME, anchor='w').pack(side='left', padx=(4,0))
 
-                # RIGHT: spacer + ✕ button — packed before entry same as primary
+                # RIGHT: ✕ remove button
                 tk.Button(_erow, text='✕', font=('Segoe UI',9,'bold'),
                          bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=6,
-                         command=lambda r=_erow, v=_ev, pk2=pk: (
-                             r.destroy(), _extra_key_vars[pk2].remove(v)
-                         )).pack(side='right', padx=(0,6))
-                # Blank spacer same width as hint column keeps entry aligned with primary
-                tk.Label(_erow, text='', bg=BG3,
-                         width=_COL_RIGHT).pack(side='right')
+                         command=_remove_row).pack(side='right', padx=(0,6))
+                # Blank spacer
+                tk.Label(_erow, text='', bg=BG3, width=_COL_RIGHT).pack(side='right')
 
-                # MIDDLE: orange-bordered entry — same padx=6 as primary
-                _eef = tk.Frame(_erow, bg=ACCENT, padx=1, pady=1)
+                # Enable/disable toggle — packed right of entry
+                def _make_toggle(entry, ben, erow_ref):
+                    def _toggle():
+                        is_on = ben.get()
+                        entry.config(state='normal' if is_on else 'disabled',
+                                     fg=FG if is_on else FG3)
+                        erow_ref._toggle_btn.config(
+                            text='● ON' if is_on else '○ OFF',
+                            fg=GREEN if is_on else FG3)
+                    return _toggle
+
+                # MIDDLE: entry (orange-bordered when enabled, grey when disabled)
+                _eef = tk.Frame(_erow, bg=ACCENT if enabled else FG3, padx=1, pady=1)
                 _eef.pack(side='left', fill='x', expand=True, padx=6)
                 _einn = tk.Frame(_eef, bg=BG4); _einn.pack(fill='both', expand=True)
                 _ee = tk.Entry(_einn, textvariable=_ev, font=('Consolas',9),
-                              bg=BG4, fg=FG, insertbackground=ACCENT, relief='flat', bd=4, show='•')
+                              bg=BG4, fg=FG if enabled else FG3,
+                              insertbackground=ACCENT, relief='flat', bd=4, show='•',
+                              state='normal' if enabled else 'disabled')
                 _ee.pack(side='left', fill='x', expand=True)
                 tk.Button(_einn, text='👁', font=('Segoe UI',8), bg=BG4, fg=FG2,
                          relief='flat', bd=0, cursor='hand2', padx=4,
                          command=_make_eye_toggle(_ee)).pack(side='right')
 
-            for _ev_val in _existing_extras:
-                _add_extra_row(pkey, _ev_val)
+                # Toggle button — after entry frame
+                _tbtn = tk.Button(_erow,
+                    text='● ON' if enabled else '○ OFF',
+                    font=('Segoe UI', 8, 'bold'),
+                    fg=GREEN if enabled else FG3,
+                    bg=BG3, relief='flat', bd=0, cursor='hand2', padx=6)
+
+                def _toggle_key(b=_ben, e=_ee, ef=_eef, btn=_tbtn, pk=pkey):
+                    b.set(not b.get())
+                    is_on = b.get()
+                    e.config(state='normal' if is_on else 'disabled',
+                             fg=FG if is_on else FG3)
+                    ef.config(bg=ACCENT if is_on else FG3)
+                    btn.config(text='● ON' if is_on else '○ OFF',
+                               fg=GREEN if is_on else FG3)
+                    # Immediately sync to app-level state + config so runs see the change
+                    # without requiring the user to press Save first
+                    _cfg_en_map = {
+                        'Google Gemini (Free)':     'key_gemini_extra_enabled',
+                        'Groq (Free)':              'key_groq_extra_enabled',
+                        'OpenRouter (Free models)': 'key_openrouter_extra_enabled',
+                    }
+                    if pk in _cfg_en_map:
+                        _all_bvars = _extra_key_enabled.get(pk, [])
+                        _flags = [bv.get() for bv in _all_bvars]
+                        # Also keep the keys list in sync (only enabled keys active)
+                        _all_kvars = _extra_key_vars.get(pk, [])
+                        _all_keys  = [v.get().strip() for v in _all_kvars]
+                        if hasattr(self, '_extra_keys_enabled'):
+                            self._extra_keys_enabled[pk] = _flags
+                        if hasattr(self, '_extra_keys'):
+                            self._extra_keys[pk] = _all_keys  # keep all, _call_provider filters by enabled
+                        self.cfg[_cfg_en_map[pk]] = ','.join('1' if f else '0' for f in _flags)
+                        save_cfg(self.cfg)
+                    self.log(f'Key {"enabled" if is_on else "disabled"} for {pk}', GREEN if is_on else FG3)
+
+                _tbtn.config(command=_toggle_key)
+                _tbtn.pack(side='left', padx=(0,4))
+                _erow._toggle_btn = _tbtn
+
+            for _ev_val, _ev_en in zip(_existing_extras,
+                                        _existing_enabled + [True]*max(0,len(_existing_extras)-len(_existing_enabled))):
+                _add_extra_row(pkey, _ev_val, _ev_en)
             _plus_btn.config(command=lambda pk=pkey: _add_extra_row(pk))
+
 
         def _save_keys():
             for pkey, var in _provider_entries.items():
@@ -8966,18 +9481,29 @@ class App(tk.Tk):
                         self.thumb_unsplash_var.set(val)
                 else:
                     self._keys[pkey] = val
-            # Save extra keys
+            # Save extra keys + enabled flags
             _cfg_map = {
-                'Google Gemini (Free)': ('key_gemini', 'key_gemini_extra'),
-                'Groq (Free)':          ('key_groq',   'key_groq_extra'),
-                'OpenRouter (Free models)': ('key_openrouter', 'key_openrouter_extra'),
+                'Google Gemini (Free)':     ('key_gemini',     'key_gemini_extra',     'key_gemini_extra_enabled'),
+                'Groq (Free)':              ('key_groq',       'key_groq_extra',       'key_groq_extra_enabled'),
+                'OpenRouter (Free models)': ('key_openrouter', 'key_openrouter_extra', 'key_openrouter_extra_enabled'),
             }
-            for pkey, (cfg_k, cfg_extra_k) in _cfg_map.items():
+            for pkey, (cfg_k, cfg_extra_k, cfg_en_k) in _cfg_map.items():
                 self.cfg[cfg_k] = self._keys.get(pkey, '')
-                extras = [v.get().strip() for v in _extra_key_vars.get(pkey, []) if v.get().strip()]
+                # Save all keys (including disabled ones — so they're not lost)
+                all_vars    = _extra_key_vars.get(pkey, [])
+                all_en_vars = _extra_key_enabled.get(pkey, [])
+                # Keep keys that have a value (even if disabled)
+                pairs = [(v.get().strip(), (all_en_vars[i].get() if i < len(all_en_vars) else True))
+                         for i, v in enumerate(all_vars)]
+                saved_pairs   = [(k, en) for k, en in pairs if k]
+                extras        = [k  for k, _  in saved_pairs]
+                enabled_flags = [en for _, en in saved_pairs]
                 self.cfg[cfg_extra_k] = ','.join(extras)
+                self.cfg[cfg_en_k]    = ','.join('1' if en else '0' for en in enabled_flags)
                 if hasattr(self, '_extra_keys'):
                     self._extra_keys[pkey] = extras
+                if hasattr(self, '_extra_keys_enabled'):
+                    self._extra_keys_enabled[pkey] = enabled_flags
             save_cfg(self.cfg)
             self._auto_select_provider()
             self.log(f'✅ API keys saved', GREEN)
@@ -8988,11 +9514,14 @@ class App(tk.Tk):
             _save_keys()
             _bundle = {'v': 1, 'keys': {
                 'key_gemini':           self._keys.get('Google Gemini (Free)', ''),
-                'key_gemini_extra':     self.cfg.get('key_gemini_extra', ''),
+                'key_gemini_extra':          self.cfg.get('key_gemini_extra', ''),
+                'key_gemini_extra_enabled':  self.cfg.get('key_gemini_extra_enabled', ''),
                 'key_groq':             self._keys.get('Groq (Free)', ''),
-                'key_groq_extra':       self.cfg.get('key_groq_extra', ''),
+                'key_groq_extra':            self.cfg.get('key_groq_extra', ''),
+                'key_groq_extra_enabled':    self.cfg.get('key_groq_extra_enabled', ''),
                 'key_openrouter':       self._keys.get('OpenRouter (Free models)', ''),
-                'key_openrouter_extra': self.cfg.get('key_openrouter_extra', ''),
+                'key_openrouter_extra':       self.cfg.get('key_openrouter_extra', ''),
+                'key_openrouter_extra_enabled': self.cfg.get('key_openrouter_extra_enabled', ''),
                 'key_unsplash':         self._keys.get('_unsplash', ''),
             }}
             pw = _sd.askstring('Export Keys', 'Set a password to encrypt your keys:', show='*', parent=self)
@@ -9045,8 +9574,10 @@ class App(tk.Tk):
                 self._keys['OpenRouter (Free models)'] = _kd.get('key_openrouter', '')
                 self._keys['_unsplash']                = _kd.get('key_unsplash', '')
                 self.cfg.update({k: _kd.get(k, '') for k in [
-                    'key_gemini','key_gemini_extra','key_groq','key_groq_extra',
-                    'key_openrouter','key_openrouter_extra','key_unsplash']})
+                    'key_gemini','key_gemini_extra','key_gemini_extra_enabled',
+                    'key_groq','key_groq_extra','key_groq_extra_enabled',
+                    'key_openrouter','key_openrouter_extra','key_openrouter_extra_enabled',
+                    'key_unsplash']})
                 save_cfg(self.cfg)
                 for _pk, _ck in [('Google Gemini (Free)','key_gemini'),
                                   ('Groq (Free)','key_groq'),
@@ -9077,7 +9608,7 @@ class App(tk.Tk):
         s2 = section('🤖  AI Provider Status')
         self._prov_status_frame = s2
         _leg = tk.Frame(s2, bg=BG2); _leg.pack(anchor='w', pady=(0,6))
-        for _lt, _lc in [('● Ready', GREEN), ('  ● Rate-limited', YELLOW), ('  ○ No key', FG3)]:
+        for _lt, _lc in [('● Ready', GREEN), ('  ● Rate-limited', YELLOW), ('  ● Dead/404', RED), ('  ○ No key', FG3)]:
             tk.Label(_leg, text=_lt, font=('Segoe UI',8), fg=_lc, bg=BG2).pack(side='left')
         # Defer to background — provider status check imports packages (slow)
         self.after(50, self._refresh_provider_status)
@@ -9101,6 +9632,27 @@ class App(tk.Tk):
             b.pack(side='left', padx=(0,4))
             self._whisper_btns[size] = b
         tk.Label(wr, text='Auto picks best model for your hardware', font=('Segoe UI',7), fg=FG2, bg=BG3).pack(side='left', padx=8)
+
+        # GPU toggle row
+        gpu_row_s = tk.Frame(s3, bg=BG3); gpu_row_s.pack(fill='x', pady=(6,3))
+        gpu_cb_s = tk.Checkbutton(
+            gpu_row_s, text='⚡ Use GPU acceleration for transcription  (recommended — on by default)',
+            variable=self.v_use_gpu_whisper,
+            font=FONT_SMALL, fg=FG, bg=BG3,
+            selectcolor=BG4, activebackground=BG3,
+            relief='flat', cursor='hand2',
+            command=lambda: (
+                self.cfg.update({'use_gpu_whisper': self.v_use_gpu_whisper.get()}),
+                save_cfg(self.cfg),
+                globals().update({'_WHISPER_DEVICE_CACHE': None}),
+                self.log(f'GPU transcription: {"ON" if self.v_use_gpu_whisper.get() else "OFF"}', GREEN if self.v_use_gpu_whisper.get() else YELLOW)
+            )
+        )
+        gpu_cb_s.pack(side='left', padx=4)
+        gpu_info = tk.Frame(s3, bg=BG3); gpu_info.pack(fill='x', pady=(0,4), padx=4)
+        tk.Label(gpu_info,
+                 text='Supports: NVIDIA (CUDA)  •  AMD/Intel (Vulkan via whisper.cpp or DirectML)',
+                 font=('Segoe UI', 7), fg=FG2, bg=BG3, justify='left').pack(anchor='w', padx=8)
 
         # ── Cookies ──
         s4 = section('🍪  Cookies (for Kick/Twitter/X downloads)')
@@ -9313,6 +9865,7 @@ class App(tk.Tk):
             ('torchaudio',     'torchaudio',                'Audio processing — required by Demucs'),
             # ── Subtitle Burn-in ────────────────────────────────────────────
             ('fonttools',      'fonttools',                 'Font enumeration — required for Burn Subtitles'),
+            ('ddgs',           'ddgs',                      'DuckDuckGo image search — required for Thumbnail Finder'),
         ]
 
         # Packages that need --no-deps to avoid DLL permission conflicts
@@ -9737,7 +10290,7 @@ class App(tk.Tk):
                  ).pack(pady=(0,20))
 
     def _refresh_provider_status(self):
-        """Show which API providers have keys configured."""
+        """Show which API providers have keys configured and live rate-limit state."""
         for w in self._prov_status_frame.winfo_children():
             if getattr(w, '_is_status_row', False):
                 w.destroy()
@@ -9748,35 +10301,82 @@ class App(tk.Tk):
             'Groq (Free)':             'Groq',
             'OpenRouter (Free models)':'OpenRouter',
         }
+        import time as _t_status
+        _RL_EXPIRY = 300
         # Read live from v_keys StringVars (not cached _keys)
         live_keys = {p: v.get().strip() for p, v in self.v_keys.items()}
         for pname, key in live_keys.items():
             if pname.startswith('_'): continue
             has_key = bool(key.strip())
             if has_key: has_any = True
-            _extras = [k for k in getattr(self,'_extra_keys',{}).get(pname,[]) if k]
-            _rl_provs = getattr(self, '_rl_provs', set())
-            _is_rl = pname in _rl_provs
+            _all_xk  = getattr(self,'_extra_keys',{}).get(pname,[])
+            _all_xen = getattr(self,'_extra_keys_enabled',{}).get(pname,[])
+            _all_xen_pad = _all_xen + [True]*max(0,len(_all_xk)-len(_all_xen))
+            _extras  = [k for k,en in zip(_all_xk,_all_xen_pad) if k and en]
+            # Check how many active (non-cooldown) keys exist
+            import time as _rps_t
+            _cds = getattr(self,'_key_cooldowns',{})
+            _extras_on_cd = [k for k in _extras if _rps_t.time() < _cds.get((pname,k),0)]
+            _active_key_count = (1 if key.strip() and _rps_t.time() >= _cds.get((pname,key.strip()),0) else 0) + len([k for k in _extras if _rps_t.time() >= _cds.get((pname,k),0)])
+            # Use app-level _rl_provs (self) — reflects live state during runs
+            _is_rl = pname in getattr(self, '_rl_provs', set())
+            # Check if provider is marked dead (404/no endpoints) this session
+            _is_dead = pname in getattr(self, '_dead_models', set())
+            # Calculate time remaining on rate limit
+            _rl_remaining = 0
+            if _is_rl:
+                _since = getattr(self, '_rl_since', {}).get(pname, 0)
+                _rl_remaining = max(0, int(_RL_EXPIRY - (_t_status.time() - _since)))
+                if _rl_remaining == 0:
+                    # Expired — clean it up
+                    with getattr(self, '_rl_provs_lock', __import__('threading').Lock()):
+                        getattr(self, '_rl_provs', set()).discard(pname)
+                    _is_rl = False
             r = tk.Frame(self._prov_status_frame, bg=BG2)
             r._is_status_row = True
             r.pack(fill='x', pady=2)
-            dot_color = YELLOW if _is_rl else (GREEN if has_key else FG3)
+            # Dot color: RED=dead model, YELLOW=rate-limited, GREEN=ready, GREY=no key
+            if _is_dead:
+                dot_color = RED
+            elif _is_rl:
+                dot_color = YELLOW
+            elif has_key:
+                dot_color = GREEN
+            else:
+                dot_color = FG3
             tk.Label(r, text='●', font=('Segoe UI', 10), fg=dot_color, bg=BG2).pack(side='left')
             display_name = _display.get(pname, pname)
             _key_suffix = f' (+{len(_extras)} more)' if _extras else ''
             tk.Label(r, text=f' {display_name}{_key_suffix}', font=FONT_SMALL,
                     fg=FG if has_key else FG2, bg=BG2).pack(side='left')
-            if _is_rl:
-                status = f'⏳ Rate-limited ({1+len(_extras)} keys)'
+            if _is_dead:
+                status = '❌ Model unavailable (404) — try a different model'
+                status_color = RED
+            elif _is_rl:
+                _mins, _secs = divmod(_rl_remaining, 60)
+                _eta = f'{_mins}m{_secs:02d}s' if _mins else f'{_secs}s'
+                status = f'⏳ Rate-limited — clears in {_eta}'
+                status_color = YELLOW
+            elif has_key and _extras_on_cd:
+                # Some extra keys are on auto-cooldown
+                _n_active = _active_key_count
+                _n_total  = 1 + len(_extras) if key.strip() else len(_extras)
+                _soonest_cd = min(_extras_on_cd, key=lambda k: _cds.get((pname,k),0))
+                _rem_cd = max(0, int(_cds.get((pname,_soonest_cd),0) - _rps_t.time()))
+                _cd_eta = f'{_rem_cd//60}m{_rem_cd%60:02d}s'
+                status = f'⏳ {_n_active}/{_n_total} keys active — {len(_extras_on_cd)} paused, resumes {_cd_eta}'
+                status_color = YELLOW
             elif _extras:
                 status = f'✓ Ready ({1+len(_extras)} keys)'
+                status_color = GREEN
             elif has_key:
                 status = '✓ Ready'
+                status_color = GREEN
             else:
                 status = 'No key — add above'
-            status_color = YELLOW if _is_rl else (GREEN if has_key else YELLOW)
+                status_color = YELLOW
             tk.Label(r, text=status, font=FONT_SMALL, fg=status_color, bg=BG2).pack(side='right')
-        # Unsplash status row (separate from AI providers)
+        # Unsplash status row (stock photos mode)
         us_key = self._keys.get('_unsplash', '') or (
             self.v_unsplash_key.get().strip() if hasattr(self, 'v_unsplash_key') else '')
         us_has = bool(us_key.strip())
@@ -9787,16 +10387,35 @@ class App(tk.Tk):
                 fg=GREEN if us_has else FG3, bg=BG2).pack(side='left')
         tk.Label(us_r, text=' Unsplash', font=FONT_SMALL,
                 fg=FG if us_has else FG2, bg=BG2).pack(side='left')
-        tk.Label(us_r, text='✓ Ready' if us_has else 'No key — add above',
-                font=FONT_SMALL, fg=GREEN if us_has else YELLOW, bg=BG2).pack(side='right')
+        tk.Label(us_r, text='✓ Ready (stock photos)' if us_has else 'No key — optional, only needed for stock mode',
+                font=FONT_SMALL, fg=GREEN if us_has else FG3, bg=BG2).pack(side='right')
         if not has_any:
             r = tk.Frame(self._prov_status_frame, bg=BG2)
             r._is_status_row = True
             r.pack(fill='x', pady=4)
             tk.Label(r, text='⚠️  No API keys configured — add at least one above to find clips',
                     font=FONT_SMALL, fg=YELLOW, bg=BG2).pack(anchor='w')
-        # Auto-refresh every 30s to reflect rate limit changes
-        self.after(30000, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
+        # Clear key cooldowns button — shown only if any cooldowns are active
+        import time as _rps_t2
+        _any_cds = any(_rps_t2.time() < v for v in getattr(self,'_key_cooldowns',{}).values())
+        if _any_cds:
+            _cd_bar = tk.Frame(self._prov_status_frame, bg=BG2)
+            _cd_bar._is_status_row = True
+            _cd_bar.pack(fill='x', pady=(6,2))
+            tk.Label(_cd_bar, text='⏳ Some keys are auto-paused due to rate-limits or auth errors.',
+                     font=('Segoe UI',8), fg=YELLOW, bg=BG2).pack(side='left')
+            def _clear_cooldowns():
+                with self._key_cd_lock:
+                    self._key_cooldowns.clear()
+                self.log('✅ All key cooldowns cleared — keys re-enabled', GREEN)
+                self._refresh_provider_status()
+            tk.Button(_cd_bar, text='Clear All Cooldowns',
+                      font=('Segoe UI',8,'bold'), fg=BG, bg=GREEN,
+                      relief='flat', bd=0, cursor='hand2', padx=8, pady=2,
+                      command=_clear_cooldowns).pack(side='right', padx=4)
+
+        # Auto-refresh every 5s to reflect live rate-limit countdown
+        self.after(5000, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
 
 
     def _auto_select_provider(self):
@@ -9900,11 +10519,18 @@ class App(tk.Tk):
         self.mr_status_lbl.pack(fill='x', padx=20, pady=4)
 
     def _run_music_removal(self):
-        """Run Demucs to separate music from vocals — keeps vocals stem, discards music."""
-        vid = self.v_mr_video.get().strip()
+        """Run Demucs on all queued videos."""
+        # Get videos from queue box
+        lines = [l.strip() for l in self.v_mr_queue_box.get('1.0','end').splitlines() if l.strip()]
+        videos = [l for l in lines if Path(l).exists()]
+        if not videos:
+            # Fallback to v_mr_video for compatibility
+            vid = self.v_mr_video.get().strip()
+            if vid and Path(vid).exists():
+                videos = [vid]
+            else:
+                messagebox.showerror('No video', 'Add videos to the queue first.'); return
         out = self.v_mr_out.get().strip()
-        if not vid or not Path(vid).exists():
-            messagebox.showerror('No video', 'Select a video file first.'); return
         if not out:
             messagebox.showerror('No output', 'Select an output folder first.'); return
 
@@ -9914,8 +10540,8 @@ class App(tk.Tk):
         ff        = ensure_ffmpeg()
 
         self.set_busy(True)
-        self.mr_status_lbl.config(text='⏳ Installing Demucs if needed...', fg=ACCENT2)
-        self.log('🎵 Music Removal: starting...', ACCENT2)
+        self.mr_status_lbl.config(text=f'⏳ Processing {len(videos)} video(s)...', fg=ACCENT2)
+        self.log(f'🎵 Music Removal: starting {len(videos)} video(s)...', ACCENT2)
 
         def _run():
             try:
@@ -9932,42 +10558,72 @@ class App(tk.Tk):
                     self.after(0, lambda: self.mr_status_lbl.config(
                         text=f'❌ Missing: {", ".join(missing)} — install in Settings', fg=RED))
                     return
-                # Patch torchaudio to use soundfile backend — avoids torchcodec DLL issues on Windows
-                try:
-                    import torchaudio as _ta
-                    _ta.set_audio_backend('soundfile')
-                    self.log('[Music] Using soundfile audio backend', FG2)
-                except Exception as _tae:
-                    self.log(f'[Music] torchaudio backend note: {_tae}', FG2)
 
-                # Step 1: Extract audio from video
-                self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Extracting audio...', fg=ACCENT2))
-                self.log('Step 1: Extracting audio...', FG2)
-                self.set_progress('🎵 Music Removal: extracting audio...', pct=10)
-                tmp_dir = Path(_tmp.mkdtemp())
-                audio_path = str(tmp_dir / 'input_audio.wav')
-                _sp.run([ff, '-y', '-i', vid, '-vn', '-ar', '44100',
-                         '-ac', '2', '-f', 'wav', audio_path],
-                        stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+                for _vi, vid in enumerate(videos):
+                    self.after(0, lambda n=_vi+1, t=len(videos), v=Path(vid).name:
+                        self.mr_status_lbl.config(text=f'⏳ [{n}/{t}] {v}...', fg=ACCENT2))
+                    self.log(f'🎵 [{_vi+1}/{len(videos)}] Processing: {Path(vid).name}', ACCENT2)
+                    try:
+                        self._run_music_removal_single(vid, out, model, keep_vox, keep_other, ff, _vi, len(videos))
+                    except Exception as _ve:
+                        import traceback as _tb
+                        self.log(f'❌ [{Path(vid).name}] Failed: {_ve}', RED)
+                        self.log(_tb.format_exc(), RED)
+                        continue
 
-                # Step 2: Run Demucs separation
-                self.after(0, lambda: self.mr_status_lbl.config(
-                    text=f'⏳ Separating stems with {model}... (this takes a while)', fg=ACCENT2))
-                self.log(f'Step 2: Running Demucs [{model}]...', FG2)
-                self.set_progress(f'🎵 Music Removal: separating stems [{model}]...', pct=30)
-                sep_out = str(tmp_dir / 'separated')
-                # Demucs command — patch torchaudio via python -c before demucs runs
-                import os as _os_dm
-                _dm_env = dict(_os_dm.environ)
-                # Force torchaudio to use soundfile — avoids torchcodec/DLL issues
-                _dm_env['TORCHAUDIO_BACKEND'] = 'soundfile'
-                _dm_env['TORCH_AUDIO_USE_SOUNDFILE'] = '1'
-                # Write a temp launcher script that patches torchaudio before demucs runs
-                import tempfile as _tmp2
-                _launcher = str(Path(_tmp2.gettempdir()) / 'cf_demucs_launcher.py')
-                with open(_launcher, 'w') as _lf:
-                    _pkgs_path = str(PKGS_DIR)
-                    _lf.write(f"""import sys
+                self.after(0, lambda: (
+                    self.mr_status_lbl.config(text=f'✅ Done: {len(videos)} video(s) processed', fg=GREEN),
+                    self.set_busy(False),
+                    self.set_progress('✅ Music Removal complete', pct=100)
+                ))
+            except Exception as _ex:
+                import traceback as _tb2
+                self.log(f'Music Removal error: {_tb2.format_exc()}', RED)
+                self.after(0, lambda: (self.set_busy(False), self.set_progress('', pct=0)))
+
+        import threading; threading.Thread(target=_run, daemon=True).start()
+
+    def _run_music_removal_single(self, vid, out, model, keep_vox, keep_other, ff, vi=0, total=1):
+        """Process a single video through Demucs music removal."""
+        import subprocess as _sp, sys as _sys, tempfile as _tmp
+        _ensure_pkgs_on_path()
+
+        # Patch torchaudio to use soundfile backend — avoids torchcodec DLL issues on Windows
+        try:
+            import torchaudio as _ta
+            _ta.set_audio_backend('soundfile')
+            self.log('[Music] Using soundfile audio backend', FG2)
+        except Exception as _tae:
+            self.log(f'[Music] torchaudio backend note: {_tae}', FG2)
+
+        # Step 1: Extract audio from video
+        self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Extracting audio...', fg=ACCENT2))
+        self.log('Step 1: Extracting audio...', FG2)
+        self.set_progress('🎵 Music Removal: extracting audio...', pct=10)
+        tmp_dir = Path(_tmp.mkdtemp())
+        audio_path = str(tmp_dir / 'input_audio.wav')
+        _sp.run([ff, '-y', '-i', vid, '-vn', '-ar', '44100',
+                 '-ac', '2', '-f', 'wav', audio_path],
+                stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+
+        # Step 2: Run Demucs separation
+        self.after(0, lambda: self.mr_status_lbl.config(
+            text=f'⏳ Separating stems with {model}... (this takes a while)', fg=ACCENT2))
+        self.log(f'Step 2: Running Demucs [{model}]...', FG2)
+        self.set_progress(f'🎵 Music Removal: separating stems [{model}]...', pct=30)
+        sep_out = str(tmp_dir / 'separated')
+        # Demucs command — patch torchaudio via python -c before demucs runs
+        import os as _os_dm
+        _dm_env = dict(_os_dm.environ)
+        # Force torchaudio to use soundfile — avoids torchcodec/DLL issues
+        _dm_env['TORCHAUDIO_BACKEND'] = 'soundfile'
+        _dm_env['TORCH_AUDIO_USE_SOUNDFILE'] = '1'
+        # Write a temp launcher script that patches torchaudio before demucs runs
+        import tempfile as _tmp2
+        _launcher = str(Path(_tmp2.gettempdir()) / 'cf_demucs_launcher.py')
+        with open(_launcher, 'w') as _lf:
+            _pkgs_path = str(PKGS_DIR)
+            _lf.write(f"""import sys
 sys.path.insert(0, r'{_pkgs_path}')
 import soundfile as sf
 import torch
@@ -9988,95 +10644,92 @@ torchaudio.save = _sf_save
 from demucs.__main__ import main
 sys.exit(main())
 """)
-                _dm_cmd = [_sys.executable, _launcher,
-                           '-n', model,
-                           '--two-stems', 'vocals',
-                           '--out', sep_out,
-                           audio_path]
-                _dm_r = _sp.run(_dm_cmd, capture_output=True, text=True, env=_dm_env)
-                if _dm_r.returncode != 0:
-                    self.log(f'Demucs error: {_dm_r.stderr[-500:]}', RED)
-                    raise RuntimeError(f'Demucs failed: {_dm_r.stderr[-200:]}')
+        _dm_cmd = [_sys.executable, _launcher,
+                   '-n', model,
+                   '--two-stems', 'vocals',
+                   '--out', sep_out,
+                   audio_path]
+        _dm_r = _sp.run(_dm_cmd, capture_output=True, text=True, env=_dm_env)
+        if _dm_r.returncode != 0:
+            self.log(f'Demucs error: {_dm_r.stderr[-500:]}', RED)
+            raise RuntimeError(f'Demucs failed: {_dm_r.stderr[-200:]}')
 
-                # Step 3: Find stems and mix the ones we want
-                self.log('Step 3: Mixing selected stems...', FG2)
-                if getattr(self, '_cancel_requested', False): return
-                self.set_progress('🎵 Music Removal: mixing stems...', pct=75)
-                self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Mixing stems...', fg=ACCENT2))
-                # two-stems output: vocals.wav and no_vocals.wav
-                sep_track = Path(sep_out) / model / 'input_audio'
-                # Try .wav first (default), then .mp3
-                def _find_stem(name):
-                    for ext in ('wav','mp3','flac'):
-                        p = sep_track / f'{name}.{ext}'
-                        if p.exists(): return str(p)
-                    return None
-                stems_to_mix = []
-                if keep_vox:
-                    v = _find_stem('vocals')
-                    if v: stems_to_mix.append(v)
-                if keep_other:
-                    o = _find_stem('no_vocals')
-                    if o: stems_to_mix.append(o)
-                if not stems_to_mix:
-                    v = _find_stem('vocals')
-                    if v: stems_to_mix.append(v)
-                if not stems_to_mix:
-                    raise RuntimeError(f'No stems found in {sep_track} — check demucs output')
+        # Step 3: Find stems and mix the ones we want
+        self.log('Step 3: Mixing selected stems...', FG2)
+        if getattr(self, '_cancel_requested', False): return
+        self.set_progress('🎵 Music Removal: mixing stems...', pct=75)
+        self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Mixing stems...', fg=ACCENT2))
+        # two-stems output: vocals.wav and no_vocals.wav
+        sep_track = Path(sep_out) / model / 'input_audio'
+        # Try .wav first (default), then .mp3
+        def _find_stem(name):
+            for ext in ('wav','mp3','flac'):
+                p = sep_track / f'{name}.{ext}'
+                if p.exists(): return str(p)
+            return None
+        stems_to_mix = []
+        if keep_vox:
+            v = _find_stem('vocals')
+            if v: stems_to_mix.append(v)
+        if keep_other:
+            o = _find_stem('no_vocals')
+            if o: stems_to_mix.append(o)
+        if not stems_to_mix:
+            v = _find_stem('vocals')
+            if v: stems_to_mix.append(v)
+        if not stems_to_mix:
+            raise RuntimeError(f'No stems found in {sep_track} — check demucs output')
 
-                # Mix stems back together
-                mixed_audio = str(tmp_dir / 'mixed.mp3')
-                if len(stems_to_mix) == 1:
-                    import shutil as _sh
-                    _sh.copy2(stems_to_mix[0], mixed_audio)
-                else:
-                    # amix all stems
-                    inputs = []
-                    for s in stems_to_mix:
-                        inputs += ['-i', s]
-                    _sp.run([ff, '-y'] + inputs +
-                            ['-filter_complex', f'amix=inputs={len(stems_to_mix)}:duration=longest',
-                             mixed_audio],
-                            stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+        # Mix stems back together
+        mixed_audio = str(tmp_dir / 'mixed.mp3')
+        if len(stems_to_mix) == 1:
+            import shutil as _sh
+            _sh.copy2(stems_to_mix[0], mixed_audio)
+        else:
+            # amix all stems
+            inputs = []
+            for s in stems_to_mix:
+                inputs += ['-i', s]
+            _sp.run([ff, '-y'] + inputs +
+                    ['-filter_complex', f'amix=inputs={len(stems_to_mix)}:duration=longest',
+                     mixed_audio],
+                    stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
 
-                # Step 4: Merge cleaned audio back with original video
-                self.log('Step 4: Merging with original video...', FG2)
-                if getattr(self, '_cancel_requested', False): return
-                self.set_progress('🎵 Music Removal: merging audio + video...', pct=90)
-                self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Merging audio + video...', fg=ACCENT2))
-                stem = Path(vid).stem
-                out_path = str(Path(out) / f'{stem} - NoMusic - ClipFinder.mp4')
-                _vcodec, _acodec, _extra = get_encoder(ff)
-                _sp.run([ff, '-y',
-                         '-i', vid,
-                         '-i', mixed_audio,
-                         '-c:v', 'copy',
-                         '-c:a', _acodec,
-                         '-map', '0:v:0',
-                         '-map', '1:a:0',
-                         '-shortest',
-                         out_path],
-                        stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+        # Step 4: Merge cleaned audio back with original video
+        self.log('Step 4: Merging with original video...', FG2)
+        if getattr(self, '_cancel_requested', False): return
+        self.set_progress('🎵 Music Removal: merging audio + video...', pct=90)
+        self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Merging audio + video...', fg=ACCENT2))
+        stem = Path(vid).stem
+        out_path = str(Path(out) / f'{stem} - NoMusic - ClipFinder.mp4')
+        _vcodec, _acodec, _extra = get_encoder(ff)
+        # MOV/non-MP4 containers can't use -c:v copy into MP4 — re-encode
+        _vid_ext = Path(vid).suffix.lower()
+        _needs_reencode = _vid_ext in ('.mov', '.avi', '.wmv', '.flv', '.mkv', '.webm')
+        _cv = ['-c:v', _vcodec] + _extra if _needs_reencode else ['-c:v', 'copy']
+        _sp.run([ff, '-y',
+                 '-i', vid,
+                 '-i', mixed_audio,
+                 ] + _cv + [
+                 '-c:a', _acodec,
+                 '-map', '0:v:0',
+                 '-map', '1:a:0',
+                 '-shortest',
+                 out_path],
+                stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
 
-                # Cleanup
-                import shutil as _sh2
-                _sh2.rmtree(str(tmp_dir), ignore_errors=True)
+        # Cleanup
+        import shutil as _sh2
+        _sh2.rmtree(str(tmp_dir), ignore_errors=True)
 
-                size = Path(out_path).stat().st_size / 1024 / 1024
-                self.log(f'✅ Done: {Path(out_path).name} ({size:.1f}MB)', GREEN)
-                self.after(0, lambda: self.mr_status_lbl.config(
-                    text=f'✅ {Path(out_path).name}', fg=GREEN))
-                self.after(0, lambda: messagebox.showinfo('Music Removed',
-                    f'Saved: {Path(out_path).name}\nLocation: {out}'))
+        size = Path(out_path).stat().st_size / 1024 / 1024
+        self.log(f'✅ Done: {Path(out_path).name} ({size:.1f}MB)', GREEN)
+        self.after(0, lambda: self.mr_status_lbl.config(
+            text=f'✅ {Path(out_path).name}', fg=GREEN))
+        self.after(0, lambda: messagebox.showinfo('Music Removed',
+            f'Saved: {Path(out_path).name}\nLocation: {out}'))
 
-            except Exception as _e:
-                import traceback as _tb
-                self.log(f'Music Removal error: {_tb.format_exc()}', RED)
-                self.after(0, lambda: self.mr_status_lbl.config(text=f'❌ {_e}', fg=RED))
-            finally:
-                self.set_busy(False)
 
-        threading.Thread(target=_run, daemon=True).start()
 
     def _build_music_removal_tab(self, p):
         """AI Music Removal using Demucs — strips background music, keeps vocals."""
@@ -10087,25 +10740,61 @@ sys.exit(main())
 
         sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
         sec.pack(fill='x', padx=16, pady=(0,6))
-        inner = tk.Frame(sec, bg=BG2); inner.pack(fill='x', padx=12, pady=8)
+        inner = tk.Frame(sec, bg=BG2); inner.pack(fill='x', padx=12, pady=(8,4))
 
-        tk.Label(inner, text='Video:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        # ── Queue: multi-file text area ───────────────────────────────────────
+        q_hdr = tk.Frame(inner, bg=BG2); q_hdr.pack(fill='x', pady=(0,4))
+        tk.Label(q_hdr, text='Videos:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
+        tk.Label(q_hdr, text='paste paths or use Browse — one per line',
+                 font=('Segoe UI',7), fg=FG2, bg=BG2).pack(side='left')
+
+        qf = tk.Frame(inner, bg=BG3, highlightbackground=BORDER, highlightthickness=1)
+        qf.pack(fill='x', pady=(0,4))
+        self.v_mr_queue_box = tk.Text(qf, font=('Segoe UI', 7), bg=BG3, fg=FG,
+                                      insertbackground=ACCENT, relief='flat', bd=4,
+                                      wrap='none', height=5)
+        _mrqs = tk.Scrollbar(qf, command=self.v_mr_queue_box.yview)
+        _mrqs.pack(side='right', fill='y')
+        self.v_mr_queue_box.pack(fill='both', expand=True)
+        self.v_mr_queue_box.config(yscrollcommand=_mrqs.set)
+
+        btn_row_q = tk.Frame(inner, bg=BG2); btn_row_q.pack(fill='x', pady=(0,4))
+        def _mr_browse_multi():
+            files = filedialog.askopenfilenames(
+                title='Select videos',
+                filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')])
+            for f in files:
+                current = self.v_mr_queue_box.get('1.0','end').strip()
+                if f not in current:
+                    self.v_mr_queue_box.insert('end', f'\n{f}' if current else f)
+            _mr_update_count()
+        def _mr_add_clipfinder():
+            v = self.v_video.get().strip()
+            if not v: return
+            current = self.v_mr_queue_box.get('1.0','end').strip()
+            if v not in current:
+                self.v_mr_queue_box.insert('end', f'\n{v}' if current else v)
+            _mr_update_count()
+        def _mr_update_count(*_):
+            lines = [l.strip() for l in self.v_mr_queue_box.get('1.0','end').splitlines() if l.strip()]
+            self.mr_status_lbl.config(text=f'{len(lines)} video(s) queued' if lines else '')
+        def _mr_clear():
+            self.v_mr_queue_box.delete('1.0','end')
+            _mr_update_count()
+        self.v_mr_queue_box.bind('<KeyRelease>', _mr_update_count)
+
+        tk.Button(btn_row_q, text='📂 Browse Multiple', font=FONT_SMALL,
+                  bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=_mr_browse_multi).pack(side='left', padx=(0,4))
+        tk.Button(btn_row_q, text='📋 Use Clip Finder Video', font=FONT_SMALL,
+                  bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=_mr_add_clipfinder).pack(side='left', padx=(0,4))
+        tk.Button(btn_row_q, text='🗑 Clear', font=FONT_SMALL,
+                  bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=_mr_clear).pack(side='left')
+
+        # Keep v_mr_video as StringVar for compatibility with _run_music_removal
         self.v_mr_video = tk.StringVar()
-        vf = tk.Frame(inner, bg=BG3); vf.pack(side='left', fill='x', expand=True)
-        tk.Entry(vf, textvariable=self.v_mr_video, font=FONT_SMALL,
-                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
-                ).pack(side='left', fill='x', expand=True)
-        tk.Button(vf, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
-                 relief='flat', bd=0, cursor='hand2', padx=6,
-                 command=lambda: self.v_mr_video.set(
-                     filedialog.askopenfilename(
-                         filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')]
-                     ) or self.v_mr_video.get())
-                 ).pack(side='right')
-        tk.Button(inner, text='Use Clip Finder video', font=FONT_SMALL,
-                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8,
-                 command=lambda: self.v_mr_video.set(self.v_video.get())
-                 ).pack(side='left', padx=8)
 
         out_row = tk.Frame(sec, bg=BG2); out_row.pack(fill='x', padx=12, pady=(0,8))
         tk.Label(out_row, text='Output:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
@@ -10173,38 +10862,73 @@ sys.exit(main())
         top.pack(fill='x', padx=0, pady=0)
 
         self.censor_deep_var = tk.BooleanVar(value=False)
+        self.censor_video_var = tk.StringVar()  # kept for compat
 
-        # Row 1: Video in + Output + style all on one line
-        r1 = tk.Frame(top, bg=BG2); r1.pack(fill='x', padx=8, pady=(8,3))
+        # ── Video queue (multi-file, matches Music Removal layout) ────────────
+        sec_vid = tk.Frame(top, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
+        sec_vid.pack(fill='x', padx=8, pady=(8,4))
+        sec_inner = tk.Frame(sec_vid, bg=BG2); sec_inner.pack(fill='x', padx=12, pady=(8,4))
 
-        # Input video
-        tk.Label(r1, text='Video:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
-        self.censor_video_var = tk.StringVar()
-        vf = tk.Frame(r1, bg=BG3); vf.pack(side='left', fill='x', expand=True, padx=(3,6))
-        tk.Entry(vf, textvariable=self.censor_video_var, font=FONT_SMALL,
-                 bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
-                 ).pack(side='left', fill='x', expand=True)
-        tk.Button(vf, text='...', font=FONT_SMALL, bg=BG2, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=5,
-                  command=lambda: self.censor_video_var.set(
-                      filedialog.askopenfilename(
-                          filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')]
-                      ) or self.censor_video_var.get())
-                  ).pack(side='right')
-        tk.Button(r1, text='📋', font=FONT_SMALL, bg=BG2, fg=ACCENT2,
-                  relief='flat', bd=0, cursor='hand2', padx=4,
-                  command=lambda: self.censor_video_var.set(self.v_video.get())
-                  ).pack(side='left')
+        q_hdr2 = tk.Frame(sec_inner, bg=BG2); q_hdr2.pack(fill='x', pady=(0,4))
+        tk.Label(q_hdr2, text='Videos:', font=FONT_SMALL, fg=FG2, bg=BG2, width=8, anchor='w').pack(side='left')
+        tk.Label(q_hdr2, text='paste paths or use Browse — one per line',
+                 font=('Segoe UI',7), fg=FG2, bg=BG2).pack(side='left')
+
+        qvf = tk.Frame(sec_inner, bg=BG3, highlightbackground=BORDER, highlightthickness=1)
+        qvf.pack(fill='x', pady=(0,4))
+        self.censor_queue_box = tk.Text(qvf, font=('Segoe UI', 7), bg=BG3, fg=FG,
+                                        insertbackground=ACCENT, relief='flat', bd=4,
+                                        wrap='none', height=4)
+        _cqs = tk.Scrollbar(qvf, command=self.censor_queue_box.yview)
+        _cqs.pack(side='right', fill='y')
+        self.censor_queue_box.pack(fill='both', expand=True)
+        self.censor_queue_box.config(yscrollcommand=_cqs.set)
+
+        cqb = tk.Frame(sec_inner, bg=BG2); cqb.pack(fill='x', pady=(0,4))
+        def _censor_browse_multi2():
+            files = filedialog.askopenfilenames(
+                title='Select videos to censor',
+                filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')])
+            for f in files:
+                cur = self.censor_queue_box.get('1.0','end').strip()
+                if f not in cur:
+                    self.censor_queue_box.insert('end', f'\n{f}' if cur else f)
+            _censor_q_count()
+        def _censor_add_clipfinder2():
+            v = self.v_video.get().strip()
+            if not v: return
+            cur = self.censor_queue_box.get('1.0','end').strip()
+            if v not in cur:
+                self.censor_queue_box.insert('end', f'\n{v}' if cur else v)
+            _censor_q_count()
+        def _censor_q_count(*_):
+            lines = [l.strip() for l in self.censor_queue_box.get('1.0','end').splitlines() if l.strip()]
+            self._censor_set_status(f'{len(lines)} video(s) queued' if lines else 'Queue empty.')
+        def _censor_clear_q2():
+            self.censor_queue_box.delete('1.0','end')
+            _censor_q_count()
+        self.censor_queue_box.bind('<KeyRelease>', _censor_q_count)
+
+        tk.Button(cqb, text='📂 Browse Multiple', font=FONT_SMALL,
+                  bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=_censor_browse_multi2).pack(side='left', padx=(0,4))
+        tk.Button(cqb, text='📋 Use Clip Finder Video', font=FONT_SMALL,
+                  bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=_censor_add_clipfinder2).pack(side='left', padx=(0,4))
+        tk.Button(cqb, text='🗑 Clear', font=FONT_SMALL,
+                  bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=_censor_clear_q2).pack(side='left')
 
         # Output folder
-        tk.Label(r1, text='Out:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left', padx=(6,0))
-        of = tk.Frame(r1, bg=BG3); of.pack(side='left', fill='x', expand=True, padx=(3,0))
+        out_row2 = tk.Frame(sec_vid, bg=BG2); out_row2.pack(fill='x', padx=12, pady=(0,8))
+        tk.Label(out_row2, text='Output:', font=FONT_SMALL, fg=FG2, bg=BG2, width=8, anchor='w').pack(side='left')
+        of2 = tk.Frame(out_row2, bg=BG3); of2.pack(side='left', fill='x', expand=True)
         self.censor_out_var = tk.StringVar(value=self.cfg.get('censor_outdir', str(Path.home()/'Downloads')))
-        tk.Entry(of, textvariable=self.censor_out_var, font=FONT_SMALL,
+        tk.Entry(of2, textvariable=self.censor_out_var, font=FONT_SMALL,
                  bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
                  ).pack(side='left', fill='x', expand=True)
-        tk.Button(of, text='...', font=FONT_SMALL, bg=BG2, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=5,
+        tk.Button(of2, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
+                  relief='flat', bd=0, cursor='hand2', padx=6,
                   command=lambda: self.censor_out_var.set(
                       filedialog.askdirectory() or self.censor_out_var.get())
                   ).pack(side='right')
@@ -10265,12 +10989,7 @@ sys.exit(main())
                                        activebackground=ACCENT2,
                                        command=self._censor_start)
         self.censor_go_btn.pack(side='left', padx=(0,4))
-        tk.Button(r2, text='➕ Queue', font=FONT_SMALL,
-                  bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
-                  command=self._censor_add_queue).pack(side='left', padx=(0,4))
-        tk.Button(r2, text='▶ Run Queue', font=FONT_SMALL,
-                  bg=GREEN, fg='#000', relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
-                  command=self._censor_run_queue).pack(side='left')
+
 
         tk.Frame(top, bg=BORDER, height=1).pack(fill='x')
 
@@ -10308,17 +11027,7 @@ sys.exit(main())
         _make_scrollbar(wlw, self.censor_word_box)
         self.censor_word_box.insert('1.0', chr(10).join(self._censor_words))
 
-        # Queue listbox below word list
-        tk.Label(wl_frame, text='QUEUE', font=('Segoe UI', 8,'bold'),
-                 fg=ACCENT, bg=BG).pack(anchor='w', padx=8, pady=(4,1))
-        qw = tk.Frame(wl_frame, bg=BG3); qw.pack(fill='x', padx=8, pady=(0,4))
-        self.censor_queue_lb = tk.Listbox(qw, font=('Segoe UI', 7), bg=BG3, fg=FG2,
-                                           selectbackground=ACCENT, selectforeground='#000',
-                                           relief='flat', bd=4, height=3, activestyle='none')
-        self.censor_queue_lb.pack(fill='x')
-        tk.Button(wl_frame, text='🗑 Clear queue', font=FONT_SMALL,
-                  bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', pady=3,
-                  command=self._censor_clear_queue).pack(fill='x', padx=8, pady=(0,4))
+
 
         self.censor_status = tk.Label(wl_frame, text='Ready.',
                                       font=FONT_SMALL, fg=FG2, bg=BG,
@@ -10381,37 +11090,35 @@ sys.exit(main())
         if not vid or not Path(vid).exists():
             messagebox.showerror('No file', 'Select a valid video file first.')
             return
-        self._censor_queue.append(vid)
-        self.censor_queue_lb.insert('end', Path(vid).name)
-        self._censor_set_status(f'{len(self._censor_queue)} video(s) in queue.')
+        current = self.censor_queue_box.get('1.0','end').strip()
+        if vid not in current:
+            if current:
+                self.censor_queue_box.insert('end', f'\n{vid}')
+            else:
+                self.censor_queue_box.insert('end', vid)
+        lines = [l.strip() for l in self.censor_queue_box.get('1.0','end').splitlines() if l.strip()]
+        self._censor_set_status(f'{len(lines)} video(s) in queue.')
 
     def _censor_clear_queue(self):
-        self._censor_queue.clear()
-        self.censor_queue_lb.delete(0, 'end')
+        self.censor_queue_box.delete('1.0','end')
         self._censor_set_status('Queue cleared.')
 
     def _censor_start(self):
         if self._censor_running: return
-        vid = self.censor_video_var.get().strip()
-        if not vid or not Path(vid).exists():
-            messagebox.showerror('No file', 'Select a valid video file.')
+        # Read from queue box — same as run queue
+        lines = [l.strip() for l in self.censor_queue_box.get('1.0','end').splitlines() if l.strip()]
+        videos = [l for l in lines if Path(l).exists()]
+        if not videos:
+            messagebox.showerror('No videos', 'Add at least one valid video to the queue.')
             return
         self._censor_save_words()
         self._censor_running = True
         self.censor_go_btn.config(state='disabled', text='⏳  Processing...')
-        self._censor_set_status('Starting...')
-        threading.Thread(target=self._censor_run, args=([vid],), daemon=True).start()
+        self._censor_set_status(f'Processing {len(videos)} video(s)...')
+        threading.Thread(target=self._censor_run, args=(videos,), daemon=True).start()
 
     def _censor_run_queue(self):
-        if self._censor_running: return
-        if not self._censor_queue:
-            messagebox.showwarning('Empty', 'Add videos to queue first.')
-            return
-        self._censor_save_words()
-        self._censor_running = True
-        self.censor_go_btn.config(state='disabled')
-        videos = list(self._censor_queue)
-        threading.Thread(target=self._censor_run, args=(videos,), daemon=True).start()
+        self._censor_start()  # unified — both buttons do the same thing now
 
     def _censor_run(self, video_list):
         try:
@@ -10465,8 +11172,14 @@ sys.exit(main())
                     # whisper.cpp doesn't return word-level timestamps in its JSON output
                     self.log(f'[Censor] Using faster-whisper (word timestamps required)')
                     try:
-                        _FW = _fresh_import('faster_whisper').WhisperModel
-                        _fwc = _FWC(_censor_model, device='cpu', compute_type='int8')
+                        _FW = _fresh_import('faster_whisper').WhisperModel  # fix: was _FWC (typo)
+                        # Respect GPU toggle — same as main transcription
+                        _cen_use_gpu = getattr(self, 'v_use_gpu_whisper', None)
+                        _cen_use_gpu = _cen_use_gpu.get() if _cen_use_gpu else True
+                        _cen_dev, _cen_compute, _cen_dev_label = _detect_whisper_device(use_gpu=_cen_use_gpu)
+                        self.log(f'[Censor] Device: {_cen_dev_label}')
+                        _fwc = _FW(_censor_model, device=_cen_dev, compute_type=_cen_compute,
+                                   download_root=str(_app_path('whisper_models')))
                         # Extract audio first
                         import tempfile as _tmpc
                         _wav_tmp = str(Path(_tmpc.gettempdir()) / 'cf_censor_fw.wav')
@@ -10487,7 +11200,7 @@ sys.exit(main())
                         result = {'segments': _segs, 'language': _info.language}
                         try: Path(_wav_tmp).unlink()
                         except: pass
-                        self.log(f'[Censor] faster-whisper done: {len(_segs)} segs')
+                        self.log(f'[Censor] faster-whisper done: {len(_segs)} segs with word timestamps')
                     except Exception as _fwe:
                         self.log(f'[Censor] faster-whisper failed ({_fwe}), falling back to whisper.cpp')
                         result = _do_transcribe(vid, _censor_model,
@@ -10848,7 +11561,7 @@ if __name__ == '__main__':
         _CNW = 0x08000000
         _flag  = USER_DIR / 'pending_update.flag'
         _stamp = USER_DIR / 'install_done.stamp'
-        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools')]
+        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs')]
         _force = _flag.exists() or not _stamp.exists()
         if not _force:
             _miss = []

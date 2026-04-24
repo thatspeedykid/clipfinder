@@ -122,3 +122,67 @@
 
 ### 🐛 Fixes
 - fonttools import detection fixed (fontTools capital T)
+
+---
+
+## v1.3.4 — Current Release
+*April 2026*
+
+### ⚡ Parallel AI Processing
+- Transcript now split across every available API key simultaneously — each key handles its own section in parallel
+- Short transcripts: race mode (all primaries compete, first wins)
+- Long transcripts: extra keys unlock proportionally (~150 lines/worker)
+- Gemini cooldown fixed: 90s for RPM limit, escalates to 60min only on repeat 429
+- OpenRouter model-level 429: skips dead model, tries next immediately
+- Live rate-limit countdown in Settings provider dots
+- Key pool always logged: `Key pool: X total, Y ready, Z on cooldown`
+
+### 📝 Transcript Tab
+- Split into sub-tabs: Transcript & Tweet | Burn Subtitles (Beta)
+- Tweet generator: single Generate produces 3 options (Drama / Viral / Thread opener)
+- Each tweet option in its own tab, independently editable with char counter
+- Smarter hashtags — reads transcript for names, never generates irrelevant gaming tags
+
+### 🔤 Burn Subtitles (Beta)
+- New sub-tab — transcribe and burn from one place, no switching tabs
+- Word-level Whisper timestamps for accurate sync
+- Pause detection — subtitles clear during silence
+- Karaoke word-highlight mode
+- Font, color, outline, background, position, 5 style presets
+- TikTok preset: 3 words at a time
+- Live preview from real video frame
+
+### ⬇️ Downloader
+- Single URL field removed — one DOWNLOAD LINKS text area, paste multiple URLs
+- One Download All button (removed duplicate Download Queue)
+
+### 🔇 Censor + 🎵 Music Removal
+- Both tabs: multi-file text area with Browse Multiple and Use Clip Finder Video
+- Music Removal: fixed stuck-at-starting bug (thread was never started)
+- MOV/MKV/AVI: now re-encodes video stream instead of failing with -c:v copy
+
+### 🖼 Thumbnail Finder (Beta)
+- DuckDuckGo image search via ddgs — zero setup, no API key, finds real people
+- Image Type selector: Portrait/solo · Group photo · Stream screenshot · Any
+- Portrait mode uses tall layout + headshot query bias
+- Stock photos mode uses Unsplash (optional free key)
+- Quality toggle: HD / SD
+
+### 💾 Session Save/Load
+- Save/Load session buttons in Clip Finder export bar
+- Saves all clips to clipfinder_session.json in AppData
+
+### 🐛 Fixes
+- self.log() 4-arg crash (merge conflict)
+- fonttools detection (fontTools capital T)
+- GPU duration showing 0s (ffprobe-style flags with ffmpeg binary)
+- Gemini key rotation not working (all keys got 30-40min cooldown on first 429)
+- OpenRouter NoneType crash on empty choices response
+- MKV/MOV export producing 0kb files
+- Music Removal stuck at "starting..." forever
+- Subtitle preview FileNotFoundError (ffprobe not in bundle)
+- Duplicate Download buttons
+- Whisper GPU=False now explains why
+
+### 📦 Dependencies
+- Added: ddgs (DuckDuckGo image search)
