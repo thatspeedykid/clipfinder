@@ -1,5 +1,5 @@
 # ✂ ClipFinder
-### AI Drama Clip Extractor — v1.3.4
+### AI Drama Clip Extractor — v1.3.5
 
 > Built by [@MarsScumbags](https://x.com/MarsScumbags) for the streaming & drama clip game.  
 > Find, cut, censor, and export viral clips from any VOD — fully automated, locally run, free AI.
@@ -8,18 +8,19 @@
 
 ## 🚀 What It Does
 
-- **⚡ Parallel AI Clip Finding** — splits your transcript across every API key simultaneously, each key analyses its own section in parallel. 2–5× faster with multiple keys.
+- **⚡ Parallel AI Clip Finding** — splits transcript across every API key simultaneously. More keys = faster results.
+- **📺 YouTube 1080p Downloads** — bgutil PO token plugin handles YouTube's restrictions automatically
 - **🎙 GPU Transcription** — whisper.cpp (AMD/Intel Vulkan ⚡) or faster-whisper (NVIDIA CUDA ⚡)
 - **✂ One-Click Export** — 16:9, 9:16 vertical, or both with GPU encoding
 - **🔄 Auto Edit** — silence removal with word-boundary cuts
 - **🎵 Music Removal** — Demucs AI stem separation, fully local, multi-file queue
 - **🔇 Word Censor** — bleeps/silences banned words, multi-file queue
-- **⬇ Batch Downloader** — paste multiple URLs, downloads in order (YouTube, Twitch, Twitter/X, Kick, TikTok)
-- **🐦 Tweet Generator** — 3 different tweet options from your transcript (Drama / Viral / Thread opener)
-- **🔤 Burn Subtitles** *(Beta)* — burn captions onto video with word-level sync, karaoke mode, style presets
-- **🖼 Thumbnail Finder** *(Beta)* — DuckDuckGo image search, finds real streamer/celeb photos, no API key needed
-- **💾 Session Save/Load** — save and restore clip sessions without re-analysing
-- **🎨 Image Studio** — duplicate finder + Real-ESRGAN upscaler
+- **⬇ Batch Downloader** — paste multiple URLs (YouTube, Twitch, Twitter/X, Kick, TikTok)
+- **🐦 Tweet Generator** — 3 tweet options from transcript (Drama / Viral / Thread)
+- **🔤 Burn Subtitles** *(Beta)* — word-level sync, karaoke mode, style presets
+- **🖼 Thumbnail Finder** *(Beta)* — DuckDuckGo image search, finds real streamer/celeb photos, no API key
+- **💾 Session Save/Load** — restore clip sessions without re-analysing
+- **🔁 Auto-Updater** — app updates itself in one click, no new installer needed
 
 ---
 
@@ -28,7 +29,7 @@
 1. Download `ClipFinder-Setup.exe` from [Releases](https://github.com/thatspeedykid/clipfinder/releases/latest)
 2. Run it — installs to `AppData\Local\ClipFinder\`
 3. Launch ClipFinder
-4. **First launch** — orange splash screen auto-installs all required packages. Takes 2–5 min. Once only.
+4. **First launch** — orange splash auto-installs all packages including YouTube PO token plugin + portable Node.js. Takes 3–6 min. Once only.
 5. Go to **Settings → AI Provider API Keys** and add at least one free key
 6. Go to **Settings → Core Dependencies** and install **ffmpeg** + **whisper.cpp**
 
@@ -45,19 +46,29 @@
 | OpenRouter | 200+ req/day | Clip finding & tweets | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | Unsplash | 50 req/hr | Thumbnail stock mode only | [unsplash.com/developers](https://unsplash.com/oauth/applications) |
 
-**Pro tip:** Add 2–3 keys per provider via the ＋ button in Settings. ClipFinder splits the transcript across all your keys in parallel — more keys = faster results and less load per key.
+**Pro tip:** Add 2–3 keys per provider via the ＋ button in Settings. ClipFinder splits the transcript across all keys in parallel.
 
 ---
 
 ## ⚡ How Parallel AI Works
 
-ClipFinder splits your video transcript across every available API key at the same time:
-
 - **Short clips** → race mode: all primary keys get the same chunk, first response wins
-- **Long VODs** → split mode: each key handles its own section of the transcript simultaneously
-- Results from all keys are merged and deduplicated at the end
+- **Long VODs** → split mode: each key handles its own section simultaneously
+- Results merged and deduplicated at the end
 
-With 3 Gemini + 2 Groq + 1 OpenRouter = **6 workers running in parallel**. Much faster, much less rate-limit stress per key.
+3 Gemini + 2 Groq + 1 OpenRouter = **6 workers in parallel**.
+
+---
+
+## 📺 YouTube 1080p
+
+YouTube requires PO tokens since 2024. ClipFinder handles this automatically:
+
+1. First launch installs `bgutil-ytdlp-pot-provider` plugin
+2. Downloads portable Node.js v20 to AppData (no system install, no admin rights)
+3. Plugin hooks into yt-dlp silently — all YouTube downloads get proper 1080p+ quality
+
+No configuration needed.
 
 ---
 
@@ -68,8 +79,7 @@ With 3 Gemini + 2 Groq + 1 OpenRouter = **6 workers running in parallel**. Much 
 | **OS** | Windows 10/11 64-bit |
 | **RAM** | 4GB min · 8GB recommended |
 | **GPU** | Optional — AMD RX 5000+, NVIDIA, Intel Arc |
-| **Disk** | ~500MB app + packages download on first run |
-| **Internet** | Required on first launch to download packages |
+| **Disk** | ~500MB app + packages on first run |
 
 ---
 
@@ -82,14 +92,11 @@ With 3 Gemini + 2 Groq + 1 OpenRouter = **6 workers running in parallel**. Much 
 | Intel Arc | whisper.cpp Vulkan ⚡ | h264_qsv |
 | CPU fallback | faster-whisper int8 | libx264 |
 
-GPU transcription requires **whisper.cpp** — install via Settings → Core Dependencies.
-
 ---
 
 ## 🔄 Keeping Updated
 
-Settings → Update Modules → **Update All Packages** → restart.  
-The app checks for new versions automatically and shows a banner when one is available.
+When a new version is available, an orange banner appears at the bottom of the app. Click **⬇ Download Now** — the app updates itself automatically and relaunches.
 
 ---
 

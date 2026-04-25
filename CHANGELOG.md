@@ -2,6 +2,63 @@
 
 ---
 
+## v1.3.5 — Current Release
+*April 2026*
+
+### ⚡ In-App Auto-Updater
+- "Download Now" in update banner downloads new clipfinder.py directly from GitHub
+- Verifies file is valid Python before replacing anything
+- Sets .force_install flag so splash runs for new packages on relaunch
+- Progress popup with status — "Open in Browser" button kept as fallback
+
+### 📺 YouTube 1080p
+- yt-dlp updated to 2026.3.17
+- bgutil-ytdlp-pot-provider PO token plugin auto-installed at first launch
+- Portable Node.js v20 auto-downloaded to AppData (no system install needed)
+- Downloads now return format=303+251 (1080p VP9) instead of format=18 (360p)
+
+### ⬇️ Download Quality
+- Platform-specific strategies: Twitch chunked, TikTok bytevc1 no-watermark, Twitter/X with cookie guide
+- Each failed attempt logs why it failed and what client it's trying next
+- ✅ Got: 1080p format=303+251 logged on success
+
+### 🍪 Browser Cookie Auto-Extract
+- Settings → Cookies: browser dropdown (Chrome/Firefox/Edge/Brave/Opera/Safari)
+- yt-dlp reads cookies directly from browser database — no extension needed
+- Works for YouTube HD, Kick, Twitter/X
+
+### 🎤 Interview Mode
+- Fixed silent crash on Find Clips (was calling missing interview_names_box)
+- Removed redundant second names box — uses Names: field for both modes
+- AI reads speaker names from video filename automatically
+- Interview prompt updated to infer names from title/transcript if field blank
+
+### 🖼 Thumbnail Finder
+- DuckDuckGo image search (ddgs) — zero setup, finds real streamers/celebs
+- Image Type: Portrait/solo · Group photo · Stream screenshot · Any
+- Portrait mode: headshot query bias + tall layout filter
+- Stock mode uses Unsplash (optional key)
+- HD/SD quality toggle
+
+### ✂ Clip Finder UI
+- Clips default to unchecked — user picks what to export
+- Select All / Deselect All split into two separate orange buttons
+- Transcribe Only button removed from Clip Finder tab
+
+### 🐛 Fixes
+- Gemini JSON parse error on object-wrapped or preamble responses
+- AI hallucinating "Mizkif" from hardcoded example in prompt
+- Interview mode silent crash on Find Clips
+- bgutil showing gray in Settings (underscore vs dash key mismatch)
+- YouTube cookiefile being stripped from every attempt
+- Pillow broken install detection (PIL.Image check instead of PIL)
+- X/Twitter 403 now shows clear 4-step cookie fix guide
+
+### 📦 Dependencies
+- Added: ddgs, bgutil-ytdlp-pot-provider, portable Node.js v20
+
+---
+
 ## v1.3.4 — Current Release
 *April 2026*
 

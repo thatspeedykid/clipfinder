@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 
 import subprocess
 import sys
@@ -198,6 +198,16 @@ def _ensure_pkgs_on_path():
     # Version mismatch detection removed — packages installed by setup_build.py are always correct
 
 _ensure_pkgs_on_path()  # run immediately at import time
+
+# Add portable Node.js to PATH if installed
+def _ensure_node_on_path():
+    import os as _os3
+    _node_exe = USER_DIR / 'node' / 'node.exe'
+    if _node_exe.exists():
+        _nd = str(_node_exe.parent)
+        if _nd not in _os3.environ.get('PATH', ''):
+            _os3.environ['PATH'] = _nd + _os3.pathsep + _os3.environ.get('PATH', '')
+_ensure_node_on_path()
 
 def _run_pip_safe(packages):
     """Install packages to PKGS_DIR using Python 3.12 (matches EXE runtime)."""
@@ -495,6 +505,80 @@ def ensure_ffmpeg():
     return 'ffmpeg'
 
 
+def ensure_nodejs():
+    """Auto-download portable Node.js if not found. Returns path to node.exe."""
+    import shutil as _sh, zipfile as _zf, tempfile as _tf, urllib.request as _ur
+    # Check if already on PATH
+    node = _sh.which('node')
+    if node:
+        return node
+    # Check our own install location
+    node_dir = USER_DIR / 'node'
+    node_exe = node_dir / 'node.exe'
+    if node_exe.exists():
+        return str(node_exe)
+    import platform as _pl
+    if _pl.system() != 'Windows':
+        print('Please install Node.js: https://nodejs.org')
+        return None
+    print('Node.js not found — downloading portable version...')
+    node_dir.mkdir(parents=True, exist_ok=True)
+    # Node.js portable zip for Windows x64
+    url = 'https://nodejs.org/dist/v20.19.0/node-v20.19.0-win-x64.zip'
+    zip_path = Path(_tf.gettempdir()) / 'node_dl.zip'
+    print('Downloading Node.js (~30MB)...')
+    _ur.urlretrieve(url, zip_path)
+    with _zf.ZipFile(zip_path, 'r') as z:
+        for name in z.namelist():
+            # Extract just node.exe from the zip root folder
+            if name.endswith('/node.exe') and name.count('/') == 1:
+                with z.open(name) as s, open(node_exe, 'wb') as d:
+                    d.write(s.read())
+                break
+    zip_path.unlink(missing_ok=True)
+    if node_exe.exists():
+        print(f'Node.js downloaded to {node_exe}')
+        return str(node_exe)
+    return None
+
+
+def ensure_bgutil(status_cb=None):
+    """Install bgutil-ytdlp-pot-provider plugin + portable Node.js for YouTube 1080p."""
+    import sys as _sys, subprocess as _sp
+    import shutil as _sh
+
+    def _log(msg):
+        print(msg)
+        if status_cb: status_cb(msg)
+
+    # 1. Ensure Node.js is available
+    node_path = ensure_nodejs()
+    if node_path:
+        _log(f'✅ Node.js: {node_path}')
+        # Add node dir to PATH for this session so bgutil can find it
+        import os as _os
+        node_dir = str(Path(node_path).parent)
+        if node_dir not in _os.environ.get('PATH', ''):
+            _os.environ['PATH'] = node_dir + _os.pathsep + _os.environ.get('PATH', '')
+    else:
+        _log('⚠ Node.js unavailable — YouTube may be limited to 720p')
+
+    # 2. Install the pip plugin
+    try:
+        _r = _sp.run(
+            [_sys.executable, '-m', 'pip', 'install', 'bgutil-ytdlp-pot-provider',
+             '--target', str(PKGS_DIR), '-q', '--upgrade'],
+            capture_output=True, text=True)
+        if _r.returncode == 0:
+            _log('✅ bgutil-ytdlp-pot-provider installed')
+        else:
+            _log(f'⚠ bgutil install warning: {_r.stderr[-200:]}')
+    except Exception as e:
+        _log(f'⚠ bgutil install error: {e}')
+
+    _ensure_pkgs_on_path()
+
+
 # ── Now safe to import everything ─────────────────────────────────────────────
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -629,7 +713,8 @@ Every clip must make sense to someone who has NEVER seen this stream.
 - shareability: Would people send this to their group chat?
 - score (1-10): Only output clips scoring 7+. Be strict.
 
-TITLE: News headline style — "Mizkif admits the prank went too far" not "Funny clip"
+TITLE: News headline style — "She admits the prank went too far" not "Funny clip" — use REAL names from the transcript, never invent names.
+If a VIDEO TITLE is provided, extract the names of people mentioned in it and use those names in titles and descriptions when those people speak.
 
 LENGTH CHECK: Before outputting, verify each clip is between 60-160 seconds.
 Calculate: convert end and start to seconds, subtract. If under 60s, extend or drop it.
@@ -659,6 +744,7 @@ INTERVIEW_CLIP_PROMPT = """You are an expert clip editor for a drama/streaming T
 This is an interview transcript. The interviewer asks questions and names people directly (e.g. "Hey Sophie, what do you think about...").
 
 Interviewees in this interview: {names}
+If names above are blank or "Unknown", extract the names of people being interviewed from the VIDEO TITLE if provided, or infer names from the transcript itself (e.g. when the interviewer says "So [Name], tell me about...").
 
 Your job:
 1. Identify which person is speaking in each segment based on who was just addressed by the interviewer
@@ -1787,7 +1873,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.3.4 — AI Clip Extractor')
+        self.title('ClipFinder 1.3.5 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -1900,6 +1986,7 @@ class App(tk.Tk):
         self.v_dl_folder   = tk.StringVar(value=self.cfg.get('dl_folder', str(Path.home() / 'Downloads')))
         self.v_dl_quality  = tk.StringVar(value=self.cfg.get('dl_quality', 'best'))
         self.v_cookies     = tk.StringVar(value=self.cfg.get('cookies_file', ''))
+        self.v_cookies_browser = tk.StringVar(value=self.cfg.get('cookies_browser', ''))
         self.v_auto_load   = tk.BooleanVar(value=self.cfg.get('auto_load', True))
         self._last_dl_path = None
         self._dl_cancel_requested = False
@@ -1979,12 +2066,20 @@ class App(tk.Tk):
                                 text=f'⬆  ClipFinder v{_latest} available  —  you have v{APP_VERSION}',
                                 font=('Segoe UI',9,'bold'), fg='#00ff88', bg='#1e3a1e'
                                 ).pack(side='left', padx=14)
+                        def _do_auto_update(_v=_latest, _d=_data):
+                            _uw.destroy()
+                            self._apply_auto_update(_v, _d)
                         tk.Button(_uw, text='⬇ Download Now', font=('Segoe UI',8,'bold'),
                                  bg=ACCENT, fg='#000', relief='flat', bd=0,
                                  cursor='hand2', padx=10, pady=6,
+                                 command=_do_auto_update
+                                 ).pack(side='left', padx=6)
+                        tk.Button(_uw, text='Open in Browser', font=('Segoe UI',8),
+                                 bg='#1e3a1e', fg='#00ff88', relief='flat', bd=0,
+                                 cursor='hand2', padx=8, pady=6,
                                  command=lambda: __import__('webbrowser').open(
                                      'https://github.com/thatspeedykid/clipfinder/releases/latest')
-                                 ).pack(side='left', padx=6)
+                                 ).pack(side='left', padx=2)
                         tk.Button(_uw, text='✕', font=('Segoe UI',10,'bold'),
                                  fg='#00ff88', bg='#1e3a1e', relief='flat', bd=0,
                                  cursor='hand2', padx=12,
@@ -2889,10 +2984,6 @@ class App(tk.Tk):
         tk.Frame(r4, bg=BORDER, width=1).pack(side='left', fill='y', padx=10)
 
         # Action buttons on the right
-        self.trans_btn = tk.Button(r4, text='📝 Transcribe Only', font=FONT_SMALL,
-                                   bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2',
-                                   padx=10, pady=5, command=self._transcribe_only)
-        self.trans_btn.pack(side='right', padx=(4,0))
         self.go_btn = tk.Button(r4, text='▶  FIND CLIPS',
                                 font=('Segoe UI', 10,'bold'), bg=ACCENT, fg='#000',
                                 relief='flat', bd=0, cursor='hand2', padx=16, pady=5,
@@ -2909,9 +3000,9 @@ class App(tk.Tk):
         # ── Mode-specific panels ───────────────────────────────────────────────
         self.interview_frame = tk.Frame(ctrl, bg=BG2)
         self.interview_frame.pack(fill='x', padx=10)
-        ir = tk.Frame(self.interview_frame, bg=BG2); ir.pack(fill='x', pady=(0,5))
-        tk.Label(ir, text='📝 Names field above — add speaker names in the Names: box',
-                font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left', padx=4)
+        tk.Label(self.interview_frame,
+                 text='📝 Enter speaker names in the Names: field above (top right)',
+                 font=('Segoe UI', 8), fg=ACCENT2, bg=BG2).pack(anchor='w', padx=4, pady=(2,4))
 
         self.auto_frame = tk.Frame(ctrl, bg=BG2)
         self.auto_frame.pack(fill='x', padx=10)
@@ -2956,22 +3047,6 @@ class App(tk.Tk):
         hdr = tk.Frame(p, bg=BG); hdr.pack(fill='x', padx=8, pady=(4,0))
         tk.Label(hdr, text='AI CLIP SUGGESTIONS', font=('Segoe UI', 9,'bold'),
                  fg=ACCENT, bg=BG).pack(side='left')
-        # Select All / Deselect All toggle
-        self._sel_all_state = tk.BooleanVar(value=False)
-        def _toggle_select_all():
-            new_state = not self._sel_all_state.get()
-            self._sel_all_state.set(new_state)
-            if new_state:
-                self._select_all()
-                _sel_btn.config(text='☐ Deselect All')
-            else:
-                for v in self.clip_vars: v.set(False)
-                _sel_btn.config(text='☑ Select All')
-        _sel_btn = tk.Button(hdr, text='☑ Select All', font=FONT_SMALL, bg=BG, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2',
-                  command=_toggle_select_all)
-        _sel_btn.pack(side='right')
-
         # Export action bar — LEFT: autocut + format toggles + censor | RIGHT: export button
         exp_bar = tk.Frame(p, bg=BG); exp_bar.pack(fill='x', padx=8, pady=(2,4))
 
@@ -3022,7 +3097,19 @@ class App(tk.Tk):
                   activebackground=ACCENT2,
                   command=self._export_or_censor).pack(side='right', padx=(6,0))
 
-        # Save / Load session buttons — right of export
+        # Select / Deselect All — right of export bar, orange text
+        def _deselect_all():
+            for v in self.clip_vars: v.set(False)
+        def _select_all_clips():
+            for v in self.clip_vars: v.set(True)
+        tk.Button(exp_bar, text='☐ Deselect All', font=FONT_SMALL, bg=BG, fg=ACCENT,
+                  relief='flat', bd=0, cursor='hand2',
+                  command=_deselect_all).pack(side='right', padx=(0,4))
+        tk.Button(exp_bar, text='☑ Select All', font=FONT_SMALL, bg=BG, fg=ACCENT,
+                  relief='flat', bd=0, cursor='hand2',
+                  command=_select_all_clips).pack(side='right', padx=(0,4))
+
+        # Save / Load session buttons
         tk.Button(exp_bar, text='💾 Save Session', font=FONT_SMALL,
                   bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10, pady=5,
                   command=self._save_session).pack(side='right', padx=(0,4))
@@ -3830,9 +3917,7 @@ class App(tk.Tk):
     def _show_empty(self):
         for w in self.clip_frame.winfo_children():
             w.destroy()
-        # Reset select all toggle
-        if hasattr(self, '_sel_all_state'):
-            self._sel_all_state.set(False)
+        # Clips rendered — nothing selected by default
         tk.Label(self.clip_frame,
                  text='\n  Click ▶ FIND CLIPS to analyze your video.\n',
                  font=FONT_MONO_S, fg=FG2, bg=BG3).pack(pady=20, padx=10)
@@ -4202,6 +4287,97 @@ class App(tk.Tk):
         else: self.after(0, _do)
 
     # ── Validation ────────────────────────────────────────────────────────────
+    def _apply_auto_update(self, new_version, release_data):
+        """Download new clipfinder.py from GitHub and relaunch."""
+        import urllib.request as _ur3, threading as _thr3, sys as _sys3, os as _os3
+
+        # Progress popup
+        _pw = tk.Toplevel(self)
+        _pw.title('Updating ClipFinder...')
+        _pw.geometry('420x160')
+        _pw.resizable(False, False)
+        _pw.configure(bg=BG)
+        _pw.grab_set()
+        tk.Label(_pw, text=f'⬇  Updating to ClipFinder v{new_version}',
+                 font=('Segoe UI', 11, 'bold'), fg=ACCENT, bg=BG).pack(pady=(20,8))
+        _status_var = tk.StringVar(value='Finding download URL...')
+        tk.Label(_pw, textvariable=_status_var, font=FONT_SMALL, fg=FG2, bg=BG).pack()
+        from tkinter import ttk as _ttk
+        _pb = _ttk.Progressbar(_pw, mode='indeterminate', length=340)
+        _pb.pack(pady=12); _pb.start(12)
+
+        def _run_update():
+            try:
+                # Find clipfinder.py asset in release
+                assets = release_data.get('assets', [])
+                py_url = None
+                for a in assets:
+                    if a.get('name','').lower() == 'clipfinder.py':
+                        py_url = a.get('browser_download_url')
+                        break
+                # Fallback: raw from main branch tag
+                if not py_url:
+                    tag = release_data.get('tag_name', f'v{new_version}')
+                    py_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{tag}/clipfinder.py'
+
+                _pw.after(0, lambda: _status_var.set(f'Downloading clipfinder.py from {tag}...'))
+
+                # Download to temp file first
+                _tmp = USER_DIR / '_update_pending.py'
+                _ur3.urlretrieve(py_url, _tmp)
+
+                # Verify it's a valid Python file
+                _pw.after(0, lambda: _status_var.set('Verifying download...'))
+                import ast as _ast3
+                with open(_tmp, 'r', encoding='utf-8') as _f:
+                    _src = _f.read()
+                _ast3.parse(_src)  # raises SyntaxError if bad
+
+                # Quick sanity check — must contain APP_VERSION
+                if 'APP_VERSION' not in _src:
+                    raise ValueError('Downloaded file does not look like ClipFinder')
+
+                # Write a relaunch flag so the launcher knows to show splash
+                _flag = USER_DIR / '.force_install'
+                _flag.touch()
+
+                # Replace current file
+                _pw.after(0, lambda: _status_var.set('Installing update...'))
+                _current = Path(_sys3.argv[0])
+                # Handle both .py and .exe launcher scenarios
+                _py_target = USER_DIR / 'clipfinder.py'
+                if _py_target.exists():
+                    import shutil as _sh3
+                    _sh3.copy2(_tmp, _py_target)
+                else:
+                    _sh3.copy2(_tmp, _current)
+                _tmp.unlink(missing_ok=True)
+
+                _pw.after(0, lambda: _status_var.set('✅ Done! Relaunching...'))
+                _pw.after(1200, lambda: self._relaunch_app())
+
+            except Exception as _ue:
+                _pw.after(0, lambda: [
+                    _status_var.set(f'❌ Update failed: {_ue}'),
+                    _pb.stop(),
+                ])
+
+        _thr3.Thread(target=_run_update, daemon=True).start()
+
+    def _relaunch_app(self):
+        """Restart ClipFinder cleanly."""
+        import subprocess as _sp4, sys as _sys4, os as _os4
+        try:
+            _sp4.Popen([_sys4.executable, str(USER_DIR / 'clipfinder.py')],
+                       creationflags=0x00000008)  # DETACHED_PROCESS on Windows
+        except Exception:
+            try:
+                _sp4.Popen([_sys4.executable, _sys4.argv[0]])
+            except Exception:
+                pass
+        self.destroy()
+        _sys4.exit(0)
+
     def validate(self, need_ai=True, need_outdir=True):
         # Ensure pkgs/ is on path then check for whisper
         _ensure_pkgs_on_path()
@@ -4326,7 +4502,10 @@ class App(tk.Tk):
         if not self.validate(need_ai=True): return
         mode = self.app_mode.get()
         if mode == 'interview':
-            names = self.interview_names_box.get('1.0','end').strip()
+            # Read from v_names (the visible Names: field) — interview_names_box removed from clip finder tab
+            names = self.v_names.get().strip() if hasattr(self, 'v_names') else ''
+            _ph = 'Mizkif, xQc, HasanAbi...'
+            if names == _ph: names = ''
             self.cfg['interview_names'] = names
             save_cfg(self.cfg)
 
@@ -4695,6 +4874,19 @@ class App(tk.Tk):
         # Build prompt
         ctx_raw = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
         context_block = f'VIDEO CONTEXT: {ctx_raw}\n' if ctx_raw else ''
+
+        # Auto-extract video title from filename — helps AI know who's in the video
+        _vid_path = self.v_video.get().strip() if hasattr(self, 'v_video') else ''
+        _vid_title = ''
+        if _vid_path:
+            import re as _re2
+            _vid_title = Path(_vid_path).stem
+            # Strip common suffixes like "- ClipFinder", "- Part 1", timestamps
+            _vid_title = _re2.sub(r'\s*[-–]\s*ClipFinder.*$', '', _vid_title, flags=_re2.IGNORECASE)
+            _vid_title = _re2.sub(r'\s*[-–]\s*Part\s*\d+.*$', '', _vid_title, flags=_re2.IGNORECASE)
+            _vid_title = _re2.sub(r'\[.*?\]', '', _vid_title).strip()
+        if _vid_title:
+            context_block = f'VIDEO TITLE: {_vid_title}\n' + context_block
         _names_raw = ''
         if hasattr(self, 'v_names'):
             _nv = self.v_names.get().strip()
@@ -4711,9 +4903,14 @@ class App(tk.Tk):
         app_mode = self.app_mode.get() if hasattr(self,'app_mode') else 'normal'
         if app_mode == 'interview':
             _ph = 'Mizkif, xQc, HasanAbi...'
-            names = self.v_names.get().strip() if hasattr(self,'v_names') else ''
+            # Use the Names: field (top right of clip finder tab) — visible and familiar
+            names = self.v_names.get().strip() if hasattr(self, 'v_names') else ''
             if names == _ph: names = ''
-            names_list = ', '.join(n.strip() for n in names.splitlines() if n.strip()) or 'Unknown'
+            # Also check interview_names_box as fallback (transcript sidebar)
+            if not names and hasattr(self, 'interview_names_box'):
+                try: names = self.interview_names_box.get('1.0', 'end').strip()
+                except: pass
+            names_list = ', '.join(n.strip() for n in names.replace(',','\n').splitlines() if n.strip()) or 'Unknown'
             prompt = INTERVIEW_CLIP_PROMPT.replace('{transcript}', transcript_chunk) \
                                           .replace('{names}', names_list) \
                                           .replace('{context_block}', context_block + section_note)
@@ -4927,14 +5124,27 @@ class App(tk.Tk):
 
         # Parse JSON response
         clean = raw.strip()
-        clean = re.sub(r'^```(?:json)?\s*', '', clean, flags=re.MULTILINE)
-        clean = re.sub(r'```\s*$', '', clean, flags=re.MULTILINE)
-        clean = clean.strip()
+        clean = re.sub(r'```(?:json)?', '', clean, flags=re.IGNORECASE)
+        clean = clean.replace('`', '').strip()
+        # Handle object wrapper like {"clips": [...]} or {"results": [...]}
+        if clean.startswith('{'):
+            try:
+                obj = json.loads(clean)
+                for v in obj.values():
+                    if isinstance(v, list):
+                        return v
+            except: pass
+        # Extract JSON array — skip any preamble text before the array
         s, e = clean.find('['), clean.rfind(']')
         if s != -1 and e > s:
             clean = clean[s:e+1]
         try:
-            return json.loads(clean)
+            parsed = json.loads(clean)
+            if isinstance(parsed, list): return parsed
+            # If it parsed as a dict, look for list values
+            if isinstance(parsed, dict):
+                for v in parsed.values():
+                    if isinstance(v, list): return v
         except json.JSONDecodeError:
             pass
         last_brace = clean.rfind('}')
@@ -5504,7 +5714,7 @@ class App(tk.Tk):
             self.clip_frame.columnconfigure(c, weight=1, uniform='clipcol')
 
         for i, clip in enumerate(self.clips):
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(value=False)  # unchecked by default — user picks what to export
             self.clip_vars.append(var)
             row_idx = i // COLS
             col_idx = i %  COLS
@@ -7337,20 +7547,23 @@ class App(tk.Tk):
                 fmt = 'bestaudio/best'
                 pp  = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
             elif quality == 'best':
-                # Best video + best audio regardless of codec, merge to mp4
-                # vp9/av1 + opus is fine — ffmpeg will remux/transcode to mp4
+                # iOS serves combined streams — bestvideo+bestaudio won't match
+                # Include combined stream fallbacks so iOS client works properly
                 fmt = ('bestvideo+bestaudio'
                        '/bestvideo[ext=mp4]+bestaudio[ext=m4a]'
+                       '/best[ext=mp4][height>=1080]'
+                       '/best[ext=mp4][height>=720]'
                        '/best[ext=mp4]'
                        '/best')
                 pp  = [{'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mp4'},
                        {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
             else:
-                # Specific resolution — prefer vp9 (higher quality per bitrate than h264)
+                # Specific resolution — combined stream fallbacks for iOS
                 fmt = (f'bestvideo[height<={quality}]+bestaudio'
                        f'/bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]'
                        f'/best[height<={quality}][ext=mp4]'
                        f'/best[height<={quality}]'
+                       f'/best[ext=mp4]'
                        f'/best')
                 pp  = [{'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mp4'},
                        {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}]
@@ -7377,6 +7590,7 @@ class App(tk.Tk):
                 'no_warnings': False,
                 'noplaylist': True,
                 'playlist_items': '1',
+                'verbose': False,
                 'progress_hooks': [self._dl_progress_hook],
                 'concurrent_fragment_downloads': 8,  # parallel fragments = much faster for VODs
                 # YouTube n-challenge workarounds
@@ -7453,21 +7667,27 @@ class App(tk.Tk):
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
                 }
 
-            # Cookies — only apply for platforms that need them
-            # YouTube works WITHOUT cookies and cookies break client selection
+            # Cookies
             cookies = self.v_cookies.get().strip()
+            browser = getattr(self, 'v_cookies_browser', None)
+            browser = browser.get().strip() if browser else ''
             is_youtube = any(x in url.lower() for x in ['youtube.com', 'youtu.be'])
             is_twitter = any(x in url.lower() for x in ['twitter.com', 'x.com', 't.co'])
-            needs_cookies = not is_youtube  # YouTube breaks with cookies+n-challenge
+            has_cookies = bool(cookies and Path(cookies).exists())
+            has_browser = bool(browser)
 
-            if cookies and Path(cookies).exists() and needs_cookies:
+            if is_youtube and has_browser:
+                # Browser cookies = web client unlocked = true 1080p+
+                ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
+                self._dl_log_write(f'🍪  Using {browser} browser cookies for YouTube HD', FG2)
+            elif has_cookies:
                 ydl_opts['cookiefile'] = cookies
                 self._dl_log_write('🍪  Using cookies.txt', FG2)
-            elif cookies and Path(cookies).exists() and is_youtube:
-                self._dl_log_write('ℹ️  YouTube: skipping cookies (not needed, causes issues)', FG2)
             elif is_twitter:
                 self._dl_log_write('⚠️  X/Twitter requires cookies — add cookies.txt in Downloader settings\n'
                                    '    Get it free: browser extension "Get cookies.txt LOCALLY" → export from x.com', YELLOW)
+            elif is_youtube:
+                self._dl_log_write('⚠️  No browser set — pick your browser in Settings → Cookies for YouTube HD', YELLOW)
 
             # Try with web+mweb first, fall back to default if it fails
             def _try_dl(opts):
@@ -7476,46 +7696,79 @@ class App(tk.Tk):
 
             info = None
             last_err = None
-            if is_youtube:
+            is_twitch  = 'twitch.tv' in url.lower()
+            is_tiktok  = any(x in url.lower() for x in ['tiktok.com', 'vm.tiktok.com'])
+            client_attempts = []  # defined here so fallback loop never errors
+
+            if is_youtube and quality != 'audio':
+                # PO token plugin (bgutil-ytdlp-pot-provider) is installed at first launch
+                # It hooks into yt-dlp automatically — no extra config needed
                 client_attempts = [
-                    (['ios'],              fmt),
-                    (['ios', 'web'],       'best'),
-                    (['android'],          'best'),
-                    (['android_vr'],       'best'),
-                    (None,                 'best[ext=mp4]/best'),
+                    (None, fmt),
+                    (None, 'bestvideo+bestaudio/best[ext=mp4]/best'),
+                    (None, 'best'),
+                ]
+
+
+            elif is_twitch:
+                # Twitch VODs: chunked format is highest quality
+                # Clips: just use best
+                twitch_fmt = (f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best'
+                              if quality not in ('best', 'audio')
+                              else 'bestvideo+bestaudio/best')
+                client_attempts = [
+                    (None, twitch_fmt),
+                    (None, 'best[ext=mp4]/best'),
+                ]
+            elif is_tiktok:
+                # TikTok: no-watermark format when available, then best
+                tiktok_fmt = 'bestvideo[format_id*=bytevc1]+bestaudio/bestvideo+bestaudio/best'
+                client_attempts = [
+                    (None, tiktok_fmt),
+                    (None, 'best[ext=mp4]/best'),
+                    (None, 'best'),
                 ]
             elif is_twitter:
+                # Twitter/X: just grab best available, no client tricks needed
+                twitter_fmt = fmt if quality not in ('best',) else 'bestvideo+bestaudio/best[ext=mp4]/best'
                 client_attempts = [
-                    (['web'],              fmt),
-                    (None,                 'best[ext=mp4]/best'),
+                    (None, twitter_fmt),
+                    (None, 'best[ext=mp4]/best'),
                 ]
             else:
+                # Generic — web client + fmt
                 client_attempts = [
                     (['web'],              fmt),
                     (None,                 'best[ext=mp4]/best'),
                 ]
-            for _clients, _fmt in client_attempts:
+            if not (is_youtube and quality != 'audio' and info):
+              for _clients, _fmt in client_attempts:
                 try:
                     _opts = dict(ydl_opts)
                     _opts['format'] = _fmt
-                    if is_youtube:
+                    # YouTube with cookiefile causes issues — browser cookies via cookiesfrombrowser is fine
+                    if is_youtube and has_cookies and not has_browser:
                         _opts.pop('cookiefile', None)
-                    if _clients:
+                    if _clients and is_youtube:
                         _opts['extractor_args'] = {'youtube': {
                             'player_client': _clients,
                             'skip': ['translated_subs'],
                         }}
-                    else:
+                    elif not _clients:
                         _opts.pop('extractor_args', None)
                     client_str = '+'.join(_clients) if _clients else 'default'
-                    self._dl_log_write(f'Trying {client_str}...', FG2)
+                    self._dl_log_write(f'Trying {client_str} [{_fmt[:40]}]...', FG2)
                     info = _try_dl(_opts)
                     if info:
+                        # Log what actually got downloaded
+                        _res = info.get('height') or info.get('resolution','?')
+                        _fmt_id = info.get('format_id','?')
+                        self._dl_log_write(f'✅ Got: {_res}p format={_fmt_id}', GREEN)
                         break
                 except Exception as _ex:
                     _ex_str = str(_ex)
                     last_err = _ex
-                    # Give a clear Twitter-specific message instead of raw traceback
+                    self._dl_log_write(f'  ↳ Failed: {_ex_str[:80]}', YELLOW)
                     if is_twitter and ('authenticate' in _ex_str.lower() or '403' in _ex_str or 'auth' in _ex_str.lower()):
                         raise Exception(
                             'X/Twitter download failed — authentication required.\n\n'
@@ -7528,6 +7781,7 @@ class App(tk.Tk):
             if not info:
                 raise last_err or Exception('All download attempts failed')
 
+            # Post-download processing
             title    = info.get('title', 'video') or 'video'
             uploader = info.get('uploader') or info.get('channel') or info.get('uploader_id', '')
             # Fix NA uploader — extract from URL path
@@ -9674,11 +9928,31 @@ class App(tk.Tk):
                  font=('Segoe UI', 7), fg=FG2, bg=BG3, justify='left').pack(anchor='w', padx=8)
 
         # ── Cookies ──
-        s4 = section('🍪  Cookies (for Kick/Twitter/X downloads)')
-        tk.Label(s4, text='Required for downloading from Kick clips and X/Twitter. Get via Get cookies.txt LOCALLY Chrome extension.',
+        s4 = section('🍪  Cookies (for YouTube HD, Kick, Twitter/X downloads)')
+        tk.Label(s4, text='YouTube HD requires cookies from your logged-in browser. Kick and X/Twitter also need cookies.',
                 font=FONT_SMALL, fg=FG2, bg=BG2, wraplength=600, justify='left').pack(anchor='w', pady=(0,6))
-        cr = tk.Frame(s4, bg=BG2); cr.pack(fill='x', pady=3)
-        tk.Label(cr, text='cookies.txt path:', font=FONT_SMALL, fg=FG2, bg=BG2, width=22, anchor='w').pack(side='left')
+
+        # Browser cookies (easiest — no file needed)
+        br_row = tk.Frame(s4, bg=BG2); br_row.pack(fill='x', pady=3)
+        tk.Label(br_row, text='Extract from browser:', font=FONT_SMALL, fg=FG2, bg=BG2, width=22, anchor='w').pack(side='left')
+        if not hasattr(self, 'v_cookies_browser'):
+            self.v_cookies_browser = tk.StringVar(value=self.cfg.get('cookies_browser', ''))
+        _browsers = ['', 'chrome', 'firefox', 'edge', 'brave', 'opera', 'safari']
+        _br_menu = tk.OptionMenu(br_row, self.v_cookies_browser, *_browsers)
+        _br_menu.config(font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0,
+                        highlightthickness=0, activebackground=BG4)
+        _br_menu['menu'].config(font=FONT_SMALL, bg=BG3, fg=FG)
+        _br_menu.pack(side='left', padx=(0,8))
+        tk.Label(br_row, text='← Pick your browser for YouTube HD (recommended)',
+                 font=('Segoe UI',7), fg=ACCENT2, bg=BG2).pack(side='left')
+        def _save_browser(*_):
+            self.cfg['cookies_browser'] = self.v_cookies_browser.get()
+            save_cfg(self.cfg)
+        self.v_cookies_browser.trace_add('write', _save_browser)
+
+        # cookies.txt fallback
+        cr = tk.Frame(s4, bg=BG2); cr.pack(fill='x', pady=(6,3))
+        tk.Label(cr, text='Or cookies.txt file:', font=FONT_SMALL, fg=FG2, bg=BG2, width=22, anchor='w').pack(side='left')
         cf = tk.Frame(cr, bg=BG3); cf.pack(side='left', fill='x', expand=True)
         tk.Entry(cf, textvariable=self.v_cookies, font=FONT_SMALL, bg=BG3, fg=FG,
                 insertbackground=ACCENT, relief='flat', bd=4).pack(side='left', fill='x', expand=True)
@@ -9885,6 +10159,7 @@ class App(tk.Tk):
             # ── Subtitle Burn-in ────────────────────────────────────────────
             ('fonttools',      'fonttools',                 'Font enumeration — required for Burn Subtitles'),
             ('ddgs',           'ddgs',                      'DuckDuckGo image search — required for Thumbnail Finder'),
+            ('bgutil-ytdlp-pot-provider', 'bgutil-ytdlp-pot-provider', 'YouTube PO token plugin — required for 1080p downloads'),
         ]
 
         # Packages that need --no-deps to avoid DLL permission conflicts
@@ -9926,8 +10201,24 @@ class App(tk.Tk):
                 'groq': 'groq', 'openai': 'openai',
                 'torch': 'torch', 'torchaudio': 'torchaudio',
                 'fonttools': 'fontTools',
+                'bgutil-ytdlp-pot-provider': '__disk_check__',
             }
             mod = _imp_map.get(pkg_name, pkg_name.replace('-','_').lower())
+            # Disk-based check for yt-dlp plugins (not importable as regular modules)
+            if mod == '__disk_check__':
+                # Log what's in PKGS_DIR so we can debug
+                try:
+                    _dirs = [d.name for d in PKGS_DIR.iterdir() if d.is_dir()]
+                    _bgutil_dirs = [d for d in _dirs if 'bgutil' in d.lower() or 'yt_dlp_plugin' in d.lower()]
+                    if _bgutil_dirs:
+                        return True
+                    # Not found — log for debugging
+                    import sys as _sys2
+                    print(f'[bgutil check] PKGS_DIR={PKGS_DIR}', file=_sys2.stderr)
+                    print(f'[bgutil check] dirs={sorted(_dirs)[:20]}', file=_sys2.stderr)
+                except Exception as _de:
+                    print(f'[bgutil check] error: {_de}', file=__import__("sys").stderr)
+                return False
             try:
                 m = _il.import_module(mod)
                 if mod == 'pydantic_core': _il.import_module('pydantic_core.core_schema')
@@ -11580,13 +11871,24 @@ if __name__ == '__main__':
         _CNW = 0x08000000
         _flag  = USER_DIR / 'pending_update.flag'
         _stamp = USER_DIR / 'install_done.stamp'
-        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs')]
+        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider')]
         _force = _flag.exists() or not _stamp.exists()
         if not _force:
             _miss = []
             for _m, _p in _ALL:
-                try: __import__(_m.split('.')[0])
-                except: _miss.append(_p)
+                if _m == 'yt_dlp_plugins':
+                    # bgutil installs a yt_dlp_plugins folder + dist-info in PKGS_DIR
+                    _found = (PKGS_DIR / 'yt_dlp_plugins').exists()
+                    if not _found:
+                        try:
+                            _found = any('bgutil' in _d.name.lower()
+                                        for _d in PKGS_DIR.iterdir() if _d.is_dir())
+                        except: pass
+                    if not _found:
+                        _miss.append(_p)
+                else:
+                    try: __import__(_m.split('.')[0])
+                    except: _miss.append(_p)
             try: import pydantic_core.core_schema
             except:
                 if 'pydantic-core' not in [x.split()[0] for x in _miss]: _miss.append('pydantic-core')
@@ -11684,6 +11986,27 @@ if __name__ == '__main__':
             _sv.set('Done! Launching ClipFinder...')
             _bv.set('ClipFinder will open automatically')
             _s.update()
+
+            # Install Node.js + bgutil PO token plugin for YouTube 1080p
+            try:
+                _sv.set('Setting up YouTube 1080p support...')
+                _bv.set('Downloading portable Node.js...')
+                _pb.config(mode='indeterminate'); _pb.start(15)
+                _s.update()
+
+                def _bgutil_cb(msg):
+                    _bv.set(msg[:80])
+                    _s.update()
+
+                ensure_bgutil(status_cb=_bgutil_cb)
+                _pb.stop(); _pb['value'] = 100
+                _sv.set('Done! Launching ClipFinder...')
+                _bv.set('YouTube 1080p ready')
+                _s.update()
+            except Exception as _be:
+                _bv.set(f'bgutil skipped: {_be}')
+                _s.update()
+
             _stamp.touch()
             _s.after(1200, _s.destroy); _s.mainloop()
         except Exception: pass
