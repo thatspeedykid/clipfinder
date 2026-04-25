@@ -7466,7 +7466,8 @@ class App(tk.Tk):
             elif cookies and Path(cookies).exists() and is_youtube:
                 self._dl_log_write('ℹ️  YouTube: skipping cookies (not needed, causes issues)', FG2)
             elif is_twitter:
-                self._dl_log_write('⚠️  No cookies.txt — X/Twitter may fail', YELLOW)
+                self._dl_log_write('⚠️  X/Twitter requires cookies — add cookies.txt in Downloader settings\n'
+                                   '    Get it free: browser extension "Get cookies.txt LOCALLY" → export from x.com', YELLOW)
 
             # Try with web+mweb first, fall back to default if it fails
             def _try_dl(opts):
@@ -7475,14 +7476,17 @@ class App(tk.Tk):
 
             info = None
             last_err = None
-            # For YouTube without cookies, ios/android work great
-            # For other sites, use web client
             if is_youtube:
                 client_attempts = [
                     (['ios'],              fmt),
                     (['ios', 'web'],       'best'),
                     (['android'],          'best'),
                     (['android_vr'],       'best'),
+                    (None,                 'best[ext=mp4]/best'),
+                ]
+            elif is_twitter:
+                client_attempts = [
+                    (['web'],              fmt),
                     (None,                 'best[ext=mp4]/best'),
                 ]
             else:
@@ -7494,7 +7498,6 @@ class App(tk.Tk):
                 try:
                     _opts = dict(ydl_opts)
                     _opts['format'] = _fmt
-                    # Remove cookies for YouTube — they break ios/android clients
                     if is_youtube:
                         _opts.pop('cookiefile', None)
                     if _clients:
@@ -7510,7 +7513,17 @@ class App(tk.Tk):
                     if info:
                         break
                 except Exception as _ex:
+                    _ex_str = str(_ex)
                     last_err = _ex
+                    # Give a clear Twitter-specific message instead of raw traceback
+                    if is_twitter and ('authenticate' in _ex_str.lower() or '403' in _ex_str or 'auth' in _ex_str.lower()):
+                        raise Exception(
+                            'X/Twitter download failed — authentication required.\n\n'
+                            'Fix: add a cookies.txt file from your logged-in X account.\n'
+                            '1. Install browser extension "Get cookies.txt LOCALLY"\n'
+                            '2. Log into x.com in your browser\n'
+                            '3. Click the extension → Export cookies for x.com\n'
+                            '4. In ClipFinder Downloader tab → set the cookies.txt path')
                     continue
             if not info:
                 raise last_err or Exception('All download attempts failed')
