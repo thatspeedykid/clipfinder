@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.5.1"
+APP_VERSION = "1.3.5.2"
 
 import subprocess
 import sys
@@ -181,11 +181,14 @@ def _fresh_import(module_name):
 
 def _ensure_pkgs_on_path():
     """Add package dirs to sys.path so installed packages are found."""
+    import importlib as _il
     # 1. PKGS_DIR (user-installed via Settings → Update Modules)
     PKGS_DIR.mkdir(exist_ok=True)
     pkg_str = str(PKGS_DIR)
-    if pkg_str not in sys.path:
-        sys.path.insert(0, pkg_str)
+    # Always ensure PKGS_DIR is at position 0 — overrides any system-level broken packages
+    if pkg_str in sys.path:
+        sys.path.remove(pkg_str)
+    sys.path.insert(0, pkg_str)
     # 2. Embedded Python site-packages (pre-bundled by setup_build.py)
     _pydir = _PathBase(sys.executable).parent
     for _sp_dir in [
@@ -195,7 +198,15 @@ def _ensure_pkgs_on_path():
         _sp_str = str(_sp_dir)
         if _sp_dir.exists() and _sp_str not in sys.path:
             sys.path.insert(1, _sp_str)
-    # Version mismatch detection removed — packages installed by setup_build.py are always correct
+    # Invalidate import caches so Python picks up newly installed packages
+    _il.invalidate_caches()
+    # Bust any cached broken provider imports so fresh ones load from PKGS_DIR
+    import sys as _sys_bust
+    for _bmod in ['groq', 'openai', 'google.genai']:
+        for _k in list(_sys_bust.modules.keys()):
+            if _k == _bmod or _k.startswith(_bmod + '.'):
+                try: del _sys_bust.modules[_k]
+                except: pass
 
 _ensure_pkgs_on_path()  # run immediately at import time
 
@@ -1873,7 +1884,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.3.5.1 — AI Clip Extractor')
+        self.title('ClipFinder 1.3.5.2 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -4792,7 +4803,11 @@ class App(tk.Tk):
                     raise
             raise last_err or Exception('Gemini quota exhausted')
         elif lib == 'groq':
-            from groq import Groq as _G
+            _ensure_pkgs_on_path()
+            try:
+                from groq import Groq as _G
+            except ImportError:
+                raise ImportError('groq package broken — go to Settings → Update All Packages')
             resp = _G(api_key=key).chat.completions.create(
                 model=model,
                 messages=[{'role': 'user', 'content': self._current_prompt}],
@@ -4801,7 +4816,11 @@ class App(tk.Tk):
                 return (resp.choices[0].message.content or '').strip()
             return ''
         elif lib == 'openrouter':
-            from openai import OpenAI as _O
+            _ensure_pkgs_on_path()
+            try:
+                from openai import OpenAI as _O
+            except ImportError:
+                raise ImportError('openai package broken — go to Settings → Update All Packages')
             _or = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
             resp = _or.chat.completions.create(
                 model=model,
@@ -4959,7 +4978,11 @@ class App(tk.Tk):
                         raise Exception('All Gemini models unavailable (404) — update models list')
 
                 elif lib == 'groq':
-                    from groq import Groq as _G
+                    _ensure_pkgs_on_path()
+                    try:
+                        from groq import Groq as _G
+                    except ImportError:
+                        raise ImportError('groq package broken — go to Settings → Update All Packages')
                     _groq_prompt = prompt
                     # Groq has ~6000 token input limit on free — truncate if needed
                     if len(_groq_prompt) > 20000:
@@ -4974,7 +4997,11 @@ class App(tk.Tk):
                         raise Exception('Groq returned empty response')
 
                 elif lib == 'openrouter':
-                    from openai import OpenAI as _O
+                    _ensure_pkgs_on_path()
+                    try:
+                        from openai import OpenAI as _O
+                    except ImportError:
+                        raise ImportError('OpenAI package broken — go to Settings → Update All Packages')
                     _or = _O(base_url='https://openrouter.ai/api/v1', api_key=key)
                     if not hasattr(self, '_dead_or_models'): self._dead_or_models = {}  # model -> expiry timestamp
                     import time as _or_time
@@ -6736,7 +6763,19 @@ class App(tk.Tk):
                             raw = resp.text.strip()
 
                         elif try_lib == 'groq':
-                            from groq import Groq as _G
+                            _ensure_pkgs_on_path()
+                            # Bust cached broken import if present
+                            import sys as _sys_g
+                            for _gmod in list(_sys_g.modules.keys()):
+                                if _gmod == 'groq' or _gmod.startswith('groq.'):
+                                    del _sys_g.modules[_gmod]
+                            try:
+                                from groq import Groq as _G
+                            except ImportError as _ge:
+                                raise ImportError(
+                                    f'Groq package broken ({_ge}). '
+                                    'Go to Settings → Update Modules → Update All Packages.'
+                                )
                             resp = _G(api_key=try_key).chat.completions.create(
                                 model=try_model,
                                 messages=[{'role': 'user', 'content': prompt}],
@@ -6746,7 +6785,11 @@ class App(tk.Tk):
                             if not raw: continue
 
                         elif try_lib == 'openrouter':
-                            from openai import OpenAI as _O
+                            _ensure_pkgs_on_path()
+                            try:
+                                from openai import OpenAI as _O
+                            except ImportError as _oe:
+                                raise ImportError(f'OpenAI broken ({_oe}) — run Update All Packages in Settings.')
                             resp = _O(base_url='https://openrouter.ai/api/v1', api_key=try_key
                                       ).chat.completions.create(
                                 model=try_model,
@@ -9435,7 +9478,11 @@ class App(tk.Tk):
                 prompt = header + transcript_part
 
         if prov_name == 'Google Gemini (Free)':
-            import google.genai as _gg
+            _ensure_pkgs_on_path()
+            try:
+                import google.genai as _gg
+            except ImportError as _ge2:
+                raise ImportError(f'google-genai broken ({_ge2}) — run Update All Packages in Settings.')
             client = _gg.Client(api_key=key)
             models = PROVIDERS[prov_name]['models']
             for model in models:
@@ -9448,7 +9495,11 @@ class App(tk.Tk):
                     continue
 
         elif prov_name == 'Groq (Free)':
-            from groq import Groq as _G
+            _ensure_pkgs_on_path()
+            try:
+                from groq import Groq as _G
+            except ImportError:
+                raise ImportError('groq package broken — go to Settings → Update All Packages')
             client = _G(api_key=key)
             model = PROVIDERS[prov_name]['models'][0]
             resp = client.chat.completions.create(

@@ -2,6 +2,16 @@
 
 ---
 
+## v1.3.5.2 — Hotfix
+*April 2026*
+
+### 🐛 Fixes
+- `ImportError: cannot import name 'Groq' from 'groq' (unknown location)` — Python was loading cached broken provider packages from unknown system location. Now clears sys.modules cache for groq/openai/google-genai before every import.
+- All AI provider imports wrapped in try/except with friendly error messages.
+- `_ensure_pkgs_on_path()` now always forces PKGS_DIR to position 0 and invalidates import caches.
+
+---
+
 ## v1.3.5.1 — Hotfix
 *April 2026*
 

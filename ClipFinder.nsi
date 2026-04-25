@@ -5,7 +5,7 @@
 ; ============================================================
 
 !define APP_NAME     "ClipFinder"
-!define APP_VERSION  "1.3.5.1"
+!define APP_VERSION  "1.3.5.2"
 !define APP_EXE      "clipfinder.exe"
 !define INSTALL_DIR  "$LOCALAPPDATA\ClipFinder"
 !define PUBLISHER    "MarsScumbags"
