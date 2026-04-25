@@ -2041,7 +2041,7 @@ class App(tk.Tk):
                 def _ver_tuple(v):
                     import re as _re
                     nums = _re.findall(r'\d+', v)
-                    t = tuple(int(n) for n in nums[:3]) + (0,) * (3 - len(nums[:3]))
+                    t = tuple(int(n) for n in nums[:4]) + (0,) * (4 - len(nums[:4]))
                     is_pre = any(x in v.lower() for x in ('beta','rc','alpha','pre'))
                     return (t, 0 if is_pre else 1)
                 _latest_t  = _ver_tuple(_latest)
