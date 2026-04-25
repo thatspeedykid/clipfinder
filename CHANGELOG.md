@@ -169,3 +169,7 @@
 - 16:9 and 9:16 export with face tracking
 - yt-dlp downloader (YouTube, Twitch, Twitter/X, Kick)
 - Tweet generator, Word censor, Thumbnail finder, Image Studio
+
+### 🔧 Hotfix (re-release)
+- Pillow broken install now shows friendly error with fix instructions instead of raw traceback
+- Prelaunch installer now checks `PIL.Image` (not just `PIL`) so broken Pillow installs are detected and auto-reinstalled

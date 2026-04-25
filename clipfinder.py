@@ -7898,7 +7898,13 @@ class App(tk.Tk):
 
     def _thumb_run(self):
         try:
-            from PIL import Image
+            try:
+                from PIL import Image
+            except ImportError:
+                raise ValueError(
+                    'Pillow (image library) is broken or not installed.\n\n'
+                    'Fix: go to Settings → Update Modules → Update All Packages, '
+                    'then restart ClipFinder.')
             import urllib3; urllib3.disable_warnings()
             import warnings as _warn; _warn.filterwarnings('ignore', category=DeprecationWarning)
             import io, json as _json, re as _re
@@ -11561,7 +11567,7 @@ if __name__ == '__main__':
         _CNW = 0x08000000
         _flag  = USER_DIR / 'pending_update.flag'
         _stamp = USER_DIR / 'install_done.stamp'
-        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs')]
+        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2025.9.26'), ('curl_cffi', 'curl-cffi'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs')]
         _force = _flag.exists() or not _stamp.exists()
         if not _force:
             _miss = []
