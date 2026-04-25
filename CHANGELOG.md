@@ -2,6 +2,17 @@
 
 ---
 
+## v1.3.5.1 — Hotfix
+*April 2026*
+
+### 🐛 Fixes
+- setuptools now installed first in prelaunch splash — fixes demucs/openai-whisper failing to install on fresh Windows 11 machines (`Cannot import 'setuptools.build_meta'`)
+- Package status dots for demucs, openai-whisper, torch, torchaudio, mediapipe, faster-whisper now check dist-info folder instead of trying to import — fixes gray status even when installed
+- Prelaunch missing package check now uses PKGS_DIR dist-info instead of system-wide imports
+- Demucs incomplete install now shows friendly error message pointing to Update All Packages instead of raw traceback
+
+---
+
 ## v1.3.5 — Current Release
 *April 2026*
 

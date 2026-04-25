@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.5.1"
 
 import subprocess
 import sys
@@ -1873,7 +1873,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.3.5 — AI Clip Extractor')
+        self.title('ClipFinder 1.3.5.1 — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -10204,27 +10204,37 @@ class App(tk.Tk):
                 'bgutil-ytdlp-pot-provider': '__disk_check__',
             }
             mod = _imp_map.get(pkg_name, pkg_name.replace('-','_').lower())
-            # Disk-based check for yt-dlp plugins (not importable as regular modules)
+
+            # Disk-based check for yt-dlp plugins
             if mod == '__disk_check__':
-                # Log what's in PKGS_DIR so we can debug
                 try:
                     _dirs = [d.name for d in PKGS_DIR.iterdir() if d.is_dir()]
                     _bgutil_dirs = [d for d in _dirs if 'bgutil' in d.lower() or 'yt_dlp_plugin' in d.lower()]
                     if _bgutil_dirs:
                         return True
-                    # Not found — log for debugging
-                    import sys as _sys2
-                    print(f'[bgutil check] PKGS_DIR={PKGS_DIR}', file=_sys2.stderr)
-                    print(f'[bgutil check] dirs={sorted(_dirs)[:20]}', file=_sys2.stderr)
-                except Exception as _de:
-                    print(f'[bgutil check] error: {_de}', file=__import__("sys").stderr)
+                except: pass
                 return False
+
+            # Heavy packages — skip import attempt, go straight to dist-info check
+            # These fail to import in isolation (need full dependency chain loaded)
+            _skip_import = {'demucs', 'openai-whisper', 'torch', 'torchaudio',
+                            'mediapipe', 'faster-whisper'}
+            if pkg_name not in _skip_import:
+                # Primary: try importing
+                try:
+                    m = _il.import_module(mod)
+                    if mod == 'pydantic_core': _il.import_module('pydantic_core.core_schema')
+                    return True
+                except: pass
+
+            # Fallback (and primary for heavy packages): check dist-info folder in PKGS_DIR
             try:
-                m = _il.import_module(mod)
-                if mod == 'pydantic_core': _il.import_module('pydantic_core.core_schema')
-                if mod in ('torch','torchaudio'): _ = m.__version__
-                return True
-            except: return False
+                _pip_name = pkg_name.replace('-','_').lower()
+                for _d in PKGS_DIR.iterdir():
+                    if _d.is_dir() and _d.name.lower().startswith(_pip_name) and 'dist-info' in _d.name:
+                        return True
+            except: pass
+            return False
 
         for i, (pkg, pkg_pip, desc) in enumerate(mods):
             mr = tk.Frame(s6, bg=BG3); mr.pack(fill='x', pady=2)
@@ -10935,23 +10945,30 @@ class App(tk.Tk):
             _pkgs_path = str(PKGS_DIR)
             _lf.write(f"""import sys
 sys.path.insert(0, r'{_pkgs_path}')
-import soundfile as sf
-import torch
-import torchaudio
+try:
+    import soundfile as sf
+    import torch
+    import torchaudio
 
-def _sf_load(path, *args, **kwargs):
-    data, sr = sf.read(str(path), dtype='float32', always_2d=True)
-    return torch.tensor(data.T), sr
+    def _sf_load(path, *args, **kwargs):
+        data, sr = sf.read(str(path), dtype='float32', always_2d=True)
+        return torch.tensor(data.T), sr
 
-def _sf_save(path, src, sample_rate, *args, **kwargs):
-    import numpy as np
-    data = src.numpy().T  # (channels, samples) -> (samples, channels)
-    sf.write(str(path), data, sample_rate)
+    def _sf_save(path, src, sample_rate, *args, **kwargs):
+        import numpy as np
+        data = src.numpy().T
+        sf.write(str(path), data, sample_rate)
 
-torchaudio.load = _sf_load
-torchaudio.save = _sf_save
+    torchaudio.load = _sf_load
+    torchaudio.save = _sf_save
+except Exception as e:
+    print(f'[Demucs] dependency error: {{e}}', file=sys.stderr)
 
-from demucs.__main__ import main
+try:
+    from demucs.__main__ import main
+except ModuleNotFoundError as e:
+    print(f'[Demucs] incomplete install — please click Update All Packages in Settings: {{e}}', file=sys.stderr)
+    sys.exit(1)
 sys.exit(main())
 """)
         _dm_cmd = [_sys.executable, _launcher,
@@ -10961,7 +10978,11 @@ sys.exit(main())
                    audio_path]
         _dm_r = _sp.run(_dm_cmd, capture_output=True, text=True, env=_dm_env)
         if _dm_r.returncode != 0:
-            self.log(f'Demucs error: {_dm_r.stderr[-500:]}', RED)
+            _err_txt = _dm_r.stderr[-500:]
+            if 'incomplete install' in _err_txt or 'demucs.__main__' in _err_txt or 'ModuleNotFoundError' in _err_txt:
+                self.log('Demucs error: incomplete install — go to Settings → Update All Packages and restart', RED)
+                raise RuntimeError('Demucs is not fully installed.\nGo to Settings → Update Modules → Update All Packages, then restart ClipFinder.')
+            self.log(f'Demucs error: {_err_txt}', RED)
             raise RuntimeError(f'Demucs failed: {_dm_r.stderr[-200:]}')
 
         # Step 3: Find stems and mix the ones we want
@@ -11871,7 +11892,7 @@ if __name__ == '__main__':
         _CNW = 0x08000000
         _flag  = USER_DIR / 'pending_update.flag'
         _stamp = USER_DIR / 'install_done.stamp'
-        _ALL = [('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider')]
+        _ALL = [('setuptools', 'setuptools'), ('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider')]
         _force = _flag.exists() or not _stamp.exists()
         if not _force:
             _miss = []
@@ -11887,8 +11908,18 @@ if __name__ == '__main__':
                     if not _found:
                         _miss.append(_p)
                 else:
-                    try: __import__(_m.split('.')[0])
-                    except: _miss.append(_p)
+                    # Check dist-info first for heavy packages, then try import
+                    _pip_name = _p.split('==')[0].replace('-','_').lower()
+                    _has_distinfo = False
+                    try:
+                        _has_distinfo = any(
+                            _d.is_dir() and _d.name.lower().startswith(_pip_name) and 'dist-info' in _d.name
+                            for _d in PKGS_DIR.iterdir()
+                        )
+                    except: pass
+                    if not _has_distinfo:
+                        try: __import__(_m.split('.')[0])
+                        except: _miss.append(_p)
             try: import pydantic_core.core_schema
             except:
                 if 'pydantic-core' not in [x.split()[0] for x in _miss]: _miss.append('pydantic-core')
@@ -11904,9 +11935,18 @@ if __name__ == '__main__':
         else:
             _todo = list(_req)
             for _m, _p in _ALL:
-                try: __import__(_m.split('.')[0])
-                except:
-                    if _p not in _todo: _todo.append(_p)
+                _pip_name = _p.split('==')[0].replace('-','_').lower()
+                _has_distinfo = False
+                try:
+                    _has_distinfo = any(
+                        _d.is_dir() and _d.name.lower().startswith(_pip_name) and 'dist-info' in _d.name
+                        for _d in PKGS_DIR.iterdir()
+                    )
+                except: pass
+                if not _has_distinfo:
+                    try: __import__(_m.split('.')[0])
+                    except:
+                        if _p not in _todo: _todo.append(_p)
         if not _todo: _stamp.touch(); return
         _lines = [
             'import subprocess, sys',
