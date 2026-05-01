@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.5.2"
+APP_VERSION = "1.3.6"
 
 import subprocess
 import sys
@@ -39,6 +39,20 @@ import os as _os2
 _appdata = _PathBase(_os2.environ.get('LOCALAPPDATA', _os2.path.expanduser('~')))
 USER_DIR = _appdata / 'ClipFinder'
 USER_DIR.mkdir(parents=True, exist_ok=True)
+
+# Add torch CUDA DLLs to PATH AND DLL search path so ctranslate2 finds them
+# torch+cu121 bundles cudart, cublas etc in torch/lib
+_torch_lib_early = USER_DIR / 'pkgs' / 'torch' / 'lib'
+if _torch_lib_early.exists():
+    _tl_str = str(_torch_lib_early)
+    if _tl_str not in _os2.environ.get('PATH', ''):
+        _os2.environ['PATH'] = _tl_str + _os2.pathsep + _os2.environ.get('PATH', '')
+    # os.add_dll_directory is the correct Windows API for DLL search paths
+    # This is what ctranslate2 actually uses to find CUDA DLLs
+    try:
+        _os2.add_dll_directory(_tl_str)
+    except (AttributeError, OSError):
+        pass  # Python < 3.8 or path doesn't exist
 
 def _app_path(*parts):
     """Return writable user data path (AppData/Local/ClipFinder/...)."""
@@ -201,6 +215,7 @@ def _ensure_pkgs_on_path():
     # Invalidate import caches so Python picks up newly installed packages
     _il.invalidate_caches()
     # Bust any cached broken provider imports so fresh ones load from PKGS_DIR
+    # NOTE: do NOT bust torch/torchaudio — busting them breaks CUDA DLL initialization
     import sys as _sys_bust
     for _bmod in ['groq', 'openai', 'google.genai']:
         for _k in list(_sys_bust.modules.keys()):
@@ -219,6 +234,26 @@ def _ensure_node_on_path():
         if _nd not in _os3.environ.get('PATH', ''):
             _os3.environ['PATH'] = _nd + _os3.pathsep + _os3.environ.get('PATH', '')
 _ensure_node_on_path()
+
+# Add torch's bundled CUDA DLLs to PATH so ctranslate2 finds them
+# torch+cu121 ships cublas, cudart etc in torch/lib — no separate CUDA toolkit needed
+def _ensure_torch_cuda_on_path():
+    import os as _os4
+    _torch_lib = PKGS_DIR / 'torch' / 'lib'
+    if _torch_lib.exists():
+        _tl = str(_torch_lib)
+        if _tl not in _os4.environ.get('PATH', ''):
+            _os4.environ['PATH'] = _tl + _os4.pathsep + _os4.environ.get('PATH', '')
+_ensure_torch_cuda_on_path()
+
+# Fix file permissions on PKGS_DIR — Windows locks files when installed as admin
+# then run as normal user (or vice versa), causing Permission denied on import
+try:
+    import stat as _stat
+    for _pf in list(PKGS_DIR.rglob('*.py'))[:300]:
+        try: _pf.chmod(_stat.S_IRUSR | _stat.S_IWUSR | _stat.S_IRGRP | _stat.S_IROTH)
+        except: pass
+except: pass
 
 def _run_pip_safe(packages):
     """Install packages to PKGS_DIR using Python 3.12 (matches EXE runtime)."""
@@ -625,17 +660,18 @@ FONT_MONO_S = ('Consolas', 9)
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest'],
+        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
+        # NOTE: gemini-1.5-* ALL DEAD (404). gemini-2.0-flash shuts down June 1 2026.
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
     'Groq (Free)': {
         'lib':    'groq',
         'models': [
-            'llama-3.1-8b-instant',    # highest free limits, fast
-            'llama3-8b-8192',          # very high limits
-            'llama-3.3-70b-versatile', # smarter but lower daily limit
-            'mixtral-8x7b-32768',      # good context window
+            'llama-3.3-70b-versatile', # 32k context, smarter
+            'mixtral-8x7b-32768',      # 32k context window
+            'llama-3.1-8b-instant',    # 8k context — fast but small
+            'llama3-8b-8192',          # 8k context fallback
         ],
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
@@ -727,10 +763,12 @@ Every clip must make sense to someone who has NEVER seen this stream.
 TITLE: News headline style — "She admits the prank went too far" not "Funny clip" — use REAL names from the transcript, never invent names.
 If a VIDEO TITLE is provided, extract the names of people mentioned in it and use those names in titles and descriptions when those people speak.
 
+UNIQUENESS: Every clip MUST cover a DIFFERENT moment with a DIFFERENT title. Do NOT output multiple clips about the same topic or event. Spread clips across the full transcript — different timestamps, different topics, different people speaking.
+
 LENGTH CHECK: Before outputting, verify each clip is between 60-160 seconds.
 Calculate: convert end and start to seconds, subtract. If under 60s, extend or drop it.
 
-Return ONLY a raw JSON array — no markdown, no backticks, no explanation:
+Return ONLY a raw JSON array. NO markdown. NO backticks. NO ```json. NO explanation before or after. Start your response with [ and end with ]. Nothing else.
 [
   {
     "start": "HH:MM:SS",
@@ -799,44 +837,71 @@ Read the transcript carefully. Identify WHO is involved, WHAT happened, and the 
 == TONE ==
 {tone}
 
+== YOUR JOB ==
+Write 3 tweets ALL in the same tone above. Each tweet covers the same event but from a DIFFERENT ANGLE:
+
+OPTION 1 — HOT TAKE
+Your punchy opinion or reaction to what happened. Lead with the most shocking element.
+Structure: Strong opener (can be all caps or shocking statement) → context sentence → spicy take or quote → hashtags
+Max 280 chars. Must reference a SPECIFIC moment or quote from the transcript.
+
+OPTION 2 — PULL QUOTE
+Lead with an actual direct quote or close paraphrase from the transcript (in quotes), then react to it.
+Structure: "Quote from transcript" → your reaction/commentary → hashtags
+Max 280 chars. The quote must be real and specific — not made up.
+
+OPTION 3 — ANNOUNCEMENT HOOK
+Frame it like breaking news or a must-see moment. Make people feel like they NEED to watch the clip.
+Structure: Hook that creates urgency or curiosity → what happened → call to action or cliffhanger → hashtags
+Max 280 chars. No clickbait that doesn't deliver — be specific about what happens.
+
 == OUTPUT FORMAT ==
 Write EXACTLY this — no preamble, no labels other than OPTION 1/2/3:
 
 OPTION 1
-[DRAMATIC DRAMA ACCOUNT STYLE — like a real tea/drama Twitter page]
-Format it like this:
-🚨 SHOCKING HEADLINE IN CAPS 🚨
-One sentence setup explaining what happened and why it matters.
-
-🚫 The tea: [pull an ACTUAL quote or specific detail from the transcript in quotes]
-
-The take: [one punchy opinion sentence] [emoji]
-
-#Name1 #Name2 #RelevantTag
+[tweet text]
 
 OPTION 2
-[VIRAL/MEME ENERGY — short, chaotic, makes people stop scrolling. Think "bro said what 💀" energy. Under 220 chars. No bullet points. Could be a reaction, a quote with reaction, or a spicy take. Something people screenshot and repost.]
-[hashtags on same line or next line]
+[tweet text]
 
 OPTION 3
-[THREAD OPENER — 240-280 chars. Strong hook that makes people NEED to click or reply. Can end with a cliffhanger or ask a question to drive engagement.]
-[hashtags]
+[tweet text]
 
-== HASHTAG RULES — CRITICAL ==
-- Use ACTUAL NAMES from the context as hashtags (#Mizkif #Alinity #xQc)
+== HASHTAG RULES ==
+- Use ACTUAL NAMES from the transcript/context ONLY — never invent or assume names not mentioned
 - Use platform only if relevant (#Kick #Twitch #YouTube)
 - Use drama type if it fits (#Exposed #Drama #Beef #Leaked #Scandal)
-- NEVER use #gaming #gamingscandal #gamer #streamer unless the clip is literally about gameplay
+- NEVER use #gaming #gamingscandal #gamer #streamer unless literally about gameplay
 - Each option gets its OWN hashtags matching what THAT tweet says
 - 3-5 hashtags max per option
-- If context says "Mizkif reacting to MrBeast" use #Mizkif #MrBeast NOT #gaming
 
 == RULES ==
-- Option 1 MUST reference a specific quote or moment from the transcript — not vague
-- Option 2 should feel like a real person tweeting, not a press release
-- Each option must feel COMPLETELY different in vibe and structure
-- Do NOT write "Option 1:" as a label — just write the content after the OPTION 1 header
+- All 3 options MUST be in the same tone — do NOT switch styles between options
+- Each option must feel different in angle and structure but same energy
+- Use REAL quotes and REAL moments — never make things up
+- No preamble before OPTION 1 — start writing immediately
 """
+
+TWEET_TONE_PROMPTS = {
+    'drama': '🔥 DRAMA ACCOUNT — Tea spiller energy. Shocking, pointed, like a real streaming drama page. Use emojis strategically. Pull receipts.',
+    'tea':   '☕ TEA MODE — Calm but devastating. Matter-of-fact delivery that makes the drama hit harder. "So apparently..." energy. Understated.',
+    'breaking': '📰 BREAKING NEWS — Urgent, journalistic. "BREAKING:" opener. Treat it like actual news. Serious tone, facts first.',
+    'hype':  '💥 HYPE MODE — Celebrate the moment. Positive energy, get people excited to watch. Use energy words. Make it feel unmissable.',
+    'exaggerate': """🤯 EXAGGERATE MODE — Write a dramatic multi-line story that builds line by line. Use this EXACT format:
+
+🚨 [SHOCKING HEADLINE IN CAPS — name the person and the situation] 😳
+[Setup line — what the secret or situation was] 👀
+[Escalation — what triggered it or made it worse] 💔
+[Twist — how things shifted or got more chaotic] 💸🔥
+[Punchline — how wild it ended up] ⚡
+
+Rules: Each line max 12 words. 1-2 emojis at END of each line. Build tension line by line.
+Stay factual to the transcript — just massively dramatize real events.
+Never mean-spirited toward the person — make them the legendary main character.
+All 3 options follow this same format but cover DIFFERENT angles of the same story.
+Hashtags on a separate final line.""",
+}
+
 
 
 # Config lives next to the EXE/script so settings survive across launches
@@ -1068,7 +1133,7 @@ def _detect_whisper_device(use_gpu=True):
     if _WHISPER_DEVICE_CACHE and use_gpu:
         return _WHISPER_DEVICE_CACHE
 
-    # ── GPU disabled by user — skip all GPU checks ───────────────────────────
+    # ── GPU disabled by user ─────────────────────────────────────────────────
     if not use_gpu:
         try:
             import faster_whisper as _fw_check  # noqa
@@ -1076,33 +1141,50 @@ def _detect_whisper_device(use_gpu=True):
         except ImportError:
             return ('cpu', 'int8', 'CPU (GPU disabled)')
 
-    # ── 0. whisper.cpp + Vulkan (best for AMD/Intel on Windows) ──────────────
-    if _find_whispercpp() and _find_whispercpp_model('base'):
-        # Return cpu/int8 so faster-whisper fallback works correctly
-        # The 'whispercpp' label is just for display
+    # ── 0. NVIDIA CUDA — whisper.cpp cublas binary ───────────────────────────
+    # Use whisper.cpp with cuBLAS instead of faster-whisper+ctranslate2
+    # Avoids ctranslate2/cuDNN version hell entirely — just needs NVIDIA driver
+    try:
+        import subprocess as _sp_nv
+        _nv = _sp_nv.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                         capture_output=True, text=True, timeout=3)
+        if _nv.returncode == 0 and _nv.stdout.strip():
+            _gpu_name = _nv.stdout.strip().split('\n')[0].strip()
+            # Check if cublas whisper.cpp binary exists
+            _wcpp_cuda = _app_path('whisper_cpp_cuda')
+            _wcpp_cuda_exe = _wcpp_cuda / 'whisper-whisper-cli.exe'
+            if _wcpp_cuda_exe.exists():
+                _WHISPER_DEVICE_CACHE = ('cpu', 'int8', f'NVIDIA CUDA ({_gpu_name}) ⚡')
+                return _WHISPER_DEVICE_CACHE
+            else:
+                # NVIDIA detected but cublas binary not installed yet
+                _WHISPER_DEVICE_CACHE = ('cpu', 'int8', f'NVIDIA GPU ({_gpu_name}) — click Install NVIDIA CUDA in Settings')
+                return _WHISPER_DEVICE_CACHE
+    except Exception:
+        pass
+
+    # Only reach whisper.cpp if CUDA is NOT available
+    # ── 1. whisper.cpp + Vulkan (AMD/Intel only) ─────────────────────────────
+    _wcpp = _find_whispercpp()
+    if _wcpp and _find_whispercpp_model('base'):
+        # Check if this is a new RDNA4 card that isn't supported yet
+        try:
+            import subprocess as _sp_vk, platform as _pl_vk
+            if _pl_vk.system() == 'Windows':
+                # Check GPU generation via wmic
+                _wmic = _sp_vk.run(
+                    ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
+                    capture_output=True, text=True, timeout=5)
+                _gpu_name = _wmic.stdout.lower()
+                _is_rdna4 = any(x in _gpu_name for x in ['rx 9', '9600', '9700', '9800', '9900'])
+                if _is_rdna4:
+                    # RDNA4 detected — whisper.cpp Vulkan won't use GPU yet
+                    _WHISPER_DEVICE_CACHE = ('cpu', 'int8',
+                        'CPU int8 ⚠ RDNA4 GPU not yet supported by whisper.cpp')
+                    return _WHISPER_DEVICE_CACHE
+        except: pass
         _WHISPER_DEVICE_CACHE = ('cpu', 'int8', 'whisper.cpp Vulkan GPU ⚡')
         return _WHISPER_DEVICE_CACHE
-
-    # ── 1. NVIDIA CUDA ────────────────────────────────────────────────────────
-    try:
-        import torch as _torch
-        if _torch.cuda.is_available():
-            name = _torch.cuda.get_device_name(0)
-            _WHISPER_DEVICE_CACHE = ('cuda', 'float16', f'NVIDIA CUDA ({name})')
-            return _WHISPER_DEVICE_CACHE
-    except Exception:
-        pass
-
-    # Test CUDA directly via faster-whisper
-    try:
-        _FW = _fresh_import('faster_whisper').WhisperModel
-        _t = _FW('tiny', device='cuda', compute_type='float16',
-                 download_root=str(_app_path('whisper_models')))
-        del _t
-        _WHISPER_DEVICE_CACHE = ('cuda', 'float16', 'NVIDIA CUDA')
-        return _WHISPER_DEVICE_CACHE
-    except Exception:
-        pass
 
     # ── 2. torch-directml (AMD/Intel on Windows) ──────────────────────────────
     try:
@@ -1114,13 +1196,13 @@ def _detect_whisper_device(use_gpu=True):
         pass
 
     # ── 3. CPU int8 via CTranslate2 — still 4x faster than openai-whisper ────
-    # Check if faster-whisper is actually installed before claiming it
     try:
         import faster_whisper as _fw_check  # noqa
         _WHISPER_DEVICE_CACHE = ('cpu', 'int8', 'CPU int8 (faster-whisper)')
     except ImportError:
         _WHISPER_DEVICE_CACHE = ('cpu', 'int8', 'Not installed — use Settings → Update Modules')
     return _WHISPER_DEVICE_CACHE
+
 
 
 _WCPP_INSTALL_LOCK = None  # module-level flag to prevent duplicate installs
@@ -1178,11 +1260,10 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
                           for a in release.get('assets', [])]
             _log(f'Available assets: {[n for n,_ in all_assets]}')
 
-            # Priority order for Windows x64 Vulkan-capable builds
-            # v1.7.x: whisper-*-bin-x64-release-vulkan.zip
-            # v1.8.x: whisper-bin-x64.zip (has Vulkan support built in)
-            PREFER = ['bin-x64', 'vulkan', 'win']  # terms that indicate good builds
-            AVOID  = ['win32', 'blas', 'cublas', 'xcframework', '.jar']
+            # Priority order — explicitly prefer vulkan-tagged builds
+            # v1.8.4 does NOT have a vulkan zip — go straight to fallbacks
+            PREFER = ['vulkan', 'bin-x64', 'win']
+            AVOID  = ['win32', 'blas', 'cublas', 'xcframework', '.jar', 'openvino']
             scored = []
             for name, url in all_assets:
                 nl = name.lower()
@@ -1192,26 +1273,24 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
                 if score > 0:
                     scored.append((score, name, url))
             scored.sort(reverse=True)
-            if scored:
+            # Only use GitHub API result if it's explicitly a Vulkan build
+            if scored and 'vulkan' in scored[0][1].lower():
                 _, best_name, asset_url = scored[0]
                 _log(f'Selected: {best_name} (score={scored[0][0]})')
-            # Last resort: any zip not explicitly bad
-            if not asset_url:
-                for name, url in all_assets:
-                    nl = name.lower()
-                    if nl.endswith('.zip') and not any(a in nl for a in AVOID):
-                        asset_url = url
-                        _log(f'Fallback asset: {name}')
-                        break
+            else:
+                _log(f'No Vulkan asset in GitHub release — using known-good fallback URLs')
         except Exception as e:
             _log(f'GitHub API failed: {e}')
 
         # Hardcoded fallbacks using known-good direct asset URLs
         if not asset_url:
             fallbacks = [
-                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.4/whisper-1.7.4-bin-x64-release.zip',
-                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.3/whisper-1.7.3-bin-x64-release.zip',
-                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.2/whisper-1.7.2-bin-x64-release.zip',
+                # jerryshell dedicated Vulkan Windows build — has ggml-vulkan.dll
+                'https://github.com/jerryshell/whisper.cpp-windows-vulkan-bin/releases/latest/download/whisper.cpp-windows-vulkan.zip',
+                # Official older vulkan-specific zips
+                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.5/whisper-1.7.5-bin-x64-release-vulkan.zip',
+                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.4/whisper-1.7.4-bin-x64-release-vulkan.zip',
+                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.3/whisper-1.7.3-bin-x64-release-vulkan.zip',
             ]
             for fb in fallbacks:
                 try:
@@ -1264,6 +1343,50 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
                         if bn.endswith(('.exe','.dll')):
                             _log(f'Extracted: {bn} ({len(data)//1024}KB)')
             tmp_zip.unlink(missing_ok=True)
+
+            # Verify this is actually a Vulkan build
+            _has_vulkan_dll = (install_dir / 'ggml-vulkan.dll').exists()
+            _log(f'ggml-vulkan.dll present: {_has_vulkan_dll}')
+            if not _has_vulkan_dll:
+                _log('⚠ This build does not include ggml-vulkan.dll — NOT a Vulkan build!')
+                _log('  Trying known-good Vulkan fallback URLs...')
+                import shutil as _sh_vk
+                _sh_vk.rmtree(str(install_dir), ignore_errors=True)
+                install_dir.mkdir(parents=True, exist_ok=True)
+                _vulkan_fallbacks = [
+                    # jerryshell/whisper.cpp-windows-vulkan-bin — dedicated Vulkan Windows builds
+                    'https://github.com/jerryshell/whisper.cpp-windows-vulkan-bin/releases/latest/download/whisper.cpp-windows-vulkan.zip',
+                    # SourceForge mirror — has vulkan builds for older versions
+                    'https://sourceforge.net/projects/whisper-cpp.mirror/files/v1.7.6/whisper-bin-x64.zip/download',
+                    # Official older vulkan-specific zips (v1.7.x era)
+                    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.5/whisper-1.7.5-bin-x64-release-vulkan.zip',
+                    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.4/whisper-1.7.4-bin-x64-release-vulkan.zip',
+                    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.3/whisper-1.7.3-bin-x64-release-vulkan.zip',
+                ]
+                for _vfb in _vulkan_fallbacks:
+                    try:
+                        _log(f'Trying Vulkan build: {_vfb.split("/")[-1]}')
+                        _ur.urlretrieve(_vfb, str(tmp_zip))
+                        if tmp_zip.exists() and tmp_zip.stat().st_size > 100000:
+                            import zipfile as _vzf
+                            with _vzf.ZipFile(str(tmp_zip), 'r') as _vz:
+                                for _vzname in _vz.namelist():
+                                    _vbn = Path(_vzname).name
+                                    if not _vbn or _vzname.endswith('/'): continue
+                                    _vdata = _vz.read(_vzname)
+                                    if len(_vdata) > 0:
+                                        (install_dir / _vbn).write_bytes(_vdata)
+                            tmp_zip.unlink(missing_ok=True)
+                            if (install_dir / 'ggml-vulkan.dll').exists():
+                                _log('✅ Vulkan build installed successfully!')
+                                break
+                            else:
+                                _sh_vk.rmtree(str(install_dir), ignore_errors=True)
+                                install_dir.mkdir(parents=True, exist_ok=True)
+                    except Exception as _vfe:
+                        _log(f'Vulkan fallback failed: {_vfe}')
+                        continue
+
         except Exception as e:
             _log(f'Extraction failed: {e}')
             return
@@ -1503,12 +1626,16 @@ def _find_whispercpp():
             return found
     return None
 
-def _find_whispercpp_model(model_size):
+def _find_whispercpp_model(model_size, model_dir=None):
     """Find ggml model — checks auto-install dir first."""
     model_map = {'tiny':'tiny','base':'base','small':'small','medium':'medium','large':'large-v3'}
     name = model_map.get(model_size, model_size)
-    search_dirs = [
-        _app_path('whisper_cpp') / 'models',  # auto-install
+    search_dirs = []
+    if model_dir:
+        search_dirs.append(Path(model_dir))
+    search_dirs += [
+        _app_path('whisper_cpp') / 'models',
+        _app_path('whisper_cpp_cuda') / 'models',
         _app_path('whisper.cpp') / 'models',
         Path('C:/whisper.cpp/models'),
         Path.home() / '.cache' / 'whisper',
@@ -1519,7 +1646,7 @@ def _find_whispercpp_model(model_size):
             if p.exists(): return str(p)
     return None
 
-def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progress_cb=None, use_word_timestamps=False, use_gpu=True):
+def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progress_cb=None, use_word_timestamps=False, use_gpu=True, log_cb=None):
     """Transcribe with best available backend:
     1. whisper.cpp + Vulkan (AMD/Intel/NVIDIA GPU on Windows — fastest)
     2. faster-whisper + CUDA (NVIDIA only)
@@ -1528,6 +1655,8 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
     use_gpu=False skips all GPU paths and forces CPU-only.
     """
     _ensure_pkgs_on_path()  # always check PKGS_DIR before importing whisper
+    # Note: do NOT bust faster_whisper/ctranslate2/torch — busting them
+    # breaks CUDA DLL initialization and causes GPU to not be detected
     import os as _os, warnings as _wn
     _wn.filterwarnings('ignore')
     _os.environ.setdefault('HF_HUB_DISABLE_IMPLICIT_TOKEN', '1')
@@ -1539,10 +1668,25 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
         ff_dir = str(Path(ffmpeg_path).parent)
         _os.environ['PATH'] = ff_dir + _os.pathsep + _os.environ.get('PATH', '')
 
-    # ── 1. whisper.cpp with Vulkan — AMD/Intel/NVIDIA GPU on Windows ─────────
-    # Skip if GPU disabled by user
-    _wcpp = _find_whispercpp() if use_gpu else None
+    # ── Detect device ─────────────────────────────────────────────────────────
+    _device_auto, _compute_auto, _dev_label_auto = _detect_whisper_device(use_gpu=use_gpu)
+
+    # ── NVIDIA CUDA — whisper.cpp cublas binary ───────────────────────────────
+    _has_nvidia = 'NVIDIA CUDA' in _dev_label_auto and use_gpu
+    _wcpp_cuda_dir = _app_path('whisper_cpp_cuda')
+    _wcpp_cuda_exe = _wcpp_cuda_dir / 'whisper-whisper-cli.exe'
+    _has_cuda = _has_nvidia and _wcpp_cuda_exe.exists()
+
+    # ── 1. whisper.cpp with Vulkan — AMD/Intel GPU only ──────────────────────
+    _wcpp = (_find_whispercpp() if use_gpu and not _has_cuda else None)
     _wmodel = _find_whispercpp_model(model_size) if _wcpp else None
+
+    # If NVIDIA cublas binary exists, use it instead
+    if _has_cuda:
+        _wcpp = str(_wcpp_cuda_exe)
+        _wmodel = _find_whispercpp_model(model_size, model_dir=_wcpp_cuda_dir / 'models')
+        if not _wmodel:
+            _wmodel = _find_whispercpp_model(model_size)
     if _wcpp and _wmodel:
         try:
             import subprocess as _sp2, tempfile as _tf2, json as _j2, re as _re2
@@ -1562,14 +1706,14 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                 json_out = Path(out_base + '.json')
 
                 # Build command — use -oj for JSON output (newer builds)
-                # -t threads, no --gpu-device flag (auto-selects Vulkan)
-                # Try -oj (newer builds) first, fall back to --output-json (older)
                 cmd = [_wcpp,
                        '-m', _wmodel,
                        '-f', str(tmp_wav),
-                       '-oj',                       # output JSON (newer flag)
+                       '-oj',
                        '--output-file', out_base,
                        '-t', '4',
+                       '-bo', '5',
+                       '-bs', '5',
                        '-l', 'auto',
                 ]
                 if initial_prompt:
@@ -1578,8 +1722,14 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 
                 print(f'[CF] whisper.cpp cmd: {" ".join(cmd)}')
                 # Use Popen to stream output for live progress
-                import re as _re_wcpp
-                proc = _sp2.Popen(cmd, stdout=_sp2.PIPE, stderr=_sp2.PIPE)
+                import re as _re_wcpp, os as _os_wcpp
+                # Set PATH to include whisper_cpp dir so vulkan-1.dll and ggml DLLs are found
+                _wcpp_dir = str(Path(_wcpp).parent)
+                _wcpp_env = dict(_os_wcpp.environ)
+                _wcpp_env['PATH'] = _wcpp_dir + _os_wcpp.pathsep + _wcpp_env.get('PATH', '')
+                # Also set GGML_VULKAN_DEBUG=1 temporarily to confirm GPU usage in stderr
+                _wcpp_env['GGML_VULKAN_DEBUG'] = '0'  # 0=off, 1=verbose GPU info
+                proc = _sp2.Popen(cmd, stdout=_sp2.PIPE, stderr=_sp2.PIPE, env=_wcpp_env)
                 # Get video duration for percentage
                 try:
                     import cv2 as _cv_dur
@@ -1589,36 +1739,88 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                 except: _dur_wcpp = 0
                 stdout_lines = []
                 stderr_lines = []
+                _cancelled = [False]
                 # Read stderr (whisper.cpp writes progress there)
                 import threading as _th_wcpp
                 def _read_stderr():
                     for line in proc.stderr:
+                        if _cancelled[0]: break
                         decoded = line.decode(errors='replace').strip()
                         stderr_lines.append(decoded)
-                        # Parse timestamp: [MM:SS.mmm --> MM:SS.mmm]
-                        _tm = _re_wcpp.search(r'\[(\d+):(\d+\.\d+)\s*-->', decoded)
+                        # Parse timestamp: [HH:MM:SS.mmm --> ...] or [MM:SS.mmm --> ...]
+                        _tm = _re_wcpp.search(r'\[(\d+):(\d+):(\d+\.\d+)\s*-->', decoded)
                         if _tm and progress_cb and _dur_wcpp > 0:
-                            mins, secs = int(_tm.group(1)), float(_tm.group(2))
-                            cur = mins * 60 + secs
+                            hrs, mins, secs = int(_tm.group(1)), int(_tm.group(2)), float(_tm.group(3))
+                            cur = hrs * 3600 + mins * 60 + secs
                             pct = min(99, int(cur / _dur_wcpp * 100))
                             dm, ds = divmod(int(cur), 60)
                             tm, ts = divmod(int(_dur_wcpp), 60)
                             progress_cb(pct, f'Transcribing (GPU)... {dm}:{ds:02d} / {tm}:{ts:02d}  ({pct}%)')
+                        else:
+                            _tm2 = _re_wcpp.search(r'\[(\d+):(\d+\.\d+)\s*-->', decoded)
+                            if _tm2 and progress_cb and _dur_wcpp > 0:
+                                mins, secs = int(_tm2.group(1)), float(_tm2.group(2))
+                                cur = mins * 60 + secs
+                                pct = min(99, int(cur / _dur_wcpp * 100))
+                                dm, ds = divmod(int(cur), 60)
+                                tm, ts = divmod(int(_dur_wcpp), 60)
+                                progress_cb(pct, f'Transcribing (GPU)... {dm}:{ds:02d} / {tm}:{ts:02d}  ({pct}%)')
                 def _read_stdout():
                     for line in proc.stdout:
+                        if _cancelled[0]: break
                         stdout_lines.append(line.decode(errors='replace'))
+
+                # Emulated progress timer — runs alongside real parsing as fallback
+                import time as _time_wcpp
+                _emu_start = _time_wcpp.time()
+                def _emulate_progress():
+                    while proc.poll() is None and not _cancelled[0]:
+                        _time_wcpp.sleep(3)
+                        if _cancelled[0]: break
+                        _elapsed = _time_wcpp.time() - _emu_start
+                        if _dur_wcpp > 0 and progress_cb:
+                            # Estimate based on ~0.3x realtime for GPU transcription
+                            _est_total = _dur_wcpp * 0.35
+                            _pct = min(95, int(_elapsed / max(_est_total, 1) * 100))
+                            _em, _es = divmod(int(_elapsed * (_dur_wcpp / max(_est_total, 1))), 60)
+                            _tm2, _ts2 = divmod(int(_dur_wcpp), 60)
+                            progress_cb(_pct, f'Transcribing (GPU)... ~{_em}:{_es:02d} / {_tm2}:{_ts2:02d}  ({_pct}%)')
                 t1 = _th_wcpp.Thread(target=_read_stderr, daemon=True); t1.start()
                 t2 = _th_wcpp.Thread(target=_read_stdout, daemon=True); t2.start()
+                t3 = _th_wcpp.Thread(target=_emulate_progress, daemon=True); t3.start()
                 # Store proc so cancel can kill it
                 _active_procs = getattr(_do_transcribe, '_active_procs', [])
                 _active_procs.append(proc)
                 _do_transcribe._active_procs = _active_procs
                 proc.wait(timeout=3600)
+                _cancelled[0] = True  # stop reader threads
                 _do_transcribe._active_procs = [p for p in _active_procs if p != proc]
-                t1.join(timeout=5); t2.join(timeout=5)
+                t1.join(timeout=3); t2.join(timeout=3)
                 stderr_txt = '\n'.join(stderr_lines)
                 stdout_txt = '\n'.join(stdout_lines)
-                if progress_cb: progress_cb(99, 'Finalising transcript...')
+
+                # Log whisper.cpp output to ClipFinder log for debugging
+                if stderr_txt.strip():
+                    if log_cb:
+                        for _line in stderr_txt.split('\n')[:20]:  # first 20 lines
+                            if _line.strip():
+                                log_cb(f'[whisper.cpp] {_line}', FG3)
+                    else:
+                        print(f'[CF] whisper.cpp stderr:\n{stderr_txt[:800]}')
+
+                if progress_cb and any('[' in l and '-->' in l for l in stderr_lines):
+                    progress_cb(99, 'Finalising transcript...')
+
+                # Detect if Vulkan GPU actually ran — must see device detection AND actual transcription
+                _vulkan_device = 'ggml_vulkan: found' in stderr_txt.lower() or 'ggml_vulkan: 0 =' in stderr_txt.lower()
+                _actually_ran = any('[' in l and '-->' in l for l in stderr_lines)
+                _error_exit = 'error: unknown argument' in stderr_txt or 'usage:' in stderr_txt
+                _vulkan_used = _vulkan_device and _actually_ran and not _error_exit
+                _gpu_fallback = not _vulkan_used
+                if _gpu_fallback and log_cb:
+                    log_cb('ℹ whisper.cpp GPU status unknown — check Task Manager for GPU usage', FG2)
+                elif _vulkan_used and log_cb:
+                    log_cb('✅ Vulkan GPU confirmed active', GREEN)
                 class _FakeResult:
                     returncode = proc.returncode
                 r = _FakeResult()
@@ -1775,14 +1977,44 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
             # faster-whisper doesn't support DirectML — use openai-whisper + torch-directml
             raise RuntimeError('directml: route to openai-whisper+directml')
 
-        fw_model = _FW(
-            model_size,
-            device=device,
-            compute_type=compute_type,
-            num_workers=2,
-            cpu_threads=0,
-            download_root=str(_app_path('whisper_models')),
-        )
+        # Verify ctranslate2 actually supports CUDA before trying
+        if device == 'cuda':
+            try:
+                import ctranslate2 as _ct2
+                _ct2_cuda = 'cuda' in _ct2.get_supported_compute_types('cuda')
+                if not _ct2_cuda:
+                    if log_cb: log_cb('⚠ CUDA not available — using CPU. Go to Settings → Install NVIDIA CUDA Support.', YELLOW)
+                    device, compute_type = 'cpu', 'int8'
+            except Exception as _ct2e:
+                if log_cb: log_cb(f'⚠ ctranslate2 check failed ({_ct2e}) — using CPU', YELLOW)
+                device, compute_type = 'cpu', 'int8'
+
+        fw_model = None
+        try:
+            fw_model = _FW(
+                model_size,
+                device=device,
+                compute_type=compute_type,
+                num_workers=2,
+                cpu_threads=0,
+                download_root=str(_app_path('whisper_models')),
+            )
+            print(f'[CF] faster-whisper loaded on {device} ({compute_type})')
+            if log_cb: log_cb(f'✅ Transcribing on {device_label}', GREEN)
+        except Exception as _cuda_err:
+            if device == 'cuda':
+                print(f'[CF] CUDA load failed ({_cuda_err}) — falling back to CPU int8')
+                if log_cb: log_cb('⚠ CUDA failed to load — falling back to CPU. Re-install CUDA torch in Settings.', YELLOW)
+                # Reset device cache so next run re-detects
+                global _WHISPER_DEVICE_CACHE
+                _WHISPER_DEVICE_CACHE = None
+                fw_model = _FW(
+                    model_size, device='cpu', compute_type='int8',
+                    num_workers=2, cpu_threads=0,
+                    download_root=str(_app_path('whisper_models')),
+                )
+            else:
+                raise
 
         # Get video duration for progress calculation
         try:
@@ -1884,7 +2116,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('ClipFinder 1.3.5.2 — AI Clip Extractor')
+        self.title(f'ClipFinder {APP_VERSION} — AI Clip Extractor')
         self.geometry('1200x800')
         # Set window + taskbar icon
         try:
@@ -2033,6 +2265,11 @@ class App(tk.Tk):
         self.after(800, self._check_first_run)
 
         def _on_close():
+            # Kill any running whisper.cpp subprocess
+            for _p in getattr(_do_transcribe, '_active_procs', []):
+                try: _p.kill()
+                except: pass
+            _do_transcribe._active_procs = []
             try: self.destroy()
             except: pass
             import os as _osx; _osx._exit(0)
@@ -2282,8 +2519,8 @@ class App(tk.Tk):
         div()
 
         # Video context
-        section('VIDEO CONTEXT  (optional)')
-        tk.Label(p, text='Who\'s in it, what\'s the drama, names, etc.',
+        section('CONTEXT & INSTRUCTIONS  (optional)')
+        tk.Label(p, text='Tell the AI what to do — names, skip sections, focus areas, etc.',
                  font=('Segoe UI', 8), fg=FG2, bg=BG2, padx=12
                  ).pack(anchor='w')
         ctx_wrap = tk.Frame(p, bg=BG3, padx=0)
@@ -2297,7 +2534,7 @@ class App(tk.Tk):
             self.cfg.update({'video_context': self.v_context.get('1.0','end').strip()}),
             save_cfg(self.cfg)
         ))
-        tk.Label(p, text='Used by AI for clip finding, auto edit, and transcription.',
+        tk.Label(p, text='e.g. "ignore the last hour" · "skip gambling content" · "focus on drama between X and Y"',
                  font=('Segoe UI', 7), fg=FG2, bg=BG2, padx=12
                  ).pack(anchor='w', pady=(2, 0))
 
@@ -2615,7 +2852,16 @@ class App(tk.Tk):
                                 font=('Segoe UI',11), fg=FG2, bg=BG).pack(expand=True)
                         self.nb_frames[key].update()
                         _lf.destroy()
-                    builders[0](self.nb_frames[key])
+                    try:
+                        builders[0](self.nb_frames[key])
+                    except Exception as _tab_err:
+                        import traceback as _tb
+                        print(f'[CF] Tab build error ({key}): {_tab_err}')
+                        _tb.print_exc()
+                        tk.Label(self.nb_frames[key],
+                                 text=f'⚠ Tab failed to load: {_tab_err}\nCheck console for details.',
+                                 font=FONT_SMALL, fg=RED, bg=BG, wraplength=400
+                                 ).pack(expand=True)
                     self._tab_built.add(key)
 
         self._ensure_tab_built = _ensure_tab_built
@@ -2770,6 +3016,31 @@ class App(tk.Tk):
                                wrap='word', state='disabled')
         self.log_box.pack(side='left', fill='both', expand=True)
         _make_scrollbar(inner, self.log_box)
+
+        # Right-click context menu for log box
+        def _log_right_click(e):
+            _m = tk.Menu(self.log_box, tearoff=0, bg=BG3, fg=FG,
+                         activebackground=ACCENT, activeforeground='#000',
+                         relief='flat', bd=1)
+            def _copy_selection():
+                try:
+                    txt = self.log_box.get('sel.first', 'sel.last')
+                    self.clipboard_clear(); self.clipboard_append(txt)
+                except: pass
+            def _copy_all():
+                txt = self.log_box.get('1.0', 'end').strip()
+                self.clipboard_clear(); self.clipboard_append(txt)
+            def _clear_log():
+                self.log_box.config(state='normal')
+                self.log_box.delete('1.0', 'end')
+                self.log_box.config(state='disabled')
+                self._log_buffer.clear()
+            _m.add_command(label='Copy Selection', command=_copy_selection)
+            _m.add_command(label='Copy All', command=_copy_all)
+            _m.add_separator()
+            _m.add_command(label='Clear Log', command=_clear_log)
+            _m.tk_popup(e.x_root, e.y_root)
+        self.log_box.bind('<Button-3>', _log_right_click)
         # Repopulate with buffered messages
         if hasattr(self, '_log_buffer') and self._log_buffer:
             self.log_box.config(state='normal')
@@ -2908,15 +3179,38 @@ class App(tk.Tk):
 
         # ── Row 2: Context + Names ────────────────────────────────────────────
         r2 = tk.Frame(ctrl, bg=BG2); r2.pack(fill='x', padx=10, pady=2)
-        lbl(r2, 'Context:').pack(side='left')
+        lbl(r2, 'Instructions:').pack(side='left')
         cw = tk.Frame(r2, bg=BG3); cw.pack(side='left', fill='x', expand=True, padx=(4,8))
         self.v_context = tk.Text(cw, height=2, font=FONT_SMALL, bg=BG3, fg=FG,
                                  insertbackground=ACCENT, relief='flat', bd=4, wrap='word')
         self.v_context.pack(fill='x')
-        self.v_context.insert('1.0', self.cfg.get('video_context',''))
-        self.v_context.bind('<FocusOut>', lambda e: (
-            self.cfg.update({'video_context': self.v_context.get('1.0','end').strip()}),
-            save_cfg(self.cfg)))
+        _ctx_ph_normal = 'ignore last hour · skip gambling · focus on drama · only clips of [name]  (transcript-based only)'
+        _ctx_ph_vision = 'girl in white shirt · gambling scenes · outdoor moments · funny reactions  (visual AI — sees the video)'
+        _ctx_ph = _ctx_ph_normal
+        if not self.cfg.get('video_context',''):
+            self.v_context.insert('1.0', _ctx_ph)
+            self.v_context.config(fg=FG3)
+        else:
+            self.v_context.insert('1.0', self.cfg.get('video_context',''))
+        def _ctx_focus_in(e):
+            cur = self.v_context.get('1.0','end').strip()
+            if cur in (_ctx_ph_normal, _ctx_ph_vision):
+                self.v_context.delete('1.0','end')
+                self.v_context.config(fg=FG)
+        def _ctx_focus_out(e):
+            val = self.v_context.get('1.0','end').strip()
+            if not val or val in (_ctx_ph_normal, _ctx_ph_vision):
+                _ph = _ctx_ph_vision if self.app_mode.get() == 'vision' else _ctx_ph_normal
+                self.v_context.delete('1.0','end')
+                self.v_context.insert('1.0', _ph)
+                self.v_context.config(fg=FG3)
+                val = ''
+            else:
+                self.v_context.config(fg=FG)
+            self.cfg.update({'video_context': val})
+            save_cfg(self.cfg)
+        self.v_context.bind('<FocusIn>', _ctx_focus_in)
+        self.v_context.bind('<FocusOut>', _ctx_focus_out)
         # Names field — helps AI identify who is who
         lbl(r2, 'Names:').pack(side='left')
         nw = tk.Frame(r2, bg=BG3); nw.pack(side='left', fill='x', expand=True, padx=(4,0))
@@ -2989,6 +3283,10 @@ class App(tk.Tk):
                                             relief='flat', bd=0, cursor='hand2', padx=7, pady=4,
                                             command=lambda: self._set_mode('interview'))
         self.mode_interview_btn.pack(side='left', padx=(0,2))
+        self.mode_vision_btn = tk.Button(r4, text='🎯 Vision', font=FONT_SMALL,
+                                         relief='flat', bd=0, cursor='hand2', padx=7, pady=4,
+                                         command=lambda: self._set_mode('vision'))
+        self.mode_vision_btn.pack(side='left', padx=(0,2))
 
         self._refresh_mode_btns()
 
@@ -3605,7 +3903,8 @@ class App(tk.Tk):
         self.tweet_tone = tk.StringVar(value='drama')
         self._tweet_tone_btns = {}
         for tone, label in [('drama','🔥 Drama'),('tea','☕ Tea'),
-                             ('breaking','📰 Breaking'),('hype','💥 Hype')]:
+                             ('breaking','📰 Breaking'),('hype','💥 Hype'),
+                             ('exaggerate','🤯 Exaggerate')]:
             b = tk.Button(tone_row, text=label, font=FONT_SMALL,
                           relief='flat', bd=0, cursor='hand2', padx=8, pady=5,
                           command=lambda t=tone: self._set_tweet_tone(t))
@@ -3655,7 +3954,7 @@ class App(tk.Tk):
             self.tweet_out.delete('1.0', 'end')
             self.tweet_out.insert('1.0', txt if txt else 'Hit ⚡ Generate Tweet to get options.')
             _update_char_count()
-        for i, lbl in enumerate(['Option 1', 'Option 2', 'Option 3']):
+        for i, lbl in enumerate(['🔥 Hot Take', '💬 Quote', '📢 Announcement']):
             tb = tk.Button(tab_bar, text=lbl, font=FONT_SMALL,
                            bg=ACCENT if i == 0 else BG3,
                            fg='#000' if i == 0 else FG2,
@@ -4443,8 +4742,19 @@ class App(tk.Tk):
     # ── Pipeline ──────────────────────────────────────────────────────────────
 
     def _set_mode(self, mode):
+        if mode == 'vision':
+            from tkinter import messagebox as _mb
+            _mb.showinfo('🎯 Vision Mode',
+                'Vision Mode uses Gemini to visually analyze your video frames.\n\n'
+                '✅ Can detect: clothing, scenes, gambling, visual context\n'
+                '✅ Works for: "girl in white shirt", "outdoor scenes", "funny moments"\n\n'
+                '⚠️ Takes 2-5x longer than Normal mode\n'
+                '⚠️ Uses more Gemini API quota (sends video frames)\n'
+                '⚠️ Best for videos under 60 minutes\n'
+                '⚠️ Requires a Gemini API key in Settings\n\n'
+                'Your Instructions box will be applied visually to the video.')
         self.app_mode.set(mode)
-        self.interview_mode.set(mode == 'interview')  # compat
+        self.interview_mode.set(mode == 'interview')
         self._refresh_mode_btns()
         self._toggle_mode_frames()
         self.cfg['app_mode'] = mode
@@ -4472,8 +4782,24 @@ class App(tk.Tk):
         if hasattr(self, 'mode_interview_btn'):
             self.mode_interview_btn.config(
                 bg=ACCENT if m=='interview' else BG3, fg='#000' if m=='interview' else FG)
+        if hasattr(self, 'mode_vision_btn'):
+            self.mode_vision_btn.config(
+                bg='#7C3AED' if m=='vision' else BG3, fg='#fff' if m=='vision' else FG)
         if hasattr(self, 'go_btn'):
-            self.go_btn.config(text='▶  FIND CLIPS')
+            if m == 'vision':
+                self.go_btn.config(text='🎯 VISION FIND CLIPS')
+            else:
+                self.go_btn.config(text='▶  FIND CLIPS')
+        # Update instructions placeholder based on mode
+        if hasattr(self, 'v_context'):
+            _normal_ph = 'ignore last hour · skip gambling · focus on drama · only clips of [name]  (transcript-based only)'
+            _vision_ph = 'girl in white shirt · gambling scenes · outdoor moments · funny reactions  (visual AI — sees the video)'
+            cur = self.v_context.get('1.0', 'end').strip()
+            if cur in (_normal_ph, _vision_ph, ''):
+                self.v_context.config(state='normal')
+                self.v_context.delete('1.0', 'end')
+                self.v_context.insert('1.0', _vision_ph if m == 'vision' else _normal_ph)
+                self.v_context.config(fg=FG3)
 
     def _toggle_mode_frames(self):
         m = self.app_mode.get()
@@ -4682,6 +5008,22 @@ class App(tk.Tk):
                     model_size = 'small'
                 else:                        # 60+ min VOD
                     model_size = 'medium' if _has_gpu else 'small'
+
+                # If using whisper.cpp, cap to models actually downloaded
+                if _has_gpu and 'whisper.cpp' in _dev_label_auto:
+                    _wcpp_dir = _app_path('whisper_cpp')
+                    _available = []
+                    for _ms in ['tiny', 'base', 'small', 'medium']:
+                        _mf = _wcpp_dir / 'models' / f'ggml-{_ms}.bin'
+                        if _mf.exists():
+                            _available.append(_ms)
+                    if _available and model_size not in _available:
+                        # Pick largest available model
+                        _order = ['medium', 'small', 'base', 'tiny']
+                        for _mo in _order:
+                            if _mo in _available:
+                                model_size = _mo
+                                break
                 self.log(f'[Auto] Video {_duration:.0f}s → whisper {model_size} (GPU={_has_gpu}, {_dev_label_auto})', FG2)
             self.log(f'Transcribing: {Path(vid).name}  [{model_size}]')
 
@@ -4722,7 +5064,8 @@ class App(tk.Tk):
                                     initial_prompt=_ctx_prompt or None,
                                     ffmpeg_path=_ff,
                                     progress_cb=_progress_cb,
-                                    use_gpu=_use_gpu_flag)
+                                    use_gpu=_use_gpu_flag,
+                                    log_cb=lambda m, c=FG2: self.after(0, lambda: self.log(m, c)))
             self.ticker_on = False
             self.srt_result = result
 
@@ -4751,6 +5094,30 @@ class App(tk.Tk):
 
             if then_ai:
                 if not getattr(self, '_cancel_requested', False):
+                    # Vision Mode: run visual frame analysis first to guide clip selection
+                    if self.app_mode.get() == 'vision':
+                        try:
+                            # Read all Gemini keys from cfg (same way the AI provider does)
+                            _primary = self.cfg.get('key_gemini', '').strip()
+                            _extras = [k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()]
+                            _gemini_keys = ([_primary] if _primary else []) + _extras
+                            _instructions = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
+                            _ph_texts = ['ignore last hour', 'girl in white shirt', 'e.g. ignore']
+                            if any(_instructions.startswith(p) for p in _ph_texts): _instructions = ''
+                            _vision_hits = self._run_vision_mode(vid, _instructions, _gemini_keys)
+                            if _vision_hits:
+                                # Store vision hits to inject into AI prompt as additional context
+                                _ts_list = ', '.join(f'{int(h["timestamp"]//60)}:{int(h["timestamp"]%60):02d}' for h in _vision_hits)
+                                _vision_ctx = f'\n\nVISION ANALYSIS RESULTS: The following timestamps were visually identified as matching the user instructions: {_ts_list}\nPrioritize clips at or near these timestamps.'
+                                self._vision_context = _vision_ctx
+                            else:
+                                self._vision_context = ''
+                        except Exception as _ve:
+                            self.log(f'⚠ Vision Mode error: {_ve}', YELLOW)
+                            self.log('  Falling back to normal transcript analysis', FG2)
+                            self._vision_context = ''
+                    else:
+                        self._vision_context = ''
                     self._run_ai()
                 else:
                     self.log('⛔ Cancelled — skipping AI', YELLOW)
@@ -4793,12 +5160,15 @@ class App(tk.Tk):
             last_err = None
             for try_model in try_models:
                 try:
+                    _gemini_contents = 'IMPORTANT: Your entire response must be ONLY a JSON array starting with [. No ```json, no backticks, no text before or after the JSON.\n\n' + self._current_prompt
                     resp = client.models.generate_content(
-                        model=try_model, contents=self._current_prompt,
-                        config={'temperature': 0.3, 'max_output_tokens': 4096})
+                        model=try_model, contents=_gemini_contents,
+                        config={'temperature': 0.3, 'max_output_tokens': 8192})
                     return resp.text.strip()
                 except Exception as _e:
-                    if '429' in str(_e) or 'RESOURCE_EXHAUSTED' in str(_e):
+                    _es = str(_e)
+                    # 429 = rate limit, 404 = model dead/not found — both try next model
+                    if '429' in _es or 'RESOURCE_EXHAUSTED' in _es or '404' in _es or 'not found' in _es.lower() or 'NOT_FOUND' in _es:
                         last_err = _e; continue
                     raise
             raise last_err or Exception('Gemini quota exhausted')
@@ -4892,7 +5262,27 @@ class App(tk.Tk):
 
         # Build prompt
         ctx_raw = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
-        context_block = f'VIDEO CONTEXT: {ctx_raw}\n' if ctx_raw else ''
+
+        # Build smart context block — parse user instructions as AI directives
+        context_block = ''
+        # Inject vision mode results if available
+        _vision_ctx = getattr(self, '_vision_context', '')
+        if ctx_raw:
+            context_block = f'''== ⚠️ MANDATORY EDITOR INSTRUCTIONS — MUST FOLLOW EXACTLY ==
+The user has given you STRICT instructions. Violating ANY of these is a failure:
+
+{ctx_raw}
+
+ENFORCEMENT RULES:
+- "ignore the last X minutes/hours" → calculate the timestamp and REJECT any clip whose start time is within that range. Do NOT output those clips.
+- "ignore/skip [topic]" → if ANY part of a clip mentions that topic, REJECT the entire clip. Do not include it.
+- "focus on [person/topic]" → ONLY include clips featuring that person or topic. Reject everything else.
+- "only clips from [person]" → the speaker in the clip MUST be that person. Reject all others.
+- Time ranges "skip X:XX:XX-X:XX:XX" → reject any clip overlapping that range.
+Before outputting EACH clip, verify it passes ALL instructions above. If it fails ANY check, do not include it.
+== END MANDATORY INSTRUCTIONS ==
+
+'''
 
         # Auto-extract video title from filename — helps AI know who's in the video
         _vid_path = self.v_video.get().strip() if hasattr(self, 'v_video') else ''
@@ -4916,6 +5306,8 @@ class App(tk.Tk):
         _ep = getattr(self, '_current_energy_peaks', [])
         if _ep:
             context_block += f'AUDIO ENERGY PEAKS: {", ".join(f"{t:.0f}s" for t in _ep)}\n'
+        if _vision_ctx:
+            context_block += _vision_ctx + '\n'
         import re as _re
         ts_matches = _re.findall(r'\[(\d{2}:\d{2}:\d{2})', transcript_chunk)
         section_note = f'SECTION: {ts_matches[0]} → {ts_matches[-1]}. Find clips within this range only.\n' if len(ts_matches) >= 2 else ''
@@ -4938,6 +5330,10 @@ class App(tk.Tk):
                                .replace('{context_block}', context_block + section_note) \
                                .replace('{names_block}', names_block)
 
+        # Append instructions reminder at the END so AI sees them right before outputting
+        if ctx_raw:
+            prompt += f'\n\n⚠️ FINAL CHECK BEFORE OUTPUT: Re-read these instructions and verify EVERY clip passes: {ctx_raw}\nRemove any clip that violates these instructions before outputting.'
+
         # Try each key in pool — ONLY rotate on confirmed rate-limit (429 / RESOURCE_EXHAUSTED)
         # Non-RL errors (auth, parse, network) raise immediately — no rotation
         _last_err = None
@@ -4956,7 +5352,7 @@ class App(tk.Tk):
                         try:
                             resp = client.models.generate_content(
                                 model=try_model, contents=prompt,
-                                config={'temperature': 0.3, 'max_output_tokens': 4096})
+                                config={'temperature': 0.3, 'max_output_tokens': 8192})
                             raw = resp.text.strip()
                             last_merr = None
                             _all_models_rl = False
@@ -4984,17 +5380,29 @@ class App(tk.Tk):
                     except ImportError:
                         raise ImportError('groq package broken — go to Settings → Update All Packages')
                     _groq_prompt = prompt
-                    # Groq has ~6000 token input limit on free — truncate if needed
                     if len(_groq_prompt) > 20000:
                         _groq_prompt = _groq_prompt[:20000] + '\n[Transcript truncated — find clips from the above]'
                         self.log('[Groq] Prompt truncated to fit token limit', FG2)
-                    resp = _G(api_key=key).chat.completions.create(
-                        model=model, messages=[{'role':'user','content':_groq_prompt}],
-                        temperature=0.3, max_tokens=4096)
-                    if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
-                        raw = (resp.choices[0].message.content or '').strip()
-                    else:
-                        raise Exception('Groq returned empty response')
+                    # Try each model — rotate on 429 to avoid hammering rate-limited model
+                    all_groq_models = data.get('models', [model])
+                    groq_try_models = [model] + [m for m in all_groq_models if m != model]
+                    raw = None
+                    for _gm in groq_try_models:
+                        try:
+                            resp = _G(api_key=key).chat.completions.create(
+                                model=_gm, messages=[{'role':'user','content':_groq_prompt}],
+                                temperature=0.3, max_tokens=4096)
+                            if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
+                                raw = (resp.choices[0].message.content or '').strip()
+                                break
+                        except Exception as _ge:
+                            _ges = str(_ge)
+                            if '429' in _ges or '413' in _ges:
+                                # Rate limit or too large — try next model
+                                continue
+                            raise
+                    if raw is None:
+                        raise Exception('All Groq models rate-limited')
 
                 elif lib == 'openrouter':
                     _ensure_pkgs_on_path()
@@ -5151,45 +5559,201 @@ class App(tk.Tk):
 
         # Parse JSON response
         clean = raw.strip()
-        clean = re.sub(r'```(?:json)?', '', clean, flags=re.IGNORECASE)
+        # Strip ALL markdown code fences (Gemini loves wrapping in ```json)
+        clean = re.sub(r'```(?:json|JSON)?\s*', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'```\s*$', '', clean, flags=re.MULTILINE)
         clean = clean.replace('`', '').strip()
-        # Handle object wrapper like {"clips": [...]} or {"results": [...]}
-        if clean.startswith('{'):
-            try:
-                obj = json.loads(clean)
-                for v in obj.values():
-                    if isinstance(v, list):
-                        return v
-            except: pass
-        # Extract JSON array — skip any preamble text before the array
-        s, e = clean.find('['), clean.rfind(']')
-        if s != -1 and e > s:
-            clean = clean[s:e+1]
+        # Strip any preamble text before the JSON array/object
+        # Gemini sometimes says "Here are the clips:" before the JSON
+        _arr_start = clean.find('[')
+        _obj_start = clean.find('{')
+        if _arr_start == -1 and _obj_start == -1:
+            raise ValueError(f'Could not parse AI response: {raw[:200]}')
+        # Pick whichever comes first
+        if _arr_start != -1 and (_obj_start == -1 or _arr_start < _obj_start):
+            clean = clean[_arr_start:]
+        elif _obj_start != -1:
+            clean = clean[_obj_start:]
         try:
             parsed = json.loads(clean)
             if isinstance(parsed, list): return parsed
-            # If it parsed as a dict, look for list values
             if isinstance(parsed, dict):
                 for v in parsed.values():
                     if isinstance(v, list): return v
         except json.JSONDecodeError:
             pass
-        last_brace = clean.rfind('}')
-        if last_brace != -1:
-            trimmed = clean[:last_brace+1]
-            if not trimmed.rstrip().endswith(']'):
-                trimmed = trimmed + ']'
-            try:
-                return json.loads(trimmed)
-            except json.JSONDecodeError:
-                pass
-        objects = re.findall(r'\{[^{}]+\}', clean, re.DOTALL)
-        if objects:
-            try:
-                return json.loads('[' + ','.join(objects) + ']')
-            except json.JSONDecodeError:
-                pass
+
+        # Try to repair truncated JSON — Gemini sometimes cuts off mid-response
+        # Strategy: find all complete objects and wrap them in an array
+        try:
+            # Find the last complete object (ends with })
+            last_complete = -1
+            depth = 0
+            in_str = False
+            esc = False
+            for i, ch in enumerate(clean):
+                if esc: esc = False; continue
+                if ch == '\\' and in_str: esc = True; continue
+                if ch == '"' and not esc: in_str = not in_str; continue
+                if in_str: continue
+                if ch == '{': depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0: last_complete = i
+            if last_complete > 0:
+                repaired = clean[:last_complete+1]
+                # Wrap in array if needed
+                repaired = repaired.strip()
+                if not repaired.startswith('['):
+                    repaired = '[' + repaired
+                if not repaired.endswith(']'):
+                    repaired = repaired + ']'
+                # Remove trailing comma before ]
+                repaired = re.sub(r',\s*\]', ']', repaired)
+                parsed = json.loads(repaired)
+                if isinstance(parsed, list) and parsed:
+                    return parsed
+        except Exception:
+            pass
         raise ValueError(f'Could not parse AI response: {raw[:200]}')
+
+    def _run_vision_mode(self, vid, instructions, gemini_keys):
+        """Vision Mode: sample video frames and send to Gemini for visual analysis."""
+        import base64 as _b64, tempfile as _tmpf, time as _t
+        import cv2 as _cv
+
+        self.log('🎯 Vision Mode: sampling video frames...', ACCENT)
+        self.set_progress('🎯 Vision Mode: extracting frames...', pct=5)
+
+        cap = _cv.VideoCapture(str(vid))
+        fps = cap.get(_cv.CAP_PROP_FPS) or 30
+        total_frames = cap.get(_cv.CAP_PROP_FRAME_COUNT)
+        duration = total_frames / fps
+        cap.release()
+
+        # Sample 1 frame every 30 seconds — good balance for long videos
+        sample_interval = 30  # seconds between frames
+        frame_times = list(range(0, int(duration), sample_interval))
+        max_frames = 60  # cap at 60 frames to stay within Gemini limits
+        if len(frame_times) > max_frames:
+            import random as _rnd
+            frame_times = sorted(_rnd.sample(frame_times, max_frames))
+
+        self.log(f'🎯 Sampling {len(frame_times)} frames from {int(duration/60)}min video...', FG2)
+
+        # Extract frames
+        frames_b64 = []
+        cap = _cv.VideoCapture(str(vid))
+        for ts in frame_times:
+            cap.set(_cv.CAP_PROP_POS_MSEC, ts * 1000)
+            ret, frame = cap.read()
+            if not ret: continue
+            # Resize to reduce tokens — 640px wide
+            h, w = frame.shape[:2]
+            if w > 640:
+                frame = _cv.resize(frame, (640, int(h * 640 / w)))
+            _, buf = _cv.imencode('.jpg', frame, [_cv.IMWRITE_JPEG_QUALITY, 70])
+            frames_b64.append((ts, _b64.b64encode(buf.tobytes()).decode()))
+        cap.release()
+
+        self.log(f'🎯 Extracted {len(frames_b64)} frames — sending to Gemini Vision...', FG2)
+        self.set_progress('🎯 Vision Mode: analyzing frames...', pct=20)
+
+        if not frames_b64:
+            raise Exception('Could not extract frames from video')
+
+        # Build Gemini vision prompt
+        vision_prompt = f"""You are analyzing video frames to find the best viral clips for a streaming content channel.
+
+USER INSTRUCTIONS: {instructions or 'Find the most viral, dramatic, or entertaining moments'}
+
+You are looking at {len(frames_b64)} frames sampled every {sample_interval} seconds from a {int(duration/60)} minute video.
+Each frame has a timestamp showing when it occurs in the video.
+
+For each interesting moment you find, look at the visual content and identify:
+- What is visually happening (people, actions, emotions, scene)
+- Whether this matches the user's instructions
+- The timestamp of this frame
+
+Return a JSON array of interesting timestamps. Format:
+[
+  {{"timestamp": 45, "reason": "Person in white shirt reacting dramatically", "confidence": 0.9}},
+  {{"timestamp": 180, "reason": "Gambling/casino scene visible on screen", "confidence": 0.85}}
+]
+
+Only include moments that match the user instructions or are genuinely viral/entertaining.
+Confidence should be 0.0-1.0. Only include confidence > 0.6.
+Return ONLY the JSON array, no other text."""
+
+        # Build content with frames
+        from google import genai as _gv
+        if not gemini_keys:
+            raise Exception('No Gemini API key — add one in Settings for Vision Mode')
+
+        # Build multipart content
+        contents = [vision_prompt]
+        for ts, b64 in frames_b64:
+            mm, ss = divmod(int(ts), 60)
+            contents.append(f'\n[Frame at {mm}:{ss:02d}]')
+            contents.append({
+                'inline_data': {
+                    'mime_type': 'image/jpeg',
+                    'data': b64
+                }
+            })
+
+        # Try each key + model combination
+        raw = None
+        last_vision_err = None
+        vision_models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
+        for _vkey in gemini_keys:
+            for _vmodel in vision_models:
+                try:
+                    from google import genai as _gv
+                    client = _gv.Client(api_key=_vkey)
+                    self.log(f'🎯 Trying {_vmodel}...', FG2)
+                    resp = client.models.generate_content(
+                        model=_vmodel,
+                        contents=contents,
+                        config={'temperature': 0.2, 'max_output_tokens': 4096}
+                    )
+                    raw = resp.text.strip()
+                    break
+                except Exception as _ve:
+                    _ves = str(_ve)
+                    if '503' in _ves or '429' in _ves or 'UNAVAILABLE' in _ves or 'RESOURCE_EXHAUSTED' in _ves or '404' in _ves:
+                        last_vision_err = _ve
+                        continue
+                    raise
+            if raw:
+                break
+
+        if not raw:
+            raise Exception(f'All Gemini keys/models unavailable for Vision Mode: {last_vision_err}')
+
+        # Parse timestamps from response
+        import json as _jv, re as _rev
+        try:
+            _clean = _rev.sub(r'```(?:json)?', '', raw).replace('`', '').strip()
+            _s, _e = _clean.find('['), _clean.rfind(']')
+            if _s != -1 and _e > _s:
+                _clean = _clean[_s:_e+1]
+            vision_hits = _jv.loads(_clean)
+        except Exception:
+            self.log(f'⚠ Vision response parse failed — falling back to normal mode', YELLOW)
+            return None
+
+        if not vision_hits:
+            self.log('⚠ Vision Mode found no matching moments — try different instructions', YELLOW)
+            return None
+
+        self.log(f'🎯 Vision found {len(vision_hits)} visual matches!', GREEN)
+        for h in vision_hits[:5]:
+            ts = h.get('timestamp', 0)
+            mm, ss = divmod(int(ts), 60)
+            self.log(f'  {mm}:{ss:02d} — {h.get("reason","?")} (conf: {h.get("confidence",0):.0%})', FG2)
+
+        return vision_hits
 
     def _run_ai(self):
         if getattr(self, '_cancel_requested', False):
@@ -5518,35 +6082,34 @@ class App(tk.Tk):
                         'all openrouter models unavailable',
                         'no api key', 'no key configured'])
 
-                # Retry loop — only for rate-limit / transient errors (not fatal ones)
+                # Retry loop — immediately try other providers, no waiting
                 _retry = 0
+                _excluded = set()
                 while not clips and _retry < 3:
                     if getattr(self, '_cancel_requested', False):
                         return
-                    # Don't retry fatal errors — they won't resolve with a cooldown
                     if _is_fatal(last_err):
                         self.log(f'[{label}] Fatal error — not retrying: {str(last_err)[:100]}', RED)
                         break
                     _retry += 1
-                    _wait = 30 * _retry  # 30s, 60s, 90s
-                    with _rl_lock:
-                        if not _cooling_down[0]:
-                            _cooling_down[0] = True
-                            self.log(f'[{label}] All providers busy — waiting {_wait}s (attempt {_retry}/3)...', YELLOW)
-                    for _ in range(_wait):
-                        if getattr(self, '_cancel_requested', False):
-                            return
-                        _time.sleep(1)
-                    with _rl_lock:
-                        _cooling_down[0] = False
-                    # Clear all rate-limit marks after cooldown — keys may have recovered
-                    with self._rl_provs_lock:
-                        self._rl_provs.clear()
-                        self._rl_since.clear()
-                    self.after(0, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
-                    if getattr(self, '_cancel_requested', False):
-                        return
-                    clips, last_err = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+                    # Add current failed provider to exclude list so we try a different one
+                    if last_err or True:  # always rotate to next provider
+                        _excluded.add(prov)
+                    # Try immediately with a different provider — no sleep
+                    clips, last_err = _try_chunk(chunk, label, exclude=_excluded, start_prov=None)
+                    if not clips and not last_err:
+                        # Got empty result — try one more provider before giving up
+                        _excluded = set()  # reset exclusion for final attempt
+                        _wait = min(10, 5 * _retry)  # tiny wait only if truly no providers left
+                        self.log(f'[{label}] No clips found — trying again ({_retry}/3)...', YELLOW)
+                        for _ in range(_wait):
+                            if getattr(self, '_cancel_requested', False):
+                                return
+                            _time.sleep(1)
+                        with self._rl_provs_lock:
+                            self._rl_provs.clear()
+                            self._rl_since.clear()
+                        clips, last_err = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
 
                 if not clips:
                     if last_err:
@@ -6670,15 +7233,16 @@ class App(tk.Tk):
 
     def _refresh_tweet_tones(self):
         tone_styles = {
-            'drama':    ('🔥 Drama',   ACCENT),
-            'tea':      ('☕ Tea',     '#8B5CF6'),
-            'breaking': ('📰 Breaking','#3B82F6'),
-            'hype':     ('💥 Hype',    '#EF4444'),
+            'drama':      ('🔥 Drama',     ACCENT),
+            'tea':        ('☕ Tea',       '#8B5CF6'),
+            'breaking':   ('📰 Breaking',  '#3B82F6'),
+            'hype':       ('💥 Hype',      '#EF4444'),
+            'exaggerate': ('🤯 Exaggerate','#F59E0B'),
         }
         cur = self.tweet_tone.get()
         for t, b in self._tweet_tone_btns.items():
             active = (t == cur)
-            color = tone_styles[t][1]
+            color = tone_styles.get(t, (t, ACCENT))[1]
             b.config(bg=color if active else BG3,
                      fg='#fff' if active else FG3)
 
@@ -6725,17 +7289,11 @@ class App(tk.Tk):
             ctx   = self.tweet_context.get('1.0', 'end').strip() if hasattr(self, 'tweet_context') else ''
             tone  = self.tweet_tone.get()
 
-            tone_notes = {
-                'drama':    'Sharp and dry like a real Twitter drama account. Punchy sentences, deadpan observations.',
-                'tea':      'Gossip columnist energy. Knowing tone. "Allegedly." "Sources say." Reading between lines.',
-                'breaking': 'Straight-faced news anchor covering streaming drama like geopolitics. Completely serious.',
-                'hype':     'Maximum chaos energy. Hyperbole cranked to 11. Treat everything like a world event.',
-            }
-
             # Use first 6000 chars of transcript for tweet gen
+            tone_desc = TWEET_TONE_PROMPTS.get(tone, TWEET_TONE_PROMPTS['drama'])
             prompt = TWEET_PROMPT.replace('{context}', ctx or 'No additional context provided.')
             prompt = prompt.replace('{transcript}', self.transcript[:6000])
-            prompt += f'\n\nTone style: {tone_notes.get(tone, "")}'
+            prompt = prompt.replace('{tone}', tone_desc)
 
             # Try all models in the selected provider, then fall back to others
             raw = None
@@ -7573,7 +8131,16 @@ class App(tk.Tk):
 
     def _dl_run(self, url, folder):
         try:
-            import yt_dlp, shutil as _sh, re as _re, urllib.request as _ur, json as _json
+            try:
+                import yt_dlp, shutil as _sh, re as _re, urllib.request as _ur, json as _json
+            except PermissionError as _pe:
+                raise RuntimeError(
+                    'Permission denied accessing yt-dlp files.\n\n'
+                    'Fix: Close ClipFinder, right-click the ClipFinder shortcut → '
+                    'Properties → Compatibility → uncheck "Run as administrator", '
+                    'then relaunch normally.\n\n'
+                    'If that doesn\'t work, go to Settings → Update All Packages to repair.'
+                )
 
             # ── VOD detection — manual toggle OR auto-detect ──────────────
             _manual_vod = getattr(self, 'v_vod_mode', None)
@@ -7716,13 +8283,33 @@ class App(tk.Tk):
             browser = browser.get().strip() if browser else ''
             is_youtube = any(x in url.lower() for x in ['youtube.com', 'youtu.be'])
             is_twitter = any(x in url.lower() for x in ['twitter.com', 'x.com', 't.co'])
+            is_instagram = 'instagram.com' in url.lower()
             has_cookies = bool(cookies and Path(cookies).exists())
             has_browser = bool(browser)
 
-            if is_youtube and has_browser:
-                # Browser cookies = web client unlocked = true 1080p+
-                ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
-                self._dl_log_write(f'🍪  Using {browser} browser cookies for YouTube HD', FG2)
+            if (is_youtube or is_instagram) and has_browser:
+                # Browser cookies unlock YouTube 1080p and Instagram private/story content
+                # Try to pre-copy the cookie database to avoid lock issues when browser is open
+                try:
+                    import tempfile as _tf_ck, shutil as _sh_ck, sqlite3 as _sq_ck
+                    _browser_lower = browser.lower()
+                    _cookie_paths = {
+                        'brave':   Path.home() / 'AppData/Local/BraveSoftware/Brave-Browser/User Data/Default/Network/Cookies',
+                        'chrome':  Path.home() / 'AppData/Local/Google/Chrome/User Data/Default/Network/Cookies',
+                        'edge':    Path.home() / 'AppData/Local/Microsoft/Edge/User Data/Default/Network/Cookies',
+                        'firefox': None,  # Firefox uses different format, let yt-dlp handle it
+                    }
+                    _ck_src = _cookie_paths.get(_browser_lower)
+                    if _ck_src and _ck_src.exists():
+                        _ck_tmp = Path(_tf_ck.gettempdir()) / f'cf_{_browser_lower}_cookies_tmp'
+                        _sh_ck.copy2(str(_ck_src), str(_ck_tmp))
+                        self._dl_log_write(f'🍪  Using {browser} browser cookies', FG2)
+                    else:
+                        ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
+                        self._dl_log_write(f'🍪  Using {browser} browser cookies', FG2)
+                except Exception:
+                    ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
+                    self._dl_log_write(f'🍪  Using {browser} browser cookies', FG2)
             elif has_cookies:
                 ydl_opts['cookiefile'] = cookies
                 self._dl_log_write('🍪  Using cookies.txt', FG2)
@@ -7778,6 +8365,13 @@ class App(tk.Tk):
                     (None, twitter_fmt),
                     (None, 'best[ext=mp4]/best'),
                 ]
+            elif is_instagram:
+                # Instagram: cookies required for stories/private content
+                # Don't use web client — it strips cookies
+                client_attempts = [
+                    (None, 'best[ext=mp4]/best'),
+                    (None, 'best'),
+                ]
             else:
                 # Generic — web client + fmt
                 client_attempts = [
@@ -7820,6 +8414,29 @@ class App(tk.Tk):
                             '2. Log into x.com in your browser\n'
                             '3. Click the extension → Export cookies for x.com\n'
                             '4. In ClipFinder Downloader tab → set the cookies.txt path')
+                    if 'instagram' in url.lower() and ('log in' in _ex_str.lower() or 'login' in _ex_str.lower() or 'authenticate' in _ex_str.lower()):
+                        # yt-dlp can't handle Instagram Stories — try gallery-dl instead
+                        self._dl_log_write('⚠ yt-dlp failed for Instagram — trying gallery-dl...', YELLOW)
+                        try:
+                            _gdl_result = self._dl_instagram_gallery_dl(url, outdir, cookies)
+                            if _gdl_result:
+                                info = {'title': Path(_gdl_result).stem, '_gallery_dl_path': _gdl_result}
+                                break
+                        except Exception as _gdl_err:
+                            self._dl_log_write(f'gallery-dl also failed: {_gdl_err}', RED)
+                        raise Exception(
+                            'Instagram download failed — Stories require login cookies.\n\n'
+                            'Fix:\n'
+                            '1. Install "Get cookies.txt LOCALLY" browser extension\n'
+                            '2. Log into instagram.com in your browser\n'
+                            '3. Click the extension → Export cookies for instagram.com\n'
+                            '4. Save the file and set its path in Downloader → Cookies tab\n\n'
+                            'Note: Instagram Stories are heavily restricted and may still fail.')
+                    if 'could not copy' in _ex_str.lower() and 'cookie database' in _ex_str.lower():
+                        raise Exception(
+                            'Could not read browser cookies — browser is open and locking the cookie file.\n\n'
+                            'Fix: close your browser completely, then try the download again.\n'
+                            'Or export a cookies.txt file manually using "Get cookies.txt LOCALLY" extension.')
                     continue
             if not info:
                 raise last_err or Exception('All download attempts failed')
@@ -7835,20 +8452,20 @@ class App(tk.Tk):
             # Fix generic titles like "master", "index", "playlist"
             if title.lower() in ('master', 'index', 'playlist', 'na', 'video', ''):
                 title = info.get('description', '')[:60] or info.get('webpage_url_basename','') or title
-            # Rename downloaded file if uploader was NA
-            if uploader and uploader.upper() != 'NA':
-                import re as _re_fn, glob as _gl
+            # Rename downloaded file — only the specific file we just downloaded, never others
+            if uploader and uploader.upper() != 'NA' and downloaded and Path(downloaded).exists():
+                import re as _re_fn
                 _safe_up = _re_fn.sub(r'[\/:*?"<>|]', '', uploader).strip()
                 _safe_ti = _re_fn.sub(r'[\/:*?"<>|]', '', title).strip()[:60]
                 _new_name = f'{_safe_up} - {_safe_ti} - ClipFinder.mp4' if _safe_ti else f'{_safe_up} - ClipFinder.mp4'
-                # Find and rename the downloaded file
                 try:
-                    _dl_files = sorted(Path(_out_folder).glob('*NA*ClipFinder*'), key=lambda x: x.stat().st_mtime, reverse=True)
-                    if _dl_files:
-                        _new_path = Path(_out_folder) / _new_name
-                        _dl_files[0].rename(_new_path)
+                    _new_path = Path(downloaded).parent / _new_name
+                    if not _new_path.exists():
+                        Path(downloaded).rename(_new_path)
+                        downloaded = str(_new_path)
+                        self._last_dl_path = downloaded
                         self._dl_log_write(f'✏️  Renamed: {_new_name}', FG2)
-                except Exception as _re: pass
+                except Exception: pass
             self._dl_log_write('', FG2)
             self._dl_log_write(f'✅  Done: {title}', GREEN)
             self._dl_log_write(f'📁  Saved to: {folder}', FG2)
@@ -7856,7 +8473,11 @@ class App(tk.Tk):
             # Find downloaded file
             downloaded = None
             try:
-                rds = info.get('requested_downloads', [])
+                # gallery-dl fallback — path already known
+                if info.get('_gallery_dl_path'):
+                    downloaded = info['_gallery_dl_path']
+                else:
+                    rds = info.get('requested_downloads', [])
                 if rds and rds[0].get('filepath'):
                     downloaded = rds[0]['filepath']
                     # Handle merge — final file may have .mp4 extension
@@ -7888,6 +8509,9 @@ class App(tk.Tk):
                         if not self.v_outdir.get():
                             self.v_outdir.set(str(Path(p).parent))
                         self._switch_nb('clips')
+                        # Re-set after tab switch to survive any focus-out resets
+                        self.after(50, lambda _p=p: self.v_video.set(_p))
+                        self.after(60, lambda: self._video_entry.config(fg=FG) if hasattr(self, '_video_entry') else None)
                         self.log(f'✅ Loaded: {Path(p).name} — hit ▶ FIND CLIPS', GREEN)
                     elif self.v_auto_load.get():
                         self._dl_log_write('📎  Loading into Clip Finder...', ACCENT2)
@@ -7949,13 +8573,64 @@ class App(tk.Tk):
             raise Exception('Download cancelled by user')
 
 
+    def _dl_instagram_gallery_dl(self, url, outdir, cookies=None):
+        """Use gallery-dl as fallback for Instagram Stories — handles auth better than yt-dlp."""
+        import subprocess as _sp_gdl, sys as _sys_gdl
+
+        # Install gallery-dl if not present
+        try:
+            import gallery_dl as _gdl_check
+        except ImportError:
+            self._dl_log_write('Installing gallery-dl for Instagram support...', YELLOW)
+            _r = _sp_gdl.run([_sys_gdl.executable, '-m', 'pip', 'install', 'gallery-dl',
+                              '--target', str(PKGS_DIR), '-q'],
+                             capture_output=True, text=True)
+            if _r.returncode != 0:
+                raise Exception(f'gallery-dl install failed: {_r.stderr[-200:]}')
+            _ensure_pkgs_on_path()
+
+        # Build gallery-dl command
+        cmd = [_sys_gdl.executable, '-m', 'gallery_dl',
+               '--dest', str(outdir),
+               '--filename', '{username}_{id}.{extension}']
+
+        if cookies and Path(cookies).exists():
+            cmd += ['--cookies', cookies]
+
+        cmd.append(url)
+
+        self._dl_log_write(f'gallery-dl → {url[:60]}', FG2)
+        _r = _sp_gdl.run(cmd, capture_output=True, text=True,
+                         env={**__import__('os').environ, 'PYTHONPATH': str(PKGS_DIR)})
+
+        if _r.returncode != 0:
+            raise Exception(_r.stderr[-300:] or _r.stdout[-300:])
+
+        # Find downloaded file
+        import glob as _glob
+        _patterns = [str(Path(outdir) / '*.mp4'), str(Path(outdir) / '*.jpg'),
+                     str(Path(outdir) / '**' / '*.mp4')]
+        for _pat in _patterns:
+            _files = sorted(_glob.glob(_pat, recursive=True), key=lambda f: Path(f).stat().st_mtime, reverse=True)
+            if _files:
+                self._dl_log_write(f'✅ gallery-dl downloaded: {Path(_files[0]).name}', GREEN)
+                return _files[0]
+        raise Exception('gallery-dl ran but no file found')
+
     def _dl_auto_load(self):
         if not self._last_dl_path: return
-        self.v_video.set(self._last_dl_path)
+        p = self._last_dl_path
+        self.v_video.set(p)
+        # Set entry color to normal (not placeholder gray)
+        if hasattr(self, '_video_entry'):
+            self.after(0, lambda: self._video_entry.config(fg=FG))
         if not self.v_outdir.get():
-            self.v_outdir.set(str(Path(self._last_dl_path).parent))
+            self.v_outdir.set(str(Path(p).parent))
         self._switch_nb('clips')
-        self.log(f'✅  Loaded into Clip Finder: {Path(self._last_dl_path).name}', GREEN)
+        # Re-set after tab switch in case focus events reset it
+        self.after(50, lambda: self.v_video.set(p))
+        self.after(60, lambda: self._video_entry.config(fg=FG) if hasattr(self, '_video_entry') else None)
+        self.log(f'✅  Loaded into Clip Finder: {Path(p).name}', GREEN)
         self.log('Hit ▶ FIND CLIPS to analyze, or 📝 TRANSCRIBE ONLY for a quick tweet.', FG2)
 
     def _dl_autosave(self, *_):
@@ -8499,8 +9174,8 @@ class App(tk.Tk):
     def _thumb_save_one(self, r):
         out = self.thumb_outdir_var.get().strip() or str(Path.home() / 'Downloads')
         Path(out).mkdir(parents=True, exist_ok=True)
-        q   = re.sub(r'[\\/:*?"<>|]', '', self.thumb_query_var.get())[:30]
-        fname = f'thumb_{q}_#{r["rank"]}_{r["width"]}x{r["height"]}.png'
+        q     = re.sub(r'[\\/:*?"<>|]', '', self.thumb_query_var.get().strip())[:40]
+        fname = f'{q}_{r["rank"]}.png'
         path  = str(Path(out) / fname)
         r['img'].save(path, 'PNG')
         self._thumb_set_status(f'Saved: {fname}', GREEN)
@@ -8512,9 +9187,9 @@ class App(tk.Tk):
             return
         out = self.thumb_outdir_var.get().strip() or str(Path.home() / 'Downloads')
         Path(out).mkdir(parents=True, exist_ok=True)
-        q = re.sub(r'[\\/:*?"<>|]', '', self.thumb_query_var.get())[:30]
+        q = re.sub(r'[\\/:*?"<>|]', '', self.thumb_query_var.get().strip())[:40]
         for r in self._thumb_results:
-            fname = f'thumb_{q}_#{r["rank"]}_{r["width"]}x{r["height"]}.png'
+            fname = f'{q}_{r["rank"]}.png'
             r['img'].save(str(Path(out) / fname), 'PNG')
         msg = f'Saved {len(self._thumb_results)} images to:\n{out}'
         self._thumb_set_status(f'Saved {len(self._thumb_results)} images!', GREEN)
@@ -10550,9 +11225,28 @@ class App(tk.Tk):
         def _install_model_ui(size):
             def _do():
                 try:
+                    # Check both possible model locations first
+                    _wcpp_model = _app_path('whisper_cpp') / 'models' / f'ggml-{size}.bin'
+                    _fw_model_dir = _app_path('whisper_models')
+                    # faster-whisper stores as ggml-{size}.bin or in a hash subfolder
+                    _fw_model = _fw_model_dir / f'ggml-{size}.bin'
+                    if _wcpp_model.exists():
+                        self.after(0, lambda: (
+                            self.log(f'✅ ggml-{size}.bin already downloaded', GREEN),
+                            self.set_progress(f'✅ whisper {size} model ready', pct=100),
+                            _refresh_dep_display()
+                        ))
+                        return
+                    if _fw_model.exists():
+                        self.after(0, lambda: (
+                            self.log(f'✅ ggml-{size}.bin already downloaded', GREEN),
+                            self.set_progress(f'✅ whisper {size} model ready', pct=100),
+                            _refresh_dep_display()
+                        ))
+                        return
+
                     self.log(f'⬇ Downloading ggml-{size} model...', ACCENT2)
                     self.set_progress(f'⬇ Downloading whisper {size} model...', pct=5)
-                    # Try faster_whisper (may not be importable yet in same session after install)
                     try:
                         import importlib as _il
                         _fw = _il.import_module('faster_whisper')
@@ -10623,6 +11317,103 @@ class App(tk.Tk):
                  command=_install_wcpp_ui).pack(side='left', padx=(0,8))
         tk.Label(r2, text='Enables AMD/Intel Vulkan GPU transcription — much faster',
                 font=('Segoe UI', 7), fg=FG2, bg=BG3).pack(side='left')
+
+        # NVIDIA CUDA row — only show if NVIDIA GPU detected
+        def _install_cuda_torch():
+            import threading as _thr_cuda
+            def _do_cuda():
+                self.log('⬇ Installing whisper.cpp CUDA (cuBLAS) for NVIDIA GPU...', YELLOW)
+                self.log('Downloading ~150MB binary — no CUDA toolkit needed, just NVIDIA driver.', FG2)
+                import subprocess as _sp_cuda, sys as _sys_cuda, urllib.request as _ur_cuda, zipfile as _zf_cuda
+
+                _cuda_dir = _app_path('whisper_cpp_cuda')
+                _cuda_dir.mkdir(parents=True, exist_ok=True)
+                (_cuda_dir / 'models').mkdir(exist_ok=True)
+
+                # Download whisper.cpp cublas binary from official releases
+                _cublas_urls = [
+                    'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-cublas-12.4.0-bin-x64.zip',
+                    'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-cublas-11.8.0-bin-x64.zip',
+                ]
+                _tmp_zip = _app_path('whisper_cuda_tmp.zip')
+                _downloaded = False
+                for _url in _cublas_urls:
+                    try:
+                        self.log(f'Trying: {_url.split("/")[-1]}', FG2)
+                        _ur_cuda.urlretrieve(_url, str(_tmp_zip))
+                        if _tmp_zip.exists() and _tmp_zip.stat().st_size > 1_000_000:
+                            _downloaded = True
+                            break
+                    except Exception as _de:
+                        self.log(f'Failed: {_de}', YELLOW)
+                        continue
+
+                if not _downloaded:
+                    self.log('❌ Could not download CUDA binary. Check internet connection.', RED)
+                    return
+
+                # Extract
+                self.log('Extracting CUDA binary...', FG2)
+                try:
+                    with _zf_cuda.ZipFile(str(_tmp_zip), 'r') as _zf:
+                        for _name in _zf.namelist():
+                            _bn = Path(_name).name
+                            if not _bn or _name.endswith('/'): continue
+                            _data = _zf.read(_name)
+                            if len(_data) > 0:
+                                (_cuda_dir / _bn).write_bytes(_data)
+                                self.log(f'  Extracted: {_bn} ({len(_data)//1024}KB)', FG2)
+                    _tmp_zip.unlink(missing_ok=True)
+                except Exception as _ee:
+                    self.log(f'❌ Extract failed: {_ee}', RED)
+                    return
+
+                # Rename whisper-cli.exe
+                _cli = _cuda_dir / 'whisper-cli.exe'
+                _dst = _cuda_dir / 'whisper-whisper-cli.exe'
+                if _cli.exists() and not _dst.exists():
+                    _cli.rename(_dst)
+
+                # Download a model if none exists
+                _models_dir = _cuda_dir / 'models'
+                if not list(_models_dir.glob('ggml-*.bin')):
+                    self.log('Downloading ggml-base.bin model (~142MB)...', FG2)
+                    try:
+                        _ur_cuda.urlretrieve(
+                            'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
+                            str(_models_dir / 'ggml-base.bin'))
+                        self.log('✅ Model downloaded!', GREEN)
+                    except Exception as _me:
+                        self.log(f'Model download failed: {_me} — download manually in Settings', YELLOW)
+
+                if _dst.exists():
+                    global _WHISPER_DEVICE_CACHE
+                    _WHISPER_DEVICE_CACHE = None
+                    self.log('✅ NVIDIA CUDA whisper.cpp installed! Restart ClipFinder.', GREEN)
+                else:
+                    self.log('❌ Install failed — whisper-whisper-cli.exe not found after extraction.', RED)
+
+            _thr_cuda.Thread(target=_do_cuda, daemon=True).start()
+
+        # Detect NVIDIA GPU
+        _has_nvidia = False
+        try:
+            import subprocess as _sp_nv
+            _nv = _sp_nv.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                              capture_output=True, text=True, timeout=3)
+            _has_nvidia = _nv.returncode == 0 and _nv.stdout.strip()
+        except: pass
+
+        r2b = tk.Frame(btn_grid, bg=BG3); r2b.pack(fill='x', pady=2)
+        _nvidia_label = f'NVIDIA GPU: {_nv.stdout.strip()[:40]}' if _has_nvidia else 'No NVIDIA GPU detected'
+        tk.Button(r2b, text='⬇  Install NVIDIA CUDA Support', font=('Segoe UI', 9, 'bold'),
+                 bg=BG4 if not _has_nvidia else '#1a3a1a', fg=FG if not _has_nvidia else '#00ff88',
+                 relief='flat', bd=0, cursor='hand2' if _has_nvidia else 'arrow',
+                 padx=12, pady=5,
+                 command=_install_cuda_torch if _has_nvidia else lambda: None
+                 ).pack(side='left', padx=(0,8))
+        tk.Label(r2b, text=f'CUDA torch for faster-whisper GPU — ~2.5GB  |  {_nvidia_label}',
+                font=('Segoe UI', 7), fg=GREEN if _has_nvidia else FG3, bg=BG3).pack(side='left')
 
         # Row 3: Whisper models
         r3 = tk.Frame(btn_grid, bg=BG3); r3.pack(fill='x', pady=(6,2))
@@ -10992,9 +11783,10 @@ class App(tk.Tk):
         # Write a temp launcher script that patches torchaudio before demucs runs
         import tempfile as _tmp2
         _launcher = str(Path(_tmp2.gettempdir()) / 'cf_demucs_launcher.py')
-        with open(_launcher, 'w') as _lf:
+        with open(_launcher, 'w', encoding='utf-8') as _lf:
             _pkgs_path = str(PKGS_DIR)
-            _lf.write(f"""import sys
+            _lf.write(f"""# -*- coding: utf-8 -*-
+import sys
 sys.path.insert(0, r'{_pkgs_path}')
 try:
     import soundfile as sf
@@ -12097,6 +12889,38 @@ if __name__ == '__main__':
             except Exception as _be:
                 _bv.set(f'bgutil skipped: {_be}')
                 _s.update()
+
+            # Auto-install CUDA torch if NVIDIA GPU detected
+            try:
+                import subprocess as _sp_nv2
+                _nv2 = _sp_nv2.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                                    capture_output=True, text=True, timeout=5)
+                _has_nv = _nv2.returncode == 0 and _nv2.stdout.strip()
+                # Check if CUDA torch already installed
+                _cuda_ok = False
+                try:
+                    import torch as _torch_chk
+                    _cuda_ok = _torch_chk.cuda.is_available()
+                except: pass
+                if _has_nv and not _cuda_ok:
+                    _sv.set('NVIDIA GPU detected — installing CUDA support...')
+                    _bv.set(f'GPU: {_nv2.stdout.strip()[:50]} — installing torch+cu121 (~2.5GB)')
+                    _pb.config(mode='indeterminate'); _pb.start(10)
+                    _s.update()
+                    import sys as _sys_nv
+                    # Use --ignore-installed to avoid locked DLL conflicts
+                    # Don't upgrade existing torch — install fresh to PKGS_DIR only
+                    _cuda_cmd = [_sys_nv.executable, '-m', 'pip', 'install',
+                                 'torch', 'torchaudio',
+                                 '--index-url', 'https://download.pytorch.org/whl/cu121',
+                                 '--target', str(PKGS_DIR), '-q',
+                                 '--ignore-installed']
+                    _sp_nv2.run(_cuda_cmd, capture_output=True)
+                    _pb.stop()
+                    _bv.set('✅ CUDA torch installed — restart ClipFinder to activate')
+                    _s.update()
+            except Exception as _nve:
+                pass  # non-critical, skip silently
 
             _stamp.touch()
             _s.after(1200, _s.destroy); _s.mainloop()
