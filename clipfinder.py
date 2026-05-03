@@ -33,22 +33,28 @@ try:
     )
     _CORE_LOADED = True
 except ImportError:
-    # Core not found — try to auto-download it (users upgrading from 1.3.6 and below)
-    _CORE_LOADED = False
+    # Core not found — download it then import it before falling back
     try:
         import urllib.request as _ur_core, pathlib as _pl_core
         _core_dst = _pl_core.Path(__file__).parent / 'clipfinder_core.py'
-        _core_url = 'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py'
         print('[CF] clipfinder_core.py not found — downloading...')
-        _ur_core.urlretrieve(_core_url, str(_core_dst))
-        print('[CF] clipfinder_core.py downloaded — restarting to apply...')
-        # Restart so the fresh core loads properly from the top
-        import subprocess as _sp_restart, sys as _sys_restart
-        _sp_restart.Popen([_sys_restart.executable] + _sys_restart.argv)
-        _sys_restart.exit(0)
+        _ur_core.urlretrieve(
+            'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py',
+            str(_core_dst))
+        print('[CF] clipfinder_core.py downloaded — importing...')
+        from clipfinder_core import (
+            AUTO_EDIT_PROMPT, AI_PROMPT, INTERVIEW_CLIP_PROMPT,
+            TWEET_PROMPT, TWEET_TONE_PROMPTS,
+            ts, ts_srt,
+            detect_gpu_encoder, detect_encoder_name, get_encoder,
+            _analyze_audio_energy, _analyze_scene_changes,
+            _do_transcribe,
+        )
+        _CORE_LOADED = True
+        print('[CF] clipfinder_core loaded successfully')
     except Exception as _core_dl_err:
-        print(f'[CF] Could not download clipfinder_core.py: {_core_dl_err} — using inline fallback')
-        _CORE_LOADED = False  # functions defined inline below as usual
+        print(f'[CF] Could not get clipfinder_core.py: {_core_dl_err} — using inline fallback')
+        _CORE_LOADED = False
 
 # vision_refs folder and default reference images are bootstrapped in _check_first_run()
 
@@ -13550,12 +13556,50 @@ if __name__ == '__main__':
             except Exception as _nve:
                 pass  # non-critical, skip silently
 
+            # ── Download clipfinder_core.py and vision_refs ───────────────────
+            try:
+                import urllib.request as _ur_pl
+                # Core file
+                _core_dst = Path(__file__).parent / 'clipfinder_core.py'
+                if not _core_dst.exists():
+                    _ur_pl.urlretrieve(
+                        'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py',
+                        str(_core_dst))
+                # Vision reference images
+                _vr_dir = USER_DIR / 'vision_refs'
+                _vr_dir.mkdir(exist_ok=True)
+                for _rn, _ru in {
+                    'stake_casino.png':   'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/stake_casino.png',
+                    'roobet_casino.png':  'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/roobet_casino.png',
+                    'rainbet_casino.png': 'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/rainbet_casino.png',
+                }.items():
+                    if not (_vr_dir / _rn).exists():
+                        _ur_pl.urlretrieve(_ru, str(_vr_dir / _rn))
+            except Exception:
+                pass
+
             _stamp.touch()
             _s.after(1200, _s.destroy); _s.mainloop()
         except Exception: pass
         finally:
             try: _os2.unlink(_tf)
             except: pass
+    # ── Version-based update trigger ─────────────────────────────────────────
+    # On first launch of a new version, delete install_done.stamp so
+    # _prelaunch_install runs fully and picks up any new packages/files
+    _version_stamp = USER_DIR / 'version.stamp'
+    _install_stamp = USER_DIR / 'install_done.stamp'
+    try:
+        _stamped_ver = _version_stamp.read_text().strip() if _version_stamp.exists() else ''
+        if _stamped_ver != APP_VERSION:
+            # New version detected — force full reinstall on next prelaunch
+            if _install_stamp.exists():
+                _install_stamp.unlink()
+            _version_stamp.write_text(APP_VERSION)
+            print(f'[CF] New version {APP_VERSION} detected — triggering full update')
+    except Exception:
+        pass
+
     _prelaunch_install()
 
     # ── Require clipfinder_core.py — download and restart if missing ──────────
@@ -13581,7 +13625,6 @@ if __name__ == '__main__':
 
     if _core_needs_update:
         print('[CF] Downloading clipfinder_core.py...')
-        # Show a simple tkinter splash while downloading
         try:
             import tkinter as _tk_boot
             _splash = _tk_boot.Tk()
@@ -13590,7 +13633,6 @@ if __name__ == '__main__':
             _splash.configure(bg='#1a1a1a')
             _splash.resizable(False, False)
             _splash.overrideredirect(True)
-            # Center on screen
             _splash.update_idletasks()
             _sw = _splash.winfo_screenwidth()
             _sh = _splash.winfo_screenheight()
@@ -13609,22 +13651,26 @@ if __name__ == '__main__':
             _ur_boot.urlretrieve(
                 'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py',
                 str(_core_path))
-            print('[CF] clipfinder_core.py downloaded — restarting...')
+            print('[CF] clipfinder_core.py downloaded successfully')
             if _splash:
-                _status_var.set('Restarting ClipFinder...')
+                _status_var.set('Done! Loading ClipFinder...')
                 _splash.update()
                 import time as _t_boot; _t_boot.sleep(0.8)
                 _splash.destroy()
-            import subprocess as _sp_boot, sys as _sys_boot
-            _sp_boot.Popen([_sys_boot.executable] + _sys_boot.argv)
-            _sys_boot.exit(0)
+            # Import the freshly downloaded core without restarting
+            try:
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location('clipfinder_core', str(_core_path))
+                _core_mod = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_core_mod)
+                print('[CF] clipfinder_core loaded successfully')
+            except Exception as _ie:
+                print(f'[CF] Core import after download failed: {_ie} — using inline fallback')
         except Exception as _boot_err:
             print(f'[CF] Core download failed: {_boot_err}')
             if _splash:
-                _status_var.set(f'Download failed — running in fallback mode')
-                _splash.update()
-                import time as _t_boot2; _t_boot2.sleep(1.5)
-                _splash.destroy()
+                try: _splash.destroy()
+                except Exception: pass
 
     # ── Bootstrap vision_refs + default reference images (background) ─────────
     _vr_dir = USER_DIR / 'vision_refs'
