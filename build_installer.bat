@@ -38,11 +38,18 @@ echo     OK
 :: Step 3: Copy app files + build launcher EXE
 echo.
 echo [3/4] Building launcher + packaging app...
-copy "clipfinder.py"  "ClipFinder_dist\clipfinder.py"  >nul
-if exist "clipfinder.ico" copy "clipfinder.ico" "ClipFinder_dist\clipfinder.ico" >nul
-if exist "preview.webp"   copy "preview.webp"   "ClipFinder_dist\preview.webp"   >nul
+copy "clipfinder.py"       "ClipFinder_dist\clipfinder.py"       >nul
+copy "clipfinder_core.py"  "ClipFinder_dist\clipfinder_core.py"  >nul
+if exist "clipfinder.ico"  copy "clipfinder.ico"  "ClipFinder_dist\clipfinder.ico"  >nul
+if exist "preview.webp"    copy "preview.webp"    "ClipFinder_dist\preview.webp"    >nul
 copy "README.md"    "ClipFinder_dist\README.md"    >nul 2>&1
 copy "CHANGELOG.md" "ClipFinder_dist\CHANGELOG.md" >nul 2>&1
+
+:: Copy vision_refs folder with default reference images
+if exist "vision_refs" (
+    mkdir "ClipFinder_dist\vision_refs"
+    xcopy /s /q "vision_refs\*" "ClipFinder_dist\vision_refs\" >nul 2>&1
+)
 
 py -3.12 -m pip install pyinstaller --quiet
 py -3.12 build_launcher.py
