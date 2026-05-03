@@ -6,11 +6,51 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 
 import subprocess
 import sys
 import os
+
+# Add ClipFinder pkgs to path immediately — before ANY other imports
+# This ensures numpy, cv2, and all packages find each other correctly
+_cf_appdata = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+_cf_pkgs = os.path.join(_cf_appdata, 'ClipFinder', 'pkgs')
+if os.path.isdir(_cf_pkgs) and _cf_pkgs not in sys.path:
+    sys.path.insert(0, _cf_pkgs)
+
+# Import shared core logic — AI prompts, transcription, analysis
+# Edit clipfinder_core.py to change AI behavior across all platforms
+# Graceful fallback: if core not found, auto-downloads it from GitHub then restarts
+try:
+    from clipfinder_core import (
+        AUTO_EDIT_PROMPT, AI_PROMPT, INTERVIEW_CLIP_PROMPT,
+        TWEET_PROMPT, TWEET_TONE_PROMPTS,
+        ts, ts_srt,
+        detect_gpu_encoder, detect_encoder_name, get_encoder,
+        _analyze_audio_energy, _analyze_scene_changes,
+        _do_transcribe,
+    )
+    _CORE_LOADED = True
+except ImportError:
+    # Core not found — try to auto-download it (users upgrading from 1.3.6 and below)
+    _CORE_LOADED = False
+    try:
+        import urllib.request as _ur_core, pathlib as _pl_core
+        _core_dst = _pl_core.Path(__file__).parent / 'clipfinder_core.py'
+        _core_url = 'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py'
+        print('[CF] clipfinder_core.py not found — downloading...')
+        _ur_core.urlretrieve(_core_url, str(_core_dst))
+        print('[CF] clipfinder_core.py downloaded — restarting to apply...')
+        # Restart so the fresh core loads properly from the top
+        import subprocess as _sp_restart, sys as _sys_restart
+        _sp_restart.Popen([_sys_restart.executable] + _sys_restart.argv)
+        _sys_restart.exit(0)
+    except Exception as _core_dl_err:
+        print(f'[CF] Could not download clipfinder_core.py: {_core_dl_err} — using inline fallback')
+        _CORE_LOADED = False  # functions defined inline below as usual
+
+# vision_refs folder and default reference images are bootstrapped in _check_first_run()
 
 # ── App directory — where the app is installed (read-only in Program Files) ───
 from pathlib import Path as _PathBase
@@ -660,18 +700,18 @@ FONT_MONO_S = ('Consolas', 9)
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
-        # NOTE: gemini-1.5-* ALL DEAD (404). gemini-2.0-flash shuts down June 1 2026.
+        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+        # NOTE: gemini-2.0-flash DEPRECATED — shuts down June 1 2026
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
     'Groq (Free)': {
         'lib':    'groq',
         'models': [
-            'llama-3.3-70b-versatile', # 32k context, smarter
-            'mixtral-8x7b-32768',      # 32k context window
-            'llama-3.1-8b-instant',    # 8k context — fast but small
-            'llama3-8b-8192',          # 8k context fallback
+            'llama-3.3-70b-versatile',   # 32k context, smarter
+            'llama-3.1-70b-versatile',   # fallback 70b
+            'llama-3.1-8b-instant',      # 8k context — fast
+            'llama3-8b-8192',            # 8k fallback
         ],
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
@@ -1095,6 +1135,40 @@ def detect_gpu_encoder(ff):
 
 # Cache result so we only probe once per session
 _GPU_ENCODER_CACHE = None
+
+# Models permanently decommissioned — auto-populated when 400 decommissioned error hit
+# Persisted to config so dead models are never retried across sessions
+_DEAD_MODELS: set = set()
+
+def _mark_model_dead(model: str):
+    """Mark a model as decommissioned — removes from all provider lists permanently."""
+    global _DEAD_MODELS
+    _DEAD_MODELS.add(model)
+    # Remove from PROVIDERS in memory
+    for prov_data in PROVIDERS.values():
+        if isinstance(prov_data, dict) and 'models' in prov_data:
+            if model in prov_data['models']:
+                prov_data['models'].remove(model)
+                print(f'[CF] Removed decommissioned model: {model}')
+    # Persist to config
+    try:
+        cfg = load_cfg()
+        dead = cfg.get('dead_models', [])
+        if model not in dead:
+            dead.append(model)
+            cfg['dead_models'] = dead
+            save_cfg(cfg)
+    except Exception:
+        pass
+
+def _load_dead_models():
+    """Load previously decommissioned models from config on startup."""
+    try:
+        cfg = load_cfg()
+        for m in cfg.get('dead_models', []):
+            _mark_model_dead(m)
+    except Exception:
+        pass
 _GPU_ENCODER_RESET = False
 def detect_encoder_name():
     try:
@@ -1705,6 +1779,18 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                 out_base = str(tmp_wav.with_suffix(''))  # no extension
                 json_out = Path(out_base + '.json')
 
+                # Get video duration for smart transcribe cutoff
+                _vid_duration = 0
+                try:
+                    import subprocess as _sp_dur, re as _re_dur2
+                    _r_dur = _sp_dur.run([str(ff), '-i', str(vid)], capture_output=True,
+                                         text=True, timeout=10, errors='replace')
+                    _dm2 = _re_dur2.search(r'Duration: (\d+):(\d+):(\d+)', _r_dur.stderr)
+                    if _dm2:
+                        _vid_duration = int(_dm2.group(1))*3600 + int(_dm2.group(2))*60 + int(_dm2.group(3))
+                except Exception:
+                    pass
+
                 # Build command — use -oj for JSON output (newer builds)
                 cmd = [_wcpp,
                        '-m', _wmodel,
@@ -1720,6 +1806,28 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                     clean_prompt = initial_prompt[:200].replace('"', "'").strip()
                     cmd += ['--prompt', clean_prompt]
 
+                # Smart Transcribe — parse instructions for time cutoffs and pass -d to whisper.cpp
+                # This skips transcribing sections entirely — genuinely faster
+                if log_cb:
+                    _smart = getattr(log_cb.__self__, 'v_smart_transcribe', None) if hasattr(log_cb, '__self__') else None
+                _smart_on = False
+                try:
+                    _smart_on = bool(_smart and _smart.get())
+                except Exception:
+                    pass
+                if _smart_on and initial_prompt:
+                    import re as _re_st
+                    _ip_lower = initial_prompt.lower()
+                    # "ignore/skip last N hour(s)/minute(s)"
+                    _last_m = _re_st.search(r'(?:ignore|skip|don.t.process|dont.process)\s+(?:the\s+)?last\s+(\d+(?:\.\d+)?)\s*(hour|hr|minute|min)', _ip_lower)
+                    if _last_m and _vid_duration:
+                        _amt = float(_last_m.group(1))
+                        _unit = _last_m.group(2)
+                        _cut_secs = _vid_duration - int(_amt * (3600 if 'h' in _unit else 60))
+                        if _cut_secs > 0:
+                            cmd += ['-d', str(int(_cut_secs * 1000))]  # -d takes milliseconds
+                            if log_cb: log_cb(f'⚡ Smart Transcribe: stopping at {int(_cut_secs//60)}:{int(_cut_secs%60):02d} (skipping last {_amt} {_unit})', '#88ccff')
+
                 print(f'[CF] whisper.cpp cmd: {" ".join(cmd)}')
                 # Use Popen to stream output for live progress
                 import re as _re_wcpp, os as _os_wcpp
@@ -1727,9 +1835,9 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                 _wcpp_dir = str(Path(_wcpp).parent)
                 _wcpp_env = dict(_os_wcpp.environ)
                 _wcpp_env['PATH'] = _wcpp_dir + _os_wcpp.pathsep + _wcpp_env.get('PATH', '')
-                # Also set GGML_VULKAN_DEBUG=1 temporarily to confirm GPU usage in stderr
-                _wcpp_env['GGML_VULKAN_DEBUG'] = '0'  # 0=off, 1=verbose GPU info
-                proc = _sp2.Popen(cmd, stdout=_sp2.PIPE, stderr=_sp2.PIPE, env=_wcpp_env)
+                _wcpp_env['GGML_VULKAN_DEBUG'] = '0'
+                proc = _sp2.Popen(cmd, stdout=_sp2.PIPE, stderr=_sp2.PIPE, env=_wcpp_env,
+                                  encoding=None)  # read as bytes to avoid cp1252 decode error
                 # Get video duration for percentage
                 try:
                     import cv2 as _cv_dur
@@ -2118,6 +2226,19 @@ class App(tk.Tk):
         super().__init__()
         self.title(f'ClipFinder {APP_VERSION} — AI Clip Extractor')
         self.geometry('1200x800')
+        # Load previously decommissioned models so we never retry them
+        _load_dead_models()
+        # Restore Groq TPD state if it hasn't expired yet
+        try:
+            import time as _tpd_init
+            _tpd_cfg = load_cfg()
+            _tpd_until = _tpd_cfg.get('groq_tpd_until', 0)
+            if _tpd_until > _tpd_init.time():
+                self._groq_tpd_exhausted = True
+                _hrs = int((_tpd_until - _tpd_init.time()) / 3600)
+                print(f'[CF] Groq daily limit active — resets in ~{_hrs}h')
+        except Exception:
+            pass
         # Set window + taskbar icon
         try:
             # Look for clipfinder.ico next to the script or exe
@@ -2256,13 +2377,50 @@ class App(tk.Tk):
         self.option_add('*Scrollbar.arrowColor',        BG3)
         self._build()
         self._refresh_provider()
-        self.after(200, self._refresh_prov_btns)
-        self.after(300, self._refresh_provider)
+        self.after(1500, self._refresh_prov_btns)
+        self.after(2000, self._refresh_provider)
         # Apply right-click menus to all text inputs across the whole app
         self.after(200, lambda: apply_rightclick_to_all(self, self))
         self.after(300, self._fix_all_scrollbars)
         self.after(400, self._bind_global_mousewheel)
         self.after(800, self._check_first_run)
+
+        # Track launch count — prompt to update packages every 10 launches
+        def _check_auto_update_packages():
+            try:
+                _au_cfg = load_cfg()
+                _launch_n = _au_cfg.get('launch_count', 0) + 1
+                _au_cfg['launch_count'] = _launch_n
+                save_cfg(_au_cfg)
+                if _launch_n % 10 == 0:
+                    from tkinter import messagebox as _au_mb
+                    _do_it = _au_mb.askyesno(
+                        'Keep ClipFinder Updated',
+                        f'Would you like to run a quick package update?\n\n'
+                        'This keeps everything nice and tidy — AI providers,\n'
+                        'downloader, and other modules stay current and fixes\n'
+                        'small issues automatically.\n\n'
+                        'Any problems? Report them at:\n'
+                        'github.com/thatspeedykid/clipfinder/issues',
+                        icon='question'
+                    )
+                    if _do_it:
+                        import threading as _au_thr
+                        def _do_pkg_update():
+                            self.after(0, lambda: self.log('🔄 Running package update...', FG2))
+                            import subprocess as _au_sp, sys as _au_sys
+                            _r = _au_sp.run([_au_sys.executable, '-m', 'pip', 'install',
+                                            'yt-dlp', 'google-genai', 'groq', 'openai',
+                                            '--target', str(PKGS_DIR), '--upgrade', '-q'],
+                                           capture_output=True, text=True)
+                            if _r.returncode == 0:
+                                self.after(0, lambda: self.log('✅ Packages updated successfully!', GREEN))
+                            else:
+                                self.after(0, lambda: self.log('⚠ Update failed — try Settings → Update All Packages', YELLOW))
+                        _au_thr.Thread(target=_do_pkg_update, daemon=True).start()
+            except Exception:
+                pass
+        self.after(3000, _check_auto_update_packages)
 
         def _on_close():
             # Kill any running whisper.cpp subprocess
@@ -2389,8 +2547,8 @@ class App(tk.Tk):
         # Pre-build settings tab in background so it's instant when clicked
         def _prebuild_settings():
             import time as _t_pb
-            _t_pb.sleep(1.5)  # let app fully render first
-            self.after(0, lambda: _ensure_tab_built('settings'))
+            _t_pb.sleep(4.0)  # wait for app to fully render and be responsive first
+            self.after(0, lambda: self._ensure_tab_built('settings') if hasattr(self, '_ensure_tab_built') else None)
         threading.Thread(target=_prebuild_settings, daemon=True).start()
         # GPU whisper auto-install disabled — user installs via Settings → Update Modules
         # (auto-downloading at launch caused unwanted background downloads)
@@ -3290,7 +3448,23 @@ class App(tk.Tk):
 
         self._refresh_mode_btns()
 
-        tk.Frame(r4, bg=BORDER, width=1).pack(side='left', fill='y', padx=10)
+        # Smart transcribe — skip transcribing sections flagged in instructions
+        tk.Frame(r4, bg=BORDER, width=1).pack(side='left', fill='y', padx=8)
+        self.v_smart_transcribe = tk.BooleanVar(value=self.cfg.get('smart_transcribe', False))
+        _st_chk = tk.Checkbutton(r4, text='⚡ Smart Transcribe',
+                                  variable=self.v_smart_transcribe,
+                                  font=FONT_SMALL, bg=BG2, fg=FG2,
+                                  selectcolor=BG3, activebackground=BG2,
+                                  relief='flat', bd=0, cursor='hand2',
+                                  command=lambda: (self.cfg.update({'smart_transcribe': self.v_smart_transcribe.get()}), save_cfg(self.cfg)))
+        _st_chk.pack(side='left', padx=(0,4))
+        # Tooltip
+        def _st_enter(e): self.set_progress('⚡ Smart Transcribe: skips transcribing sections you told it to ignore (e.g. "ignore last hour") — faster but permanent for this run')
+        def _st_leave(e): self.set_progress('Ready')
+        _st_chk.bind('<Enter>', _st_enter)
+        _st_chk.bind('<Leave>', _st_leave)
+
+        tk.Frame(r4, bg=BORDER, width=1).pack(side='left', fill='y', padx=8)
 
         # Action buttons on the right
         self.go_btn = tk.Button(r4, text='▶  FIND CLIPS',
@@ -4361,8 +4535,9 @@ class App(tk.Tk):
 
     def _check_first_run(self):
         """Show setup prompt on first launch if packages not installed."""
-        # Check if faster-whisper exists in pkgs/
         _ensure_pkgs_on_path()
+
+        # ── Check if AI packages installed ────────────────────────────────────
         _has_pkgs = (any(PKGS_DIR.glob('faster_whisper*')) or
                      any(PKGS_DIR.glob('groq*')) or
                      any(PKGS_DIR.glob('google_genai*')))
@@ -4646,6 +4821,31 @@ class App(tk.Tk):
                 # Quick sanity check — must contain APP_VERSION
                 if 'APP_VERSION' not in _src:
                     raise ValueError('Downloaded file does not look like ClipFinder')
+
+                # Also download clipfinder_core.py if available in this release
+                _pw.after(0, lambda: _status_var.set('Downloading core module...'))
+                try:
+                    _core_url = None
+                    for a in assets:
+                        if a.get('name','').lower() == 'clipfinder_core.py':
+                            _core_url = a.get('browser_download_url')
+                            break
+                    if not _core_url:
+                        tag = release_data.get('tag_name', f'v{new_version}')
+                        _core_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{tag}/clipfinder_core.py'
+                    _core_tmp = USER_DIR / '_core_update_pending.py'
+                    _ur3.urlretrieve(_core_url, _core_tmp)
+                    # Verify it parses
+                    with open(_core_tmp, 'r', encoding='utf-8') as _cf:
+                        _ast3.parse(_cf.read())
+                    # Install core
+                    _core_target = USER_DIR / 'clipfinder_core.py'
+                    import shutil as _sh3c
+                    _sh3c.copy2(_core_tmp, _core_target)
+                    _core_tmp.unlink(missing_ok=True)
+                except Exception as _core_err:
+                    # Core download failure is non-fatal — old core still works
+                    print(f'[CF] Core module update skipped: {_core_err}')
 
                 # Write a relaunch flag so the launcher knows to show splash
                 _flag = USER_DIR / '.force_install'
@@ -4971,7 +5171,19 @@ class App(tk.Tk):
     def _run_transcribe(self, then_ai):
         try:
             vid = self.v_video.get()
+            self._last_transcribed_vid = str(vid)  # store immediately for thumbnail rendering
             model_size = self.v_whisper.get()
+            # Store video duration for short-video clip length adjustment
+            try:
+                import subprocess as _ffp_dur
+                _ff_dur = find_ffmpeg() or 'ffmpeg'
+                _r_dur = _ffp_dur.run([_ff_dur, '-i', vid], capture_output=True, text=True, timeout=10, errors='replace')
+                import re as _re_dur2
+                _dm = _re_dur2.search(r'Duration: (\d+):(\d+):(\d+)', _r_dur.stderr)
+                if _dm:
+                    self._current_video_duration = int(_dm.group(1))*3600 + int(_dm.group(2))*60 + int(_dm.group(3))
+            except Exception:
+                self._current_video_duration = 0
             if model_size in ('auto', '', None):
                 # Smart auto: pick model based on video duration + GPU
                 try:
@@ -5080,24 +5292,26 @@ class App(tk.Tk):
             words = len(self.transcript.split())
 
             def update_trans():
+                if not hasattr(self, 'trans_box'): return  # tab not built yet
                 self.trans_box.config(state='normal')
                 self.trans_box.delete('1.0', 'end')
                 self.trans_box.insert('1.0', self.transcript)
                 self.trans_box.config(state='disabled')
-                self.wcount_lbl.config(text=f'{segs} segments  ·  {words:,} words')
+                if hasattr(self, 'wcount_lbl'):
+                    self.wcount_lbl.config(text=f'{segs} segments  ·  {words:,} words')
                 # Only switch to transcript tab if this was a transcribe-only request
                 if not then_ai:
                     self._switch_nb('transcript')
             self.after(0, update_trans)
 
             self.log(f'Transcription done: {segs} segments, {words:,} words', GREEN)
+            self._last_transcribed_vid = str(vid)  # save for thumbnail rendering
 
             if then_ai:
                 if not getattr(self, '_cancel_requested', False):
                     # Vision Mode: run visual frame analysis first to guide clip selection
                     if self.app_mode.get() == 'vision':
                         try:
-                            # Read all Gemini keys from cfg (same way the AI provider does)
                             _primary = self.cfg.get('key_gemini', '').strip()
                             _extras = [k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()]
                             _gemini_keys = ([_primary] if _primary else []) + _extras
@@ -5106,9 +5320,57 @@ class App(tk.Tk):
                             if any(_instructions.startswith(p) for p in _ph_texts): _instructions = ''
                             _vision_hits = self._run_vision_mode(vid, _instructions, _gemini_keys)
                             if _vision_hits:
-                                # Store vision hits to inject into AI prompt as additional context
-                                _ts_list = ', '.join(f'{int(h["timestamp"]//60)}:{int(h["timestamp"]%60):02d}' for h in _vision_hits)
-                                _vision_ctx = f'\n\nVISION ANALYSIS RESULTS: The following timestamps were visually identified as matching the user instructions: {_ts_list}\nPrioritize clips at or near these timestamps.'
+                                _include_hits = _vision_hits.get('include', [])
+                                _exclude_hits = _vision_hits.get('exclude', [])
+
+                                # Pre-filter transcript: strip excluded sections before AI sees them
+                                # Much more reliable than telling AI to "avoid" timestamps
+                                if _exclude_hits:
+                                    import re as _re_ts
+                                    _orig_lines = self.transcript.split('\n')
+                                    _filtered_lines = []
+                                    _excluded_secs = sorted([h['timestamp'] for h in _exclude_hits])
+
+                                    # Build excluded ranges — merge nearby timestamps into continuous blocks
+                                    # If two excluded frames are within 3 minutes of each other,
+                                    # treat everything between them as excluded too
+                                    _merge_gap = 180  # 3 minutes
+                                    _pad = 60  # extra padding before/after each block
+                                    _ranges = []
+                                    if _excluded_secs:
+                                        _rs, _re2 = _excluded_secs[0] - _pad, _excluded_secs[0] + _pad
+                                        for _es in _excluded_secs[1:]:
+                                            if _es - _re2 <= _merge_gap:
+                                                _re2 = _es + _pad  # extend current block
+                                            else:
+                                                _ranges.append((_rs, _re2))
+                                                _rs, _re2 = _es - _pad, _es + _pad
+                                        _ranges.append((_rs, _re2))
+
+                                    self.log(f'🎯 Excluding {len(_ranges)} gambling block(s): ' +
+                                             ', '.join(f'{int(r[0]//60)}:{int(r[0]%60):02d}-{int(r[1]//60)}:{int(r[1]%60):02d}' for r in _ranges), YELLOW)
+
+                                    _stripped = 0
+                                    for _tline in _orig_lines:
+                                        _tm = _re_ts.match(r'\[(\d+):(\d+):(\d+)', _tline)
+                                        if _tm:
+                                            _lsec = int(_tm.group(1))*3600 + int(_tm.group(2))*60 + int(_tm.group(3))
+                                            if any(_rs <= _lsec <= _re2 for _rs, _re2 in _ranges):
+                                                _stripped += 1
+                                                continue
+                                        _filtered_lines.append(_tline)
+                                    self.transcript = '\n'.join(_filtered_lines)
+                                    _strip_msg = f'🎯 Vision pre-filter: stripped {_stripped} gambling lines — {len(_orig_lines)}→{len(_filtered_lines)} transcript lines'
+                                    self.log(_strip_msg, GREEN)
+                                    self.after(0, lambda: self.set_progress('⏳ Vision filtered transcript — AI finding clips... (may look frozen, let it run)', pct=45))
+
+                                _vision_ctx = ''
+                                if _include_hits:
+                                    _ts_list = ', '.join(f'{int(h["timestamp"]//60)}:{int(h["timestamp"]%60):02d}' for h in _include_hits)
+                                    _vision_ctx += f'\n\nVISION ANALYSIS — PRIORITIZE THESE TIMESTAMPS: {_ts_list}\nPrioritize clips at or near these timestamps.'
+                                if _exclude_hits:
+                                    _ts_excl = ', '.join(f'{int(h["timestamp"]//60)}:{int(h["timestamp"]%60):02d}' for h in _exclude_hits)
+                                    _vision_ctx += f'\n\nNOTE: Gambling/casino content at {_ts_excl} was detected and removed from this transcript.'
                                 self._vision_context = _vision_ctx
                             else:
                                 self._vision_context = ''
@@ -5330,6 +5592,23 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                                .replace('{context_block}', context_block + section_note) \
                                .replace('{names_block}', names_block)
 
+        # For very short videos (under 90s), relax clip length requirements
+        _vid_dur = getattr(self, '_current_video_duration', 0)
+        if _vid_dur and _vid_dur < 90:
+            prompt = prompt.replace(
+                'MINIMUM: 1 minute 00 seconds (60 seconds) — NO EXCEPTIONS',
+                f'MINIMUM: 10 seconds (video is only {int(_vid_dur)}s total — use the whole thing if needed)'
+            ).replace(
+                'MAXIMUM: 2 minutes 40 seconds (160 seconds)',
+                f'MAXIMUM: {int(_vid_dur)} seconds (full video length)'
+            ).replace(
+                'REJECT any clip under 60 seconds — do not output it.',
+                'Include the clip even if it is short — this is a short video.'
+            ).replace(
+                'If under 60s, extend or drop it.',
+                'Short clips are fine for short videos.'
+            )
+
         # Append instructions reminder at the END so AI sees them right before outputting
         if ctx_raw:
             prompt += f'\n\n⚠️ FINAL CHECK BEFORE OUTPUT: Re-read these instructions and verify EVERY clip passes: {ctx_raw}\nRemove any clip that violates these instructions before outputting.'
@@ -5362,7 +5641,12 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                             if '429' in _es or 'RESOURCE_EXHAUSTED' in _es or 'quota' in _es.lower():
                                 last_merr = _e; continue
                             if '404' in _es or 'not_found' in _es.lower() or 'not found' in _es.lower():
-                                # Model retired/unavailable — try next model
+                                # Model retired/unavailable — mark dead and try next
+                                _mark_model_dead(try_model)
+                                continue
+                            if any(x in _es.lower() for x in ['decommissioned', 'no longer support', 'deprecated']):
+                                _mark_model_dead(try_model)
+                                self.log(f'⚠ Gemini model {try_model} decommissioned — removed', YELLOW)
                                 continue
                             _all_models_rl = False
                             raise
@@ -5374,23 +5658,27 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                         raise Exception('All Gemini models unavailable (404) — update models list')
 
                 elif lib == 'groq':
+                    # Skip Groq if daily token limit already hit this session
+                    if getattr(self, '_groq_tpd_exhausted', False):
+                        raise Exception('Groq daily token limit exhausted — try again tomorrow')
                     _ensure_pkgs_on_path()
                     try:
                         from groq import Groq as _G
                     except ImportError:
                         raise ImportError('groq package broken — go to Settings → Update All Packages')
                     _groq_prompt = prompt
-                    if len(_groq_prompt) > 20000:
-                        _groq_prompt = _groq_prompt[:20000] + '\n[Transcript truncated — find clips from the above]'
-                        self.log('[Groq] Prompt truncated to fit token limit', FG2)
                     # Try each model — rotate on 429 to avoid hammering rate-limited model
                     all_groq_models = data.get('models', [model])
-                    groq_try_models = [model] + [m for m in all_groq_models if m != model]
+                    groq_try_models = [m for m in ([model] + [m for m in all_groq_models if m != model]) if m not in _DEAD_MODELS]
                     raw = None
                     for _gm in groq_try_models:
+                        # Truncate based on model context size — 8b: 4k chars, 70b: 20k chars
+                        _is_small = any(x in _gm for x in ['8b', '8B', 'instant'])
+                        _max_chars = 4000 if _is_small else 20000
+                        _cur_prompt = _groq_prompt[:_max_chars] + '\n[Transcript truncated]' if len(_groq_prompt) > _max_chars else _groq_prompt
                         try:
                             resp = _G(api_key=key).chat.completions.create(
-                                model=_gm, messages=[{'role':'user','content':_groq_prompt}],
+                                model=_gm, messages=[{'role':'user','content':_cur_prompt}],
                                 temperature=0.3, max_tokens=4096)
                             if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
                                 raw = (resp.choices[0].message.content or '').strip()
@@ -5398,7 +5686,30 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                         except Exception as _ge:
                             _ges = str(_ge)
                             if '429' in _ges or '413' in _ges:
-                                # Rate limit or too large — try next model
+                                # Check if it's daily token limit exhausted (TPD) vs per-minute (TPM)
+                                if 'tokens per day' in _ges.lower() or 'TPD' in _ges:
+                                    if not hasattr(self, '_groq_tpd_exhausted'):
+                                        self._groq_tpd_exhausted = True
+                                        self.log('⚠ Groq daily token limit reached — skipping Groq until tomorrow', YELLOW)
+                                        import time as _tpd_t
+                                        _tpd_cfg = load_cfg()
+                                        _tpd_cfg['groq_tpd_until'] = _tpd_t.time() + 86400
+                                        save_cfg(_tpd_cfg)
+                                    break
+                                continue
+                            if '403' in _ges and 'access denied' in _ges.lower():
+                                # Groq 403 = account blocked or daily limit hit
+                                if not hasattr(self, '_groq_tpd_exhausted'):
+                                    self._groq_tpd_exhausted = True
+                                    self.log('⚠ Groq access denied (403) — daily limit or account issue. Skipping until tomorrow.', YELLOW)
+                                    import time as _tpd_t2
+                                    _tpd_cfg2 = load_cfg()
+                                    _tpd_cfg2['groq_tpd_until'] = _tpd_t2.time() + 86400
+                                    save_cfg(_tpd_cfg2)
+                                break
+                            if '400' in _ges and any(x in _ges.lower() for x in ['decommissioned', 'no longer support', 'deprecated', 'not found', 'does not exist']):
+                                _mark_model_dead(_gm)
+                                self.log(f'⚠ Model {_gm} decommissioned — removed automatically', YELLOW)
                                 continue
                             raise
                     if raw is None:
@@ -5620,6 +5931,7 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
     def _run_vision_mode(self, vid, instructions, gemini_keys):
         """Vision Mode: sample video frames and send to Gemini for visual analysis."""
         import base64 as _b64, tempfile as _tmpf, time as _t
+        _ensure_pkgs_on_path()
         import cv2 as _cv
 
         self.log('🎯 Vision Mode: sampling video frames...', ACCENT)
@@ -5632,12 +5944,13 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
         cap.release()
 
         # Sample 1 frame every 30 seconds — good balance for long videos
-        sample_interval = 30  # seconds between frames
+        sample_interval = 30
         frame_times = list(range(0, int(duration), sample_interval))
-        max_frames = 60  # cap at 60 frames to stay within Gemini limits
-        if len(frame_times) > max_frames:
-            import random as _rnd
-            frame_times = sorted(_rnd.sample(frame_times, max_frames))
+        # Cap frame count here — ref images adjusted after load but we need a hard cap now
+        _hard_cap = 60
+        if len(frame_times) > _hard_cap:
+            import random as _rnd_pre
+            frame_times = sorted(_rnd_pre.sample(frame_times, _hard_cap))
 
         self.log(f'🎯 Sampling {len(frame_times)} frames from {int(duration/60)}min video...', FG2)
 
@@ -5663,9 +5976,35 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
             raise Exception('Could not extract frames from video')
 
         # Build Gemini vision prompt
+        # Load reference images from vision_refs folder
+        _refs_dir = _app_path('vision_refs')
+        _refs_dir.mkdir(exist_ok=True)
+        _ref_images = []
+        for _ref_file in sorted(_refs_dir.glob('*.png')) + sorted(_refs_dir.glob('*.jpg')) + sorted(_refs_dir.glob('*.jpeg')):
+            try:
+                import base64 as _b64r
+                _ref_b64 = _b64r.b64encode(_ref_file.read_bytes()).decode()
+                _ref_label = _ref_file.stem.replace('_', ' ').replace('-', ' ')
+                _ref_images.append((_ref_label, _ref_b64, _ref_file.suffix.lower()))
+            except Exception:
+                pass
+
+        # Build reference section for prompt
+        _ref_prompt = ''
+        if _ref_images:
+            _ref_names = ', '.join(f'"{r[0]}"' for r in _ref_images)
+            _ref_prompt = f'\n\nREFERENCE IMAGES PROVIDED: You will see {len(_ref_images)} reference image(s) at the start labeled: {_ref_names}. Use these as visual examples — if the user says "no gambling" and a reference shows a gambling site, flag any frame that looks like those references as something to EXCLUDE.'
+
+        # Further reduce if we have reference images (they consume context space)
+        max_frames = 30 if _ref_images else 60
+        if len(frames_b64) > max_frames:
+            import random as _rnd
+            frames_b64 = sorted(_rnd.sample(frames_b64, max_frames), key=lambda x: x[0])
+            self.log(f'🎯 Reduced to {max_frames} frames (reference images present)', FG2)
+
         vision_prompt = f"""You are analyzing video frames to find the best viral clips for a streaming content channel.
 
-USER INSTRUCTIONS: {instructions or 'Find the most viral, dramatic, or entertaining moments'}
+USER INSTRUCTIONS: {instructions or 'Find the most viral, dramatic, or entertaining moments'}{_ref_prompt}
 
 You are looking at {len(frames_b64)} frames sampled every {sample_interval} seconds from a {int(duration/60)} minute video.
 Each frame has a timestamp showing when it occurs in the video.
@@ -5675,14 +6014,15 @@ For each interesting moment you find, look at the visual content and identify:
 - Whether this matches the user's instructions
 - The timestamp of this frame
 
-Return a JSON array of interesting timestamps. Format:
+If a frame shows content the user said to AVOID (e.g. "no gambling", "skip casino scenes") — still include it in the JSON but set confidence to 0.1 and set reason to start with "EXCLUDE: " so it can be filtered out.
+
+Return a JSON array of ALL notable timestamps including exclusions. Format:
 [
-  {{"timestamp": 45, "reason": "Person in white shirt reacting dramatically", "confidence": 0.9}},
-  {{"timestamp": 180, "reason": "Gambling/casino scene visible on screen", "confidence": 0.85}}
+  {{"timestamp": 45, "reason": "Person reacting dramatically", "confidence": 0.9}},
+  {{"timestamp": 180, "reason": "EXCLUDE: Gambling/casino site visible — slot machine game on screen", "confidence": 0.1}}
 ]
 
-Only include moments that match the user instructions or are genuinely viral/entertaining.
-Confidence should be 0.0-1.0. Only include confidence > 0.6.
+Only include confidence > 0.5 for things to FIND. Always include EXCLUDE entries regardless of confidence.
 Return ONLY the JSON array, no other text."""
 
         # Build content with frames
@@ -5690,8 +6030,16 @@ Return ONLY the JSON array, no other text."""
         if not gemini_keys:
             raise Exception('No Gemini API key — add one in Settings for Vision Mode')
 
-        # Build multipart content
+        # Build multipart content — reference images first, then video frames
         contents = [vision_prompt]
+
+        # Inject reference images at the start so Gemini knows what to look for/avoid
+        for _ref_label, _ref_b64, _ref_ext in _ref_images:
+            _mime = 'image/jpeg' if _ref_ext in ('.jpg', '.jpeg') else 'image/png'
+            contents.append(f'\n[REFERENCE IMAGE: {_ref_label}]')
+            contents.append({'inline_data': {'mime_type': _mime, 'data': _ref_b64}})
+        if _ref_images:
+            contents.append('\n[End of reference images — video frames follow:]')
         for ts, b64 in frames_b64:
             mm, ss = divmod(int(ts), 60)
             contents.append(f'\n[Frame at {mm}:{ss:02d}]')
@@ -5702,58 +6050,118 @@ Return ONLY the JSON array, no other text."""
                 }
             })
 
-        # Try each key + model combination
+        # Try each key + model combination with progressive frame reduction on failure
         raw = None
         last_vision_err = None
-        vision_models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
-        for _vkey in gemini_keys:
-            for _vmodel in vision_models:
-                try:
-                    from google import genai as _gv
-                    client = _gv.Client(api_key=_vkey)
-                    self.log(f'🎯 Trying {_vmodel}...', FG2)
-                    resp = client.models.generate_content(
-                        model=_vmodel,
-                        contents=contents,
-                        config={'temperature': 0.2, 'max_output_tokens': 4096}
-                    )
-                    raw = resp.text.strip()
+        vision_models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+        # Progressive frame counts: try full → half → quarter
+        # Each image frame ~1000-2000 tokens, so fewer frames = less likely to hit TPM
+        _frame_attempts = [frames_b64, frames_b64[:len(frames_b64)//2], frames_b64[:max(10, len(frames_b64)//4)]]
+
+        for _fattempt, _frames_subset in enumerate(_frame_attempts):
+            if _fattempt > 0:
+                self.log(f'🎯 Retrying with {len(_frames_subset)} frames (was {len(_frame_attempts[_fattempt-1])})...', FG2)
+                # Rebuild contents with fewer frames
+                contents = [vision_prompt]
+                for _ref_label, _ref_b64, _ref_ext in _ref_images:
+                    _mime = 'image/jpeg' if _ref_ext in ('.jpg', '.jpeg') else 'image/png'
+                    contents.append(f'\n[REFERENCE IMAGE: {_ref_label}]')
+                    contents.append({'inline_data': {'mime_type': _mime, 'data': _ref_b64}})
+                if _ref_images:
+                    contents.append('\n[End of reference images — video frames follow:]')
+                for ts, b64 in _frames_subset:
+                    mm, ss = divmod(int(ts), 60)
+                    contents.append(f'\n[Frame at {mm}:{ss:02d}]')
+                    contents.append({'inline_data': {'mime_type': 'image/jpeg', 'data': b64}})
+
+            for _vkey in gemini_keys:
+                for _vmodel in vision_models:
+                    try:
+                        from google import genai as _gv
+                        client = _gv.Client(api_key=_vkey)
+                        self.log(f'🎯 Trying {_vmodel} with {len(_frames_subset)} frames...', FG2)
+                        resp = client.models.generate_content(
+                            model=_vmodel,
+                            contents=contents,
+                            config={'temperature': 0.2, 'max_output_tokens': 4096}
+                        )
+                        raw = resp.text.strip() if resp.text else None
+                        if raw:
+                            break
+                    except Exception as _ve:
+                        _ves = str(_ve)
+                        if any(x in _ves for x in ['503', '429', 'UNAVAILABLE', 'RESOURCE_EXHAUSTED', '404', 'too large', 'Request payload']):
+                            last_vision_err = _ve
+                            continue
+                        raise
+                if raw:
                     break
-                except Exception as _ve:
-                    _ves = str(_ve)
-                    if '503' in _ves or '429' in _ves or 'UNAVAILABLE' in _ves or 'RESOURCE_EXHAUSTED' in _ves or '404' in _ves:
-                        last_vision_err = _ve
-                        continue
-                    raise
             if raw:
                 break
 
         if not raw:
-            raise Exception(f'All Gemini keys/models unavailable for Vision Mode: {last_vision_err}')
+            raise Exception(f'Vision Mode failed after {len(_frame_attempts)} frame reduction attempts: {last_vision_err}')
 
         # Parse timestamps from response
         import json as _jv, re as _rev
         try:
-            _clean = _rev.sub(r'```(?:json)?', '', raw).replace('`', '').strip()
+            # Strip ALL markdown fences aggressively
+            _clean = raw.strip()
+            _clean = _rev.sub(r'^```(?:json)?\s*', '', _clean, flags=_rev.MULTILINE)
+            _clean = _rev.sub(r'\s*```\s*$', '', _clean, flags=_rev.MULTILINE)
+            _clean = _clean.replace('`', '').strip()
             _s, _e = _clean.find('['), _clean.rfind(']')
             if _s != -1 and _e > _s:
                 _clean = _clean[_s:_e+1]
+            else:
+                # No array found — log what Gemini actually said
+                self.log(f'⚠ Vision: Gemini returned non-JSON: {raw[:200]}', YELLOW)
+                return None
             vision_hits = _jv.loads(_clean)
-        except Exception:
-            self.log(f'⚠ Vision response parse failed — falling back to normal mode', YELLOW)
-            return None
+        except Exception as _pe:
+            # Try bracket-depth repair for truncated responses
+            try:
+                _depth = 0; _last_obj = -1; _in_str = False; _esc = False
+                for _ci, _ch in enumerate(_clean):
+                    if _esc: _esc = False; continue
+                    if _ch == '\\' and _in_str: _esc = True; continue
+                    if _ch == '"': _in_str = not _in_str; continue
+                    if _in_str: continue
+                    if _ch == '{': _depth += 1
+                    elif _ch == '}':
+                        _depth -= 1
+                        if _depth == 0: _last_obj = _ci
+                if _last_obj > 0:
+                    _repaired = '[' + _clean[_clean.find('{'):_last_obj+1] + ']'
+                    _repaired = _rev.sub(r',\s*\]', ']', _repaired)
+                    vision_hits = _jv.loads(_repaired)
+                    self.log(f'🎯 Vision: repaired truncated JSON — got {len(vision_hits)} hits', FG2)
+                else:
+                    self.log(f'⚠ Vision parse failed: {_pe} — raw: {raw[:300]}', YELLOW)
+                    return None
+            except Exception:
+                self.log(f'⚠ Vision parse failed: {raw[:300]}', YELLOW)
+                return None
 
         if not vision_hits:
             self.log('⚠ Vision Mode found no matching moments — try different instructions', YELLOW)
             return None
 
-        self.log(f'🎯 Vision found {len(vision_hits)} visual matches!', GREEN)
-        for h in vision_hits[:5]:
+        # Separate include vs exclude based on EXCLUDE: prefix in reason
+        _include_hits = [h for h in vision_hits if not str(h.get('reason','')).upper().startswith('EXCLUDE')]
+        _exclude_hits = [h for h in vision_hits if str(h.get('reason','')).upper().startswith('EXCLUDE')]
+
+        self.log(f'🎯 Vision: {len(_include_hits)} to include, {len(_exclude_hits)} to exclude', GREEN)
+        for h in _include_hits[:5]:
             ts = h.get('timestamp', 0)
             mm, ss = divmod(int(ts), 60)
-            self.log(f'  {mm}:{ss:02d} — {h.get("reason","?")} (conf: {h.get("confidence",0):.0%})', FG2)
+            self.log(f'  ✅ {mm}:{ss:02d} — {h.get("reason","?")}', FG2)
+        for h in _exclude_hits[:5]:
+            ts = h.get('timestamp', 0)
+            mm, ss = divmod(int(ts), 60)
+            self.log(f'  🚫 {mm}:{ss:02d} — {h.get("reason","?")}', YELLOW)
 
-        return vision_hits
+        return {'include': _include_hits, 'exclude': _exclude_hits}
 
     def _run_ai(self):
         if getattr(self, '_cancel_requested', False):
@@ -5774,6 +6182,76 @@ Return ONLY the JSON array, no other text."""
             lines      = transcript.splitlines()
             total_lines = len(lines)
 
+            # ── Instruction-based transcript pre-filtering ────────────────────
+            # Parse instructions for time-based filters like "ignore last hour",
+            # "skip first 30 minutes", "only process 1:00:00 to 2:00:00"
+            ctx_raw = ''
+            if hasattr(self, 'v_context'):
+                _ph_texts = ['ignore last hour', 'girl in white shirt', 'e.g. ignore', 'skip gambling', 'outdoor moments']
+                _raw_ctx = self.v_context.get('1.0','end').strip()
+                if not any(_raw_ctx.startswith(p) for p in _ph_texts):
+                    ctx_raw = _raw_ctx
+
+            if ctx_raw and lines:
+                import re as _re_inst
+                _instr_lower = ctx_raw.lower()
+                _orig_count = len(lines)
+
+                # Get total video duration from last transcript timestamp
+                _last_ts = 0
+                for _l in reversed(lines):
+                    _tm2 = _re_inst.match(r'\[(\d+):(\d+):(\d+)', _l)
+                    if _tm2:
+                        _last_ts = int(_tm2.group(1))*3600 + int(_tm2.group(2))*60 + int(_tm2.group(3))
+                        break
+
+                _filter_start = 0  # seconds from start to begin including
+                _filter_end = _last_ts  # seconds from start to stop including
+
+                # "ignore/skip last N hour(s)/minute(s)"
+                # Match 'ignore last hour', 'ignore the last hour', 'ignore last 2 hours'
+                _last_match = _re_inst.search(
+                    r'(?:ignore|skip|no|exclude|don.t.process|dont.process)\s+(?:the\s+)?last\s+(\d+(?:\.\d+)?)\s*(hour|hr|minute|min)',
+                    _instr_lower)
+                if not _last_match:
+                    # Also match bare 'ignore last hour' (no number = 1)
+                    _lm_bare = _re_inst.search(
+                        r'(?:ignore|skip)\s+(?:the\s+)?last\s+(hour|hr|minute|min)',
+                        _instr_lower)
+                    if _lm_bare:
+                        _unit_b = _lm_bare.group(1)
+                        _filter_end = max(0, _last_ts - (3600 if 'h' in _unit_b else 60))
+                        self.log(f'📋 Instruction filter: skipping last 1 {_unit_b} → ends at {int(_filter_end//60)}:{int(_filter_end%60):02d}', FG2)
+                if _last_match:
+                    _amt = float(_last_match.group(1))
+                    _unit = _last_match.group(2)
+                    _secs = int(_amt * (3600 if 'h' in _unit else 60))
+                    _filter_end = max(0, _last_ts - _secs)
+                    self.log(f'📋 Instruction filter: skipping last {_amt} {_unit}(s) → transcript ends at {int(_filter_end//60)}:{int(_filter_end%60):02d}', FG2)
+
+                # "ignore/skip first N hour(s)/minute(s)"
+                _first_match = _re_inst.search(r'(?:ignore|skip|no)\s+(?:the\s+)?first\s+(\d+(?:\.\d+)?)\s*(hour|hr|minute|min)', _instr_lower)
+                if _first_match:
+                    _amt2 = float(_first_match.group(1))
+                    _unit2 = _first_match.group(2)
+                    _filter_start = int(_amt2 * (3600 if 'h' in _unit2 else 60))
+                    self.log(f'📋 Instruction filter: skipping first {_amt2} {_unit2}(s) → transcript starts at {int(_filter_start//60)}:{int(_filter_start%60):02d}', FG2)
+
+                # Apply time filter if any rules matched
+                if _filter_start > 0 or _filter_end < _last_ts:
+                    _filtered = []
+                    for _l in lines:
+                        _tm3 = _re_inst.match(r'\[(\d+):(\d+):(\d+)', _l)
+                        if _tm3:
+                            _lsec2 = int(_tm3.group(1))*3600 + int(_tm3.group(2))*60 + int(_tm3.group(3))
+                            if _lsec2 < _filter_start or _lsec2 > _filter_end:
+                                continue
+                        _filtered.append(_l)
+                    lines = _filtered
+                    transcript = '\n'.join(lines)
+                    self.transcript = transcript
+                    self.log(f'📋 Transcript filtered: {_orig_count}→{len(lines)} lines after time filter', GREEN)
+
 
             # ── Chunk size based on provider capability ───────────────────────
             # Gemini 2.0 Flash: 1M token context — can handle entire transcripts
@@ -5781,12 +6259,12 @@ Return ONLY the JSON array, no other text."""
             # OpenRouter free:  typically 4k-8k context — needs small chunks
             _prov_name = primary
             if 'gemini' in _prov_name.lower():
-                CHARS_PER_CHUNK = 120000   # Gemini handles massive context
+                CHARS_PER_CHUNK = 120000
             elif 'groq' in _prov_name.lower():
-                CHARS_PER_CHUNK = 48000    # Groq 128k context window
+                CHARS_PER_CHUNK = 48000
             else:
-                CHARS_PER_CHUNK = 7500     # OpenRouter free — conservative
-            full_text = transcript
+                CHARS_PER_CHUNK = 7500
+            full_text = self.transcript  # use self.transcript — may have been filtered above
 
             # Split into chunks by character count, respecting line boundaries
             chunks = []
@@ -6080,7 +6558,9 @@ Return ONLY the JSON array, no other text."""
                         '401', 'invalid api key', 'unauthorized', 'authentication',
                         '403', 'forbidden', 'access denied',
                         'all openrouter models unavailable',
-                        'no api key', 'no key configured'])
+                        'no api key', 'no key configured',
+                        'daily token limit exhausted',  # Groq TPD — fatal for session
+                    ])
 
                 # Retry loop — immediately try other providers, no waiting
                 _retry = 0
@@ -6270,6 +6750,7 @@ Return ONLY the JSON array, no other text."""
     def _grab_frame(self, vid, time_str):
         """Extract a frame from a video at given timestamp. Returns PIL Image or None."""
         try:
+            _ensure_pkgs_on_path()
             import cv2 as _cv
             from PIL import Image as _I
             import numpy as _np
@@ -6296,7 +6777,18 @@ Return ONLY the JSON array, no other text."""
             w.destroy()
         self.clip_vars  = []
         self._clip_tk_imgs = []
+        # Use stored last video path — v_video may contain placeholder text after tab switch
         vid = self.v_video.get()
+        _ph = getattr(self, '_video_placeholder', '')
+        if not vid or vid == _ph:
+            vid = getattr(self, '_last_transcribed_vid', '') or getattr(self, '_last_dl_path', '') or vid
+        # Normalize path and verify exists
+        try:
+            vid = str(vid).strip()
+            if not Path(vid).exists():
+                vid = getattr(self, '_last_transcribed_vid', '') or getattr(self, '_last_dl_path', '') or vid
+        except Exception:
+            vid = getattr(self, '_last_transcribed_vid', '') or vid
 
         # 2-column grid — wider cards, more readable
         COLS = 2
@@ -6457,6 +6949,7 @@ Return ONLY the JSON array, no other text."""
                            'mediapipe', '--quiet',
                            '--break-system-packages'], capture_output=True)
                 import mediapipe as _mp
+            _ensure_pkgs_on_path()
             import cv2 as _cv
             # Sample frames to find average face X position
             cap = _cv.VideoCapture(vid)
@@ -8284,6 +8777,23 @@ Return ONLY the JSON array, no other text."""
             is_youtube = any(x in url.lower() for x in ['youtube.com', 'youtu.be'])
             is_twitter = any(x in url.lower() for x in ['twitter.com', 'x.com', 't.co'])
             is_instagram = 'instagram.com' in url.lower()
+            # Convert Rumble embed URLs to regular URLs
+            if 'rumble.com/embed/' in url.lower():
+                import re as _re_rum
+                _rum_id = _re_rum.search(r'rumble\.com/embed/([^/?]+)', url, _re_rum.I)
+                if _rum_id:
+                    url = f'https://rumble.com/v{_rum_id.group(1)}.html'
+                    self._dl_log_write(f'🔄 Rumble embed → {url}', FG2)
+            # Rumble needs browser-like headers to bypass Cloudflare
+            if 'rumble.com' in url.lower():
+                ydl_opts['http_headers'] = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Referer': 'https://rumble.com/',
+                    'Sec-Fetch-Mode': 'navigate',
+                }
+                self._dl_log_write('🛡 Using browser headers for Rumble', FG2)
             has_cookies = bool(cookies and Path(cookies).exists())
             has_browser = bool(browser)
 
@@ -8452,6 +8962,23 @@ Return ONLY the JSON array, no other text."""
             # Fix generic titles like "master", "index", "playlist"
             if title.lower() in ('master', 'index', 'playlist', 'na', 'video', ''):
                 title = info.get('description', '')[:60] or info.get('webpage_url_basename','') or title
+
+            # Find downloaded file path first
+            downloaded = None
+            try:
+                if info.get('_gallery_dl_path'):
+                    downloaded = info['_gallery_dl_path']
+                else:
+                    rds = info.get('requested_downloads', [])
+                    if rds and rds[0].get('filepath'):
+                        downloaded = rds[0]['filepath']
+                        if not Path(downloaded).exists():
+                            mp4 = str(Path(downloaded).with_suffix('.mp4'))
+                            if Path(mp4).exists():
+                                downloaded = mp4
+            except Exception:
+                pass
+
             # Rename downloaded file — only the specific file we just downloaded, never others
             if uploader and uploader.upper() != 'NA' and downloaded and Path(downloaded).exists():
                 import re as _re_fn
@@ -8470,21 +8997,8 @@ Return ONLY the JSON array, no other text."""
             self._dl_log_write(f'✅  Done: {title}', GREEN)
             self._dl_log_write(f'📁  Saved to: {folder}', FG2)
 
-            # Find downloaded file
-            downloaded = None
+            # Find downloaded file\n            # Fallback: scan folder for most recent video file
             try:
-                # gallery-dl fallback — path already known
-                if info.get('_gallery_dl_path'):
-                    downloaded = info['_gallery_dl_path']
-                else:
-                    rds = info.get('requested_downloads', [])
-                if rds and rds[0].get('filepath'):
-                    downloaded = rds[0]['filepath']
-                    # Handle merge — final file may have .mp4 extension
-                    if not Path(downloaded).exists():
-                        mp4 = str(Path(downloaded).with_suffix('.mp4'))
-                        if Path(mp4).exists():
-                            downloaded = mp4
                 if not downloaded:
                     video_exts = {'.mp4','.mkv','.webm','.mov','.avi','.mp3'}
                     for f in sorted(Path(folder).glob('*'),
@@ -10606,6 +11120,13 @@ Return ONLY the JSON array, no other text."""
         # ── Smart Provider Status ──
         s2 = section('🤖  AI Provider Status')
         self._prov_status_frame = s2
+        # Manual refresh button
+        _prov_refresh_row = tk.Frame(s2, bg=BG3)
+        _prov_refresh_row.pack(fill='x', pady=(0,6))
+        tk.Button(_prov_refresh_row, text='↺  Refresh Status',
+                  font=('Segoe UI', 8), bg=BG4, fg=FG2,
+                  relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
+                  command=self._refresh_provider_status).pack(side='right')
         _leg = tk.Frame(s2, bg=BG2); _leg.pack(anchor='w', pady=(0,6))
         for _lt, _lc in [('● Ready', GREEN), ('  ● Rate-limited', YELLOW), ('  ● Dead/404', RED), ('  ○ No key', FG3)]:
             tk.Label(_leg, text=_lt, font=('Segoe UI',8), fg=_lc, bg=BG2).pack(side='left')
@@ -10711,6 +11232,101 @@ Return ONLY the JSON array, no other text."""
         _folder_row(s5, 'Download folder:', self.v_dl_folder)
 
         # ── Update Modules ──
+        # Vision Mode Reference Images
+        _sec_vision = section('🎯 Vision Mode — Reference Images')
+        _vref_dir = _app_path('vision_refs')
+        _vref_count = len(list(_vref_dir.glob('*.png')) + list(_vref_dir.glob('*.jpg')) + list(_vref_dir.glob('*.jpeg')))
+        _vref_info = tk.Frame(_sec_vision, bg=BG3)
+        _vref_info.pack(fill='x', pady=(0,6))
+        tk.Label(_vref_info,
+                 text='Drop screenshots here to teach Vision Mode what to find or avoid.\n'
+                      'Example: save a screenshot of a gambling site as "gambling_site.png" — '
+                      'Vision Mode will recognize and skip similar content when you say "no gambling".',
+                 font=('Segoe UI', 8), fg=FG2, bg=BG3, justify='left').pack(side='left', anchor='w')
+        _vref_row = tk.Frame(_sec_vision, bg=BG3)
+        _vref_row.pack(fill='x')
+        _vref_count_lbl = tk.Label(_vref_row,
+                                    text=f'{_vref_count} reference image{"s" if _vref_count != 1 else ""} saved',
+                                    font=('Segoe UI', 8), fg=ACCENT if _vref_count else FG3, bg=BG3)
+        _vref_count_lbl.pack(side='left', padx=(0,10))
+        def _open_vref_folder():
+            _vref_dir.mkdir(exist_ok=True)
+            os.startfile(str(_vref_dir))
+        tk.Button(_vref_row, text='📁  Open Reference Images Folder',
+                  font=('Segoe UI', 9, 'bold'), bg=BG4, fg=FG,
+                  relief='flat', bd=0, cursor='hand2', padx=10, pady=4,
+                  command=_open_vref_folder).pack(side='left', padx=(0,8))
+        def _scan_and_label():
+            """Use Gemini Vision to auto-identify and rename unlabeled reference images."""
+            import threading as _sl_thr, base64 as _sl_b64
+            def _do_scan():
+                _unknown = list(_vref_dir.glob('*.png')) + list(_vref_dir.glob('*.jpg')) + list(_vref_dir.glob('*.jpeg'))
+                if not _unknown:
+                    self.after(0, lambda: self.log('No images found in vision_refs folder', YELLOW))
+                    return
+                self.after(0, lambda: self.log(f'🔍 Scanning {len(_unknown)} image(s) with Gemini Vision...', FG2))
+                _key = self.cfg.get('key_gemini','').strip()
+                if not _key:
+                    self.after(0, lambda: self.log('⚠ Need a Gemini key in Settings to scan images', YELLOW))
+                    return
+                try:
+                    from google import genai as _gsc
+                    client = _gsc.Client(api_key=_key)
+                    for _f in _unknown:
+                        try:
+                            _b64 = _sl_b64.b64encode(_f.read_bytes()).decode()
+                            _mime = 'image/jpeg' if _f.suffix.lower() in ('.jpg','.jpeg') else 'image/png'
+                            _resp = client.models.generate_content(
+                                model='gemini-2.5-flash',
+                                contents=[
+                                    'Look at this image and identify what brand, website, logo, or content it shows. '
+                                    'Reply with ONLY a short snake_case filename label (2-4 words, underscores, no extension). '
+                                    'Examples: stake_casino, roobet_gambling, rainbet_logo, slot_machine_game, kick_streaming. '
+                                    'Just the label, nothing else.',
+                                    {'inline_data': {'mime_type': _mime, 'data': _b64}}
+                                ],
+                                config={'temperature': 0.1, 'max_output_tokens': 50}
+                            )
+                            # Extract text safely
+                            _raw = ''
+                            try: _raw = (_resp.text or '').strip()
+                            except Exception: pass
+                            if not _raw:
+                                for _part in getattr(_resp, 'parts', []) or []:
+                                    _pt = getattr(_part, 'text', '') or ''
+                                    if _pt.strip(): _raw = _pt.strip(); break
+                            if not _raw:
+                                self.after(0, lambda n=_f.name: self.log(f'  ⚠ Gemini returned empty for {n} — skipping', YELLOW))
+                                continue
+                            _label = __import__('re').sub(r'[^a-z0-9_]', '_', _raw.lower()).strip('_')[:40]
+                            _label = __import__('re').sub(r'[^a-z0-9_]', '_', _label).strip('_')[:40]
+                            if _label:
+                                _new_path = _vref_dir / f'{_label}{_f.suffix}'
+                                if not _new_path.exists():
+                                    _f.rename(_new_path)
+                                    self.after(0, lambda l=_label, o=_f.name: self.log(f'  ✏️ {o} → {l}', FG2))
+                        except Exception as _se:
+                            self.after(0, lambda e=_se, n=_f.name: self.log(f'  ⚠ Could not label {n}: {e}', YELLOW))
+                    self.after(0, _refresh_vref_count)
+                    self.after(0, lambda: self.log('✅ Scan complete', GREEN))
+                except Exception as _e:
+                    self.after(0, lambda: self.log(f'⚠ Scan failed: {_e}', YELLOW))
+            _sl_thr.Thread(target=_do_scan, daemon=True).start()
+        tk.Button(_vref_row, text='🔍  Scan & Label New Images',
+                  font=('Segoe UI', 9, 'bold'), bg='#1a2a3a', fg='#88ccff',
+                  relief='flat', bd=0, cursor='hand2', padx=10, pady=4,
+                  command=_scan_and_label).pack(side='left', padx=(0,8))
+        def _refresh_vref_count():
+            _n = len(list(_vref_dir.glob('*.png')) + list(_vref_dir.glob('*.jpg')) + list(_vref_dir.glob('*.jpeg')))
+            _vref_count_lbl.config(text=f'{_n} reference image{"s" if _n != 1 else ""} saved',
+                                   fg=ACCENT if _n else FG3)
+        tk.Button(_vref_row, text='↺  Refresh',
+                  font=('Segoe UI', 8), bg=BG4, fg=FG2,
+                  relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  command=_refresh_vref_count).pack(side='left')
+
+
+
         s6 = section('🔄  Update Modules',
                      'Keep yt-dlp, whisper, ffmpeg and all AI packages up to date')
         tk.Label(s6, text='Updates run in the background — app stays open. Check log for progress.',
@@ -11453,6 +12069,16 @@ Return ONLY the JSON array, no other text."""
 
     def _refresh_provider_status(self):
         """Show which API providers have keys configured and live rate-limit state."""
+        # Debounce — cancel any pending refresh and schedule one 300ms from now
+        # This prevents flickering when many key rotations fire rapidly
+        if hasattr(self, '_prov_status_after_id'):
+            try: self.after_cancel(self._prov_status_after_id)
+            except Exception: pass
+        self._prov_status_after_id = self.after(300, self._do_refresh_provider_status)
+
+    def _do_refresh_provider_status(self):
+        """Actually rebuild the provider status UI."""
+        if not hasattr(self, '_prov_status_frame'): return
         for w in self._prov_status_frame.winfo_children():
             if getattr(w, '_is_status_row', False):
                 w.destroy()
@@ -11484,6 +12110,8 @@ Return ONLY the JSON array, no other text."""
             _is_rl = pname in getattr(self, '_rl_provs', set())
             # Check if provider is marked dead (404/no endpoints) this session
             _is_dead = pname in getattr(self, '_dead_models', set())
+            # Check Groq daily token limit
+            _is_tpd = (pname == 'Groq (Free)' and getattr(self, '_groq_tpd_exhausted', False))
             # Calculate time remaining on rate limit
             _rl_remaining = 0
             if _is_rl:
@@ -11498,7 +12126,7 @@ Return ONLY the JSON array, no other text."""
             r._is_status_row = True
             r.pack(fill='x', pady=2)
             # Dot color: RED=dead model, YELLOW=rate-limited, GREEN=ready, GREY=no key
-            if _is_dead:
+            if _is_dead or _is_tpd:
                 dot_color = RED
             elif _is_rl:
                 dot_color = YELLOW
@@ -11511,8 +12139,8 @@ Return ONLY the JSON array, no other text."""
             _key_suffix = f' (+{len(_extras)} more)' if _extras else ''
             tk.Label(r, text=f' {display_name}{_key_suffix}', font=FONT_SMALL,
                     fg=FG if has_key else FG2, bg=BG2).pack(side='left')
-            if _is_dead:
-                status = '❌ Model unavailable (404) — try a different model'
+            if _is_dead or _is_tpd:
+                status = '🔄 Daily token limit — resets tomorrow' if _is_tpd else '❌ Model unavailable (404)'
                 status_color = RED
             elif _is_rl:
                 _mins, _secs = divmod(_rl_remaining, 60)
@@ -11576,8 +12204,8 @@ Return ONLY the JSON array, no other text."""
                       relief='flat', bd=0, cursor='hand2', padx=8, pady=2,
                       command=_clear_cooldowns).pack(side='right', padx=4)
 
-        # Auto-refresh every 5s to reflect live rate-limit countdown
-        self.after(5000, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
+        # Auto-refresh every 5 minutes — just enough to reflect cooldown expiry
+        self.after(300000, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
 
 
     def _auto_select_provider(self):
@@ -12929,5 +13557,94 @@ if __name__ == '__main__':
             try: _os2.unlink(_tf)
             except: pass
     _prelaunch_install()
+
+    # ── Require clipfinder_core.py — download and restart if missing ──────────
+    # Core is REQUIRED. Without it the app runs in degraded inline-fallback mode.
+    # Always check and download on startup so auto-updaters get it automatically.
+    _core_path = Path(__file__).parent / 'clipfinder_core.py'
+    _core_needs_update = False
+
+    # Check if core exists
+    if not _core_path.exists():
+        _core_needs_update = True
+
+    # Also check if core is outdated (older than clipfinder.py itself)
+    if _core_path.exists():
+        try:
+            _cf_mtime = Path(__file__).stat().st_mtime
+            _core_mtime = _core_path.stat().st_mtime
+            if _cf_mtime > _core_mtime + 60:  # clipfinder.py is >1min newer than core
+                _core_needs_update = True
+                print('[CF] clipfinder_core.py is outdated — updating...')
+        except Exception:
+            pass
+
+    if _core_needs_update:
+        print('[CF] Downloading clipfinder_core.py...')
+        # Show a simple tkinter splash while downloading
+        try:
+            import tkinter as _tk_boot
+            _splash = _tk_boot.Tk()
+            _splash.title('ClipFinder — Updating...')
+            _splash.geometry('400x120')
+            _splash.configure(bg='#1a1a1a')
+            _splash.resizable(False, False)
+            _splash.overrideredirect(True)
+            # Center on screen
+            _splash.update_idletasks()
+            _sw = _splash.winfo_screenwidth()
+            _sh = _splash.winfo_screenheight()
+            _splash.geometry(f'400x120+{(_sw-400)//2}+{(_sh-120)//2}')
+            _tk_boot.Label(_splash, text='CLIP FINDER', font=('Segoe UI', 14, 'bold'),
+                           fg='#FF6B00', bg='#1a1a1a').pack(pady=(20,4))
+            _status_var = _tk_boot.StringVar(value='Downloading core module...')
+            _tk_boot.Label(_splash, textvariable=_status_var, font=('Segoe UI', 9),
+                           fg='#aaaaaa', bg='#1a1a1a').pack()
+            _splash.update()
+        except Exception:
+            _splash = None
+
+        try:
+            import urllib.request as _ur_boot
+            _ur_boot.urlretrieve(
+                'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py',
+                str(_core_path))
+            print('[CF] clipfinder_core.py downloaded — restarting...')
+            if _splash:
+                _status_var.set('Restarting ClipFinder...')
+                _splash.update()
+                import time as _t_boot; _t_boot.sleep(0.8)
+                _splash.destroy()
+            import subprocess as _sp_boot, sys as _sys_boot
+            _sp_boot.Popen([_sys_boot.executable] + _sys_boot.argv)
+            _sys_boot.exit(0)
+        except Exception as _boot_err:
+            print(f'[CF] Core download failed: {_boot_err}')
+            if _splash:
+                _status_var.set(f'Download failed — running in fallback mode')
+                _splash.update()
+                import time as _t_boot2; _t_boot2.sleep(1.5)
+                _splash.destroy()
+
+    # ── Bootstrap vision_refs + default reference images (background) ─────────
+    _vr_dir = USER_DIR / 'vision_refs'
+    _vr_dir.mkdir(parents=True, exist_ok=True)
+    _ref_urls = {
+        'stake_casino.png':   'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/stake_casino.png',
+        'roobet_casino.png':  'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/roobet_casino.png',
+        'rainbet_casino.png': 'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/rainbet_casino.png',
+    }
+    import threading as _ref_thr
+    def _dl_default_refs():
+        import urllib.request as _ur_ref
+        for _rn, _ru in _ref_urls.items():
+            if not (_vr_dir / _rn).exists():
+                try:
+                    _ur_ref.urlretrieve(_ru, str(_vr_dir / _rn))
+                    print(f'[CF] Downloaded reference image: {_rn}')
+                except Exception:
+                    pass
+    _ref_thr.Thread(target=_dl_default_refs, daemon=True).start()
+
     app = App()
     app.mainloop()

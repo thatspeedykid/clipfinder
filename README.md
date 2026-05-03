@@ -1,4 +1,4 @@
-# 🎬 ClipFinder v1.3.6
+# 🎬 ClipFinder v1.3.7
 **AI-Powered Drama Clip Extractor for Streamers & Content Creators**
 
 > Built for [@MarsScumbags](https://twitter.com/MarsScumbags) — find viral moments in seconds, not hours.
@@ -13,7 +13,7 @@ ClipFinder watches your VODs so you don't have to. Drop in a URL or a local vide
 
 ## 🚀 Key Features
 
-### 🎯 Vision Mode *(NEW in v1.3.6)*
+### 🎯 Vision Mode *(v1.3.6+)*
 Go beyond the transcript. Vision Mode samples frames from your video and sends them to Gemini Vision AI to understand what's *visually* happening.
 
 - **"Girl in white shirt"** — finds her in the video
@@ -41,12 +41,22 @@ ClipFinder uses multiple free AI APIs in parallel and rotates automatically:
 
 When one provider is rate-limited, it instantly rotates to the next — no waiting.
 
+### ⚡ Smart Transcribe *(NEW in v1.3.7)*
+Enable the **⚡ Smart Transcribe** checkbox to make whisper.cpp physically stop transcribing at your cutoff point — not just filter after the fact. "Ignore last hour" on a 109min video transcribes only 49min instead of all 109min.
+
+Off by default. Hover over it for a tooltip.
+
 ### 📝 Smart Instructions Box
 Tell the AI exactly what to find or skip:
 - `ignore the last hour` — skips final hour by timestamp
 - `skip gambling content` — filters gambling mentions
 - `only clips of Aishah` — focuses on specific person
 - `focus on drama between X and Y` — targets interactions
+
+Time-based filtering (all modes):
+- `ignore last hour` — strips final hour before AI sees transcript
+- `skip last 30 minutes` — strips final 30min
+- `ignore first 30 minutes` — strips opening section
 
 In **Vision Mode**, also works for visual instructions:
 - `girl in white shirt`

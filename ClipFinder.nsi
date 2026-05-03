@@ -1,11 +1,9 @@
 ; ============================================================
-; ClipFinder v1.3.2 — NSIS Installer
-; Lightweight — no bundled packages.
-; All packages download automatically on first launch.
+; ClipFinder v1.3.7 — NSIS Installer
 ; ============================================================
 
 !define APP_NAME     "ClipFinder"
-!define APP_VERSION  "1.3.5.2"
+!define APP_VERSION  "1.3.7"
 !define APP_EXE      "clipfinder.exe"
 !define INSTALL_DIR  "$LOCALAPPDATA\ClipFinder"
 !define PUBLISHER    "MarsScumbags"
@@ -23,7 +21,7 @@ Unicode       True
 !define MUI_ICON   "clipfinder.ico"
 !define MUI_UNICON "clipfinder.ico"
 !define MUI_WELCOMEPAGE_TITLE    "Install ClipFinder ${APP_VERSION}"
-!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nRequired packages (torch, whisper, demucs, etc.) download automatically on first launch.$\n$\nYou will need an internet connection on first run."
+!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nRequired packages download automatically on first launch.$\n$\nYou will need an internet connection on first run."
 !define MUI_FINISHPAGE_RUN       "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT  "Launch ClipFinder now"
 !define MUI_FINISHPAGE_LINK      "Visit GitHub for updates"
@@ -43,13 +41,20 @@ Section "ClipFinder" SecMain
     File "ClipFinder_dist\clipfinder.exe"
     File "ClipFinder_dist\clipfinder.ico"
     File "ClipFinder_dist\clipfinder.py"
+    File "ClipFinder_dist\clipfinder_core.py"
     File "ClipFinder_dist\README.md"
     File "ClipFinder_dist\CHANGELOG.md"
 
     SetOutPath "$INSTDIR\python"
     File /r "ClipFinder_dist\python\*.*"
 
-    ; Fresh install — delete stamp so packages install on first launch
+    ; Default vision reference images
+    SetOutPath "$LOCALAPPDATA\ClipFinder\vision_refs"
+    File "ClipFinder_dist\vision_refs\stake_casino.png"
+    File "ClipFinder_dist\vision_refs\roobet_casino.png"
+    File "ClipFinder_dist\vision_refs\rainbet_casino.png"
+
+    SetOutPath "$INSTDIR"
     Delete "$INSTDIR\install_done.stamp"
     Delete "$INSTDIR\pending_update.flag"
     CreateDirectory "$INSTDIR\pkgs"
@@ -72,6 +77,7 @@ SectionEnd
 Section "Uninstall"
     Delete "$INSTDIR\clipfinder.exe"
     Delete "$INSTDIR\clipfinder.py"
+    Delete "$INSTDIR\clipfinder_core.py"
     Delete "$INSTDIR\clipfinder.ico"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\CHANGELOG.md"
@@ -84,5 +90,5 @@ Section "Uninstall"
     RMDir  "$SMPROGRAMS\${APP_NAME}"
     Delete "$DESKTOP\${APP_NAME}.lnk"
     DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-    ; Config and clips preserved — user can delete $LOCALAPPDATA\ClipFinder manually
+    ; vision_refs and config preserved — user can delete $LOCALAPPDATA\ClipFinder manually
 SectionEnd
