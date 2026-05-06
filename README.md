@@ -1,7 +1,7 @@
 # 🎬 ClipFinder v1.3.7
 **AI-Powered Drama Clip Extractor for Streamers & Content Creators**
 
-> Built for [@MarsScumbags](https://twitter.com/MarsScumbags) — find viral moments in seconds, not hours.
+> Built by [@MarsScumbags](https://twitter.com/MarsScumbags) — find viral moments in seconds, not hours.
 
 ---
 
