@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -42,10 +42,61 @@ jobs:
           Set-Content ClipFinder.nsi $nsi
         shell: pwsh
 
-      - name: Build installer (includes pre-bundling torch + whisper + demucs)
+      - name: Build base installer (embedded python + launcher)
         run: build_installer.bat
         shell: cmd
-        timeout-minutes: 60
+
+      - name: Pre-install torch CPU into pkgs
+        run: |
+          echo Installing torch CPU wheels...
+          ClipFinder_dist\python\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
+          echo torch done
+        shell: cmd
+        timeout-minutes: 40
+
+      - name: Pre-install faster-whisper into pkgs
+        run: |
+          echo Installing faster-whisper...
+          ClipFinder_dist\python\python.exe -m pip install faster-whisper --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
+          echo faster-whisper done
+        shell: cmd
+        timeout-minutes: 10
+
+      - name: Pre-install openai-whisper into pkgs
+        run: |
+          echo Installing openai-whisper...
+          ClipFinder_dist\python\python.exe -m pip install openai-whisper --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
+          echo openai-whisper done
+        shell: cmd
+        timeout-minutes: 10
+
+      - name: Pre-install demucs into pkgs
+        run: |
+          echo Installing demucs...
+          ClipFinder_dist\python\python.exe -m pip install demucs --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
+          echo demucs done
+        shell: cmd
+        timeout-minutes: 15
+
+      - name: Check pkgs size
+        run: |
+          $size = (Get-ChildItem -Recurse ClipFinder_dist\pkgs | Measure-Object -Property Length -Sum).Sum
+          $mb = [math]::Round($size / 1MB, 1)
+          echo "pkgs folder size: $mb MB"
+          Get-ChildItem ClipFinder_dist\pkgs | Select-Object Name | Format-Table
+        shell: pwsh
+
+      - name: Compile NSIS installer
+        run: |
+          & "C:\Program Files (x86)\NSIS\makensis.exe" ClipFinder.nsi
+        shell: pwsh
+
+      - name: Check installer size
+        run: |
+          $size = (Get-Item ClipFinder-Setup.exe).Length
+          $mb = [math]::Round($size / 1MB, 1)
+          echo "ClipFinder-Setup.exe size: $mb MB"
+        shell: pwsh
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
