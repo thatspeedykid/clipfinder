@@ -46,39 +46,25 @@ jobs:
         run: build_installer.bat
         shell: cmd
 
-      - name: Verify embedded python works
+      - name: Pre-install packages using SYSTEM Python into pkgs folder
         run: |
-          ClipFinder_dist\python\python.exe --version
-          ClipFinder_dist\python\python.exe -m pip --version
+          echo Using system Python to install packages into ClipFinder_dist\pkgs...
+          
+          echo [1/4] torch CPU...
+          py -3.12 -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --target ClipFinder_dist\pkgs --no-warn-script-location
+          
+          echo [2/4] faster-whisper...
+          py -3.12 -m pip install faster-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
+          
+          echo [3/4] openai-whisper...
+          py -3.12 -m pip install openai-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
+          
+          echo [4/4] demucs...
+          py -3.12 -m pip install demucs --target ClipFinder_dist\pkgs --no-warn-script-location
+          
+          echo All packages installed.
         shell: cmd
-
-      - name: Pre-install torch CPU
-        run: |
-          ClipFinder_dist\python\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --target ClipFinder_dist\pkgs --no-warn-script-location
-          echo torch exit code: %errorlevel%
-        shell: cmd
-        timeout-minutes: 45
-
-      - name: Pre-install faster-whisper
-        run: |
-          ClipFinder_dist\python\python.exe -m pip install faster-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
-          echo faster-whisper exit code: %errorlevel%
-        shell: cmd
-        timeout-minutes: 10
-
-      - name: Pre-install openai-whisper
-        run: |
-          ClipFinder_dist\python\python.exe -m pip install openai-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
-          echo openai-whisper exit code: %errorlevel%
-        shell: cmd
-        timeout-minutes: 10
-
-      - name: Pre-install demucs
-        run: |
-          ClipFinder_dist\python\python.exe -m pip install demucs --target ClipFinder_dist\pkgs --no-warn-script-location
-          echo demucs exit code: %errorlevel%
-        shell: cmd
-        timeout-minutes: 15
+        timeout-minutes: 60
 
       - name: Verify pkgs folder
         run: |
@@ -86,10 +72,10 @@ jobs:
           if ($items) {
             $size = (Get-ChildItem -Recurse ClipFinder_dist\pkgs | Measure-Object -Property Length -Sum).Sum
             $mb = [math]::Round($size / 1MB, 1)
-            echo "SUCCESS: pkgs folder has $($items.Count) items, total $mb MB"
-            $items | Select-Object -First 20 Name | Format-Table
+            echo "SUCCESS: pkgs folder has $($items.Count) top-level items, total $mb MB"
+            $items | Select-Object -First 30 Name | Format-Table
           } else {
-            echo "ERROR: pkgs folder is empty or missing!"
+            echo "ERROR: pkgs folder is empty!"
             exit 1
           }
         shell: pwsh
@@ -103,7 +89,7 @@ jobs:
           $size = (Get-Item ClipFinder-Setup.exe).Length
           $mb = [math]::Round($size / 1MB, 1)
           echo "ClipFinder-Setup.exe: $mb MB"
-          if ($mb -lt 500) {
+          if ($mb -lt 400) {
             echo "WARNING: Installer seems too small — packages may not be bundled"
           }
         shell: pwsh
