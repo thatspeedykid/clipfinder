@@ -21,7 +21,7 @@ Unicode       True
 !define MUI_ICON   "clipfinder.ico"
 !define MUI_UNICON "clipfinder.ico"
 !define MUI_WELCOMEPAGE_TITLE    "Install ClipFinder ${APP_VERSION}"
-!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nTranscription (faster-whisper) and music removal (demucs) are pre-bundled — no waiting on first launch.$\n$\nOther AI packages install automatically in the background."
+!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nTranscription and music removal are pre-bundled — works immediately after install."
 !define MUI_FINISHPAGE_RUN       "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT  "Launch ClipFinder now"
 !define MUI_FINISHPAGE_LINK      "Visit GitHub for updates"
@@ -49,9 +49,9 @@ Section "ClipFinder" SecMain
     SetOutPath "$INSTDIR\python"
     File /r "ClipFinder_dist\python\*.*"
 
-    ; Pre-built packages — faster-whisper, demucs, torch already installed
+    ; Pre-built packages — torch, faster-whisper, demucs pre-installed
     SetOutPath "$LOCALAPPDATA\ClipFinder\pkgs"
-    File /r /nonfatal "ClipFinder_dist\pkgs\*"
+    File /r "ClipFinder_dist\pkgs\*.*"
 
     ; Default vision reference images
     SetOutPath "$LOCALAPPDATA\ClipFinder\vision_refs"
@@ -93,5 +93,4 @@ Section "Uninstall"
     RMDir  "$SMPROGRAMS\${APP_NAME}"
     Delete "$DESKTOP\${APP_NAME}.lnk"
     DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-    ; pkgs, vision_refs and config preserved — user can delete $LOCALAPPDATA\ClipFinder manually
 SectionEnd
