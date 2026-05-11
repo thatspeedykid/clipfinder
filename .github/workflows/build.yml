@@ -42,60 +42,70 @@ jobs:
           Set-Content ClipFinder.nsi $nsi
         shell: pwsh
 
-      - name: Build base installer (embedded python + launcher)
+      - name: Build base (embedded python + launcher + app files)
         run: build_installer.bat
         shell: cmd
 
-      - name: Pre-install torch CPU into pkgs
+      - name: Verify embedded python works
         run: |
-          echo Installing torch CPU wheels...
-          ClipFinder_dist\python\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
-          echo torch done
+          ClipFinder_dist\python\python.exe --version
+          ClipFinder_dist\python\python.exe -m pip --version
         shell: cmd
-        timeout-minutes: 40
 
-      - name: Pre-install faster-whisper into pkgs
+      - name: Pre-install torch CPU
         run: |
-          echo Installing faster-whisper...
-          ClipFinder_dist\python\python.exe -m pip install faster-whisper --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
-          echo faster-whisper done
+          ClipFinder_dist\python\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --target ClipFinder_dist\pkgs --no-warn-script-location
+          echo torch exit code: %errorlevel%
         shell: cmd
-        timeout-minutes: 10
+        timeout-minutes: 45
 
-      - name: Pre-install openai-whisper into pkgs
+      - name: Pre-install faster-whisper
         run: |
-          echo Installing openai-whisper...
-          ClipFinder_dist\python\python.exe -m pip install openai-whisper --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
-          echo openai-whisper done
+          ClipFinder_dist\python\python.exe -m pip install faster-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
+          echo faster-whisper exit code: %errorlevel%
         shell: cmd
         timeout-minutes: 10
 
-      - name: Pre-install demucs into pkgs
+      - name: Pre-install openai-whisper
         run: |
-          echo Installing demucs...
-          ClipFinder_dist\python\python.exe -m pip install demucs --target ClipFinder_dist\pkgs --quiet --no-warn-script-location
-          echo demucs done
+          ClipFinder_dist\python\python.exe -m pip install openai-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
+          echo openai-whisper exit code: %errorlevel%
+        shell: cmd
+        timeout-minutes: 10
+
+      - name: Pre-install demucs
+        run: |
+          ClipFinder_dist\python\python.exe -m pip install demucs --target ClipFinder_dist\pkgs --no-warn-script-location
+          echo demucs exit code: %errorlevel%
         shell: cmd
         timeout-minutes: 15
 
-      - name: Check pkgs size
+      - name: Verify pkgs folder
         run: |
-          $size = (Get-ChildItem -Recurse ClipFinder_dist\pkgs | Measure-Object -Property Length -Sum).Sum
-          $mb = [math]::Round($size / 1MB, 1)
-          echo "pkgs folder size: $mb MB"
-          Get-ChildItem ClipFinder_dist\pkgs | Select-Object Name | Format-Table
+          $items = Get-ChildItem ClipFinder_dist\pkgs -ErrorAction SilentlyContinue
+          if ($items) {
+            $size = (Get-ChildItem -Recurse ClipFinder_dist\pkgs | Measure-Object -Property Length -Sum).Sum
+            $mb = [math]::Round($size / 1MB, 1)
+            echo "SUCCESS: pkgs folder has $($items.Count) items, total $mb MB"
+            $items | Select-Object -First 20 Name | Format-Table
+          } else {
+            echo "ERROR: pkgs folder is empty or missing!"
+            exit 1
+          }
         shell: pwsh
 
       - name: Compile NSIS installer
-        run: |
-          & "C:\Program Files (x86)\NSIS\makensis.exe" ClipFinder.nsi
+        run: '& "C:\Program Files (x86)\NSIS\makensis.exe" ClipFinder.nsi'
         shell: pwsh
 
-      - name: Check installer size
+      - name: Verify installer size
         run: |
           $size = (Get-Item ClipFinder-Setup.exe).Length
           $mb = [math]::Round($size / 1MB, 1)
-          echo "ClipFinder-Setup.exe size: $mb MB"
+          echo "ClipFinder-Setup.exe: $mb MB"
+          if ($mb -lt 500) {
+            echo "WARNING: Installer seems too small — packages may not be bundled"
+          }
         shell: pwsh
 
       - name: Create Release

@@ -50,9 +50,8 @@ Section "ClipFinder" SecMain
     File /r "ClipFinder_dist\python\*.*"
 
     ; Pre-built packages — faster-whisper, demucs, torch already installed
-    ; Copies into the same pkgs folder the app uses
     SetOutPath "$LOCALAPPDATA\ClipFinder\pkgs"
-    File /r "ClipFinder_dist\pkgs\*.*"
+    File /r /nonfatal "ClipFinder_dist\pkgs\"
 
     ; Default vision reference images
     SetOutPath "$LOCALAPPDATA\ClipFinder\vision_refs"
