@@ -51,7 +51,7 @@ Section "ClipFinder" SecMain
 
     ; Pre-built packages — faster-whisper, demucs, torch already installed
     SetOutPath "$LOCALAPPDATA\ClipFinder\pkgs"
-    File /r /nonfatal "ClipFinder_dist\pkgs\"
+    File /r /nonfatal "ClipFinder_dist\pkgs\*"
 
     ; Default vision reference images
     SetOutPath "$LOCALAPPDATA\ClipFinder\vision_refs"
