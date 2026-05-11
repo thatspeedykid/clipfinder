@@ -1,9 +1,9 @@
 ; ============================================================
-; ClipFinder v1.3.7 — NSIS Installer
+; ClipFinder v1.3.7.1 — NSIS Installer
 ; ============================================================
 
 !define APP_NAME     "ClipFinder"
-!define APP_VERSION  "1.3.7"
+!define APP_VERSION  "1.3.7.1"
 !define APP_EXE      "clipfinder.exe"
 !define INSTALL_DIR  "$LOCALAPPDATA\ClipFinder"
 !define PUBLISHER    "MarsScumbags"
@@ -21,7 +21,7 @@ Unicode       True
 !define MUI_ICON   "clipfinder.ico"
 !define MUI_UNICON "clipfinder.ico"
 !define MUI_WELCOMEPAGE_TITLE    "Install ClipFinder ${APP_VERSION}"
-!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nRequired packages download automatically on first launch.$\n$\nYou will need an internet connection on first run."
+!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nTranscription (faster-whisper) and music removal (demucs) are pre-bundled — no waiting on first launch.$\n$\nOther AI packages install automatically in the background."
 !define MUI_FINISHPAGE_RUN       "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT  "Launch ClipFinder now"
 !define MUI_FINISHPAGE_LINK      "Visit GitHub for updates"
@@ -45,19 +45,24 @@ Section "ClipFinder" SecMain
     File "ClipFinder_dist\README.md"
     File "ClipFinder_dist\CHANGELOG.md"
 
+    ; Embedded Python
     SetOutPath "$INSTDIR\python"
     File /r "ClipFinder_dist\python\*.*"
 
+    ; Pre-built packages — faster-whisper, demucs, torch already installed
+    ; Copies into the same pkgs folder the app uses
+    SetOutPath "$LOCALAPPDATA\ClipFinder\pkgs"
+    File /r "ClipFinder_dist\pkgs\*.*"
+
     ; Default vision reference images
     SetOutPath "$LOCALAPPDATA\ClipFinder\vision_refs"
-    File "ClipFinder_dist\vision_refs\stake_casino.png"
-    File "ClipFinder_dist\vision_refs\roobet_casino.png"
-    File "ClipFinder_dist\vision_refs\rainbet_casino.png"
+    File /nonfatal "ClipFinder_dist\vision_refs\stake_casino.png"
+    File /nonfatal "ClipFinder_dist\vision_refs\roobet_casino.png"
+    File /nonfatal "ClipFinder_dist\vision_refs\rainbet_casino.png"
 
     SetOutPath "$INSTDIR"
     Delete "$INSTDIR\install_done.stamp"
     Delete "$INSTDIR\pending_update.flag"
-    CreateDirectory "$INSTDIR\pkgs"
 
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     CreateDirectory "$SMPROGRAMS\${APP_NAME}"
@@ -85,10 +90,9 @@ Section "Uninstall"
     Delete "$INSTDIR\install_done.stamp"
     Delete "$INSTDIR\pending_update.flag"
     RMDir /r "$INSTDIR\python"
-    RMDir /r "$INSTDIR\pkgs"
     Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
     RMDir  "$SMPROGRAMS\${APP_NAME}"
     Delete "$DESKTOP\${APP_NAME}.lnk"
     DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-    ; vision_refs and config preserved — user can delete $LOCALAPPDATA\ClipFinder manually
+    ; pkgs, vision_refs and config preserved — user can delete $LOCALAPPDATA\ClipFinder manually
 SectionEnd

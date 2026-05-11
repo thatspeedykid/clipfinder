@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -37,18 +38,14 @@ jobs:
         run: |
           $ver = "${{ steps.version.outputs.VER }}"
           $nsi = Get-Content ClipFinder.nsi -Raw
-          $nsi = $nsi -replace '!define APP_VERSION "\d+\.\d+(\.\d+)?"', "!define APP_VERSION `"$ver`""
+          $nsi = $nsi -replace '!define APP_VERSION "\d+\.\d+(\.\d+(\.\d+)?)?"', "!define APP_VERSION `"$ver`""
           Set-Content ClipFinder.nsi $nsi
         shell: pwsh
 
-      - name: Build installer
+      - name: Build installer (includes pre-bundling torch + whisper + demucs)
         run: build_installer.bat
         shell: cmd
-
-      - name: Compile NSIS
-        run: |
-          & "C:\Program Files (x86)\NSIS\makensis.exe" ClipFinder.nsi
-        shell: pwsh
+        timeout-minutes: 60
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

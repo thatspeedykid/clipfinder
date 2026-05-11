@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.7"
+APP_VERSION = "1.3.7.1"
 
 import subprocess
 import sys
@@ -122,8 +122,6 @@ REQUIRED_LIGHT = {
     'curl_cffi': 'curl-cffi',
 }
 REQUIRED_HEAVY = {
-    'whisper':        'openai-whisper',
-    'faster_whisper': 'faster-whisper',
     'groq':           'groq',
     'google.genai':   'google-genai',
     'openai':         'openai',
@@ -131,6 +129,12 @@ REQUIRED_HEAVY = {
     'cv2':            'opencv-python',
     'soundfile':      'soundfile',
     'numpy':          'numpy',
+}
+# torch/whisper/demucs are OPTIONAL — installed separately via Settings
+# They require large downloads and Visual C++ — don't auto-install
+REQUIRED_OPTIONAL = {
+    'whisper':        'openai-whisper',
+    'faster_whisper': 'faster-whisper',
 }
 # Combined dict kept for backward-compat references elsewhere
 REQUIRED = {**REQUIRED_LIGHT, **REQUIRED_HEAVY}
@@ -146,7 +150,19 @@ def _get_pip_executable():
     if _exe.name.lower() in ("python.exe", "python3.exe", "python", "python3"):
         return str(_exe)
 
-    # Mode 2: Frozen EXE — must find real Python separately
+    # Mode 2: Frozen EXE — check bundled embedded Python FIRST
+    # Installer puts python.exe at: <install_dir>\python\python.exe
+    _install_dir = _exe.parent  # e.g. C:\Users\Speedy\AppData\Local\ClipFinder
+    _bundled = _install_dir / 'python' / 'python.exe'
+    if _bundled.exists():
+        return str(_bundled)
+
+    # Also check one level up (if EXE is in a subdirectory)
+    _bundled2 = _exe.parent.parent / 'python' / 'python.exe'
+    if _bundled2.exists():
+        return str(_bundled2)
+
+    # Mode 3: py launcher
     py = _sh.which("py")
     if py:
         try:
@@ -324,7 +340,8 @@ def auto_install():
     Script mode -> installs everything then restarts via os.execv.
     """
     _frozen = getattr(sys, 'frozen', False)
-    target = REQUIRED_LIGHT if _frozen else REQUIRED
+    # Always install everything — EXE has bundled python.exe that can handle it
+    target = REQUIRED
 
     missing = []
     for mod, pkg in target.items():
@@ -11391,21 +11408,21 @@ Return ONLY the JSON array, no other text."""
             _inst_prog_lbl.config(text=msg)
 
         _INSTALL_HEAVY_PKGS = [
-            # Pure Python AI providers first
+            # Pure Python AI providers first — small, fast
             'google-genai', 'groq', 'openai', 'yt-dlp', 'requests', 'curl-cffi',
             # Numeric base MUST come before imagehash/soundfile/whisper
             'numpy', 'scipy',
             # Audio + image (depend on numpy)
             'Pillow', 'soundfile', 'imagehash',
-            # Whisper engines
-            'faster-whisper', 'openai-whisper',
             # Video processing
             'opencv-python',
             # Optional face tracking
             'mediapipe',
-            # Music removal
-            'torch', 'torchaudio', 'demucs',
         ]
+        # Torch/whisper/demucs installed separately with special handling
+        _INSTALL_TORCH_PKGS = ['torch', 'torchaudio']
+        _INSTALL_WHISPER_PKGS = ['faster-whisper', 'openai-whisper']
+        _INSTALL_DEMUCS_PKGS = ['demucs']
 
         def _install_all_heavy():
             _install_btn.config(text='⟳ Installing... (check log)', state='disabled', bg=BG4, fg=FG2)
@@ -11416,37 +11433,89 @@ Return ONLY the JSON array, no other text."""
 
             def _do_heavy():
                 import subprocess as _sp
-                n = len(_INSTALL_HEAVY_PKGS)
+                _all_pkgs = (list(_INSTALL_HEAVY_PKGS) +
+                             _INSTALL_TORCH_PKGS +
+                             _INSTALL_WHISPER_PKGS +
+                             _INSTALL_DEMUCS_PKGS)
+                n = len(_all_pkgs)
                 self.log('🔄 Installing all AI/transcription packages...', ACCENT2)
-                self.log('This may take 5-15 minutes depending on connection speed.', FG2)
+                self.log('  This may take 10-20 minutes — torch alone is ~2GB.', FG2)
                 ok_count = 0
-                for i, pkg in enumerate(_INSTALL_HEAVY_PKGS):
+
+                for i, pkg in enumerate(_all_pkgs):
                     pct_before = max(2, int(i / n * 95))
                     self.after(0, lambda p=pkg, pct=pct_before: (
                         _draw_inst_progress(pct, f'Installing {p}... ({pct}%)'),
                         self.set_progress(f'⬇ Installing {p}...', pct=pct)
                     ))
                     self.log(f'  → {pkg}...', FG2)
-                    _nodeps = pkg in {'faster-whisper', 'openai-whisper'}
-                    _cmd = _pip_cmd([pkg], ['--no-deps'] if _nodeps else [])
+
                     if _cmd is None:
-                        self.after(0, lambda: self.log('❌ Cannot find Python — check Settings', RED))
-                        break
-                    r = _sp.run(_cmd, capture_output=True, text=True, timeout=300)
-                    if r.returncode != 0 and _nodeps:
-                        r = _sp.run(_pip_cmd([pkg]), capture_output=True, text=True, timeout=300)
-                    if r.returncode != 0 and b'Access is denied' in (r.stderr or b'').encode():
-                        self.after(0, lambda p=pkg: self.log(
-                            f'⚠ {p} is locked (in use). Restart ClipFinder to complete install.', YELLOW))
-                        r = type('R', (), {'returncode': 0})()  # treat as ok, will work after restart
-                    _ok = r.returncode == 0
+                        _cmd2 = _pip_cmd([pkg])
+                        if _cmd2 is None:
+                            self.after(0, lambda: self.log('❌ Cannot find Python — check Settings', RED))
+                            break
+
+                    # torch/torchaudio: use PyTorch CPU index first (always works),
+                    # then GPU-specific if needed
+                    if pkg in ('torch', 'torchaudio'):
+                        # Try CPU index first (100% reliable), then GPU
+                        _torch_urls = [
+                            # CPU — always works, no CUDA needed
+                            ['--index-url', 'https://download.pytorch.org/whl/cpu'],
+                            # CUDA 12.1 for NVIDIA
+                            ['--index-url', 'https://download.pytorch.org/whl/cu121'],
+                            # ROCm 6.0 for AMD
+                            ['--index-url', 'https://download.pytorch.org/whl/rocm6.0'],
+                            # Default PyPI
+                            [],
+                        ]
+                        _ok = False
+                        for _extra_args in _torch_urls:
+                            _cmd_t = _pip_cmd([pkg], _extra_args)
+                            if _cmd_t:
+                                r = _sp.run(_cmd_t, capture_output=True, text=True, timeout=600)
+                                if r.returncode == 0:
+                                    _ok = True
+                                    break
+                                else:
+                                    self.log(f'  ⚠ torch attempt failed: {(r.stderr or "")[-80:]}', YELLOW)
+                    elif pkg in ('faster-whisper', 'openai-whisper'):
+                        # Try with --no-deps first (avoids torch conflict), then normal
+                        r = _sp.run(_pip_cmd([pkg], ['--no-deps']), capture_output=True, text=True, timeout=300)
+                        _ok = r.returncode == 0
+                        if not _ok:
+                            r = _sp.run(_pip_cmd([pkg]), capture_output=True, text=True, timeout=300)
+                            _ok = r.returncode == 0
+                    elif pkg == 'demucs':
+                        # demucs needs torch pre-installed — check first
+                        try:
+                            import importlib; importlib.import_module('torch')
+                            _torch_ok = True
+                        except ImportError:
+                            _torch_ok = any(PKGS_DIR.glob('torch*')) if PKGS_DIR.exists() else False
+                        if not _torch_ok:
+                            self.log('  ⚠ demucs skipped — torch not installed yet. Install torch first.', YELLOW)
+                            continue
+                        r = _sp.run(_pip_cmd([pkg]), capture_output=True, text=True, timeout=600)
+                        _ok = r.returncode == 0
+                    else:
+                        _cmd2 = _pip_cmd([pkg])
+                        if _cmd2 is None:
+                            self.after(0, lambda: self.log('❌ Cannot find Python', RED)); break
+                        r = _sp.run(_cmd2, capture_output=True, text=True, timeout=300)
+                        if r.returncode != 0 and b'Access is denied' in (r.stderr or b'').encode():
+                            self.after(0, lambda p=pkg: self.log(
+                                f'⚠ {p} is locked (in use). Restart to complete.', YELLOW))
+                            r = type('R', (), {'returncode': 0})()
+                        _ok = r.returncode == 0
+
                     if _ok:
                         ok_count += 1
-                    if not _ok:
-                        _err_tail = (r.stderr or '')[-150:].strip()
-                        self.after(0, lambda p=pkg, e=_err_tail: self.log(f'  ❌ {p}: {e}', RED))
-                    else:
                         self.after(0, lambda p=pkg: self.log(f'  ✅ {p}', GREEN))
+                    else:
+                        _err_tail = (r.stderr if hasattr(r,'stderr') and r.stderr else '')[-200:].strip()
+                        self.after(0, lambda p=pkg, e=_err_tail: self.log(f'  ❌ {p}: {e}', RED))
 
                 def _finish():
                     _draw_inst_progress(100, f'Done! {ok_count}/{n} packages installed.')
