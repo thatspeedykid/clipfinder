@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.7.1"
+APP_VERSION = "1.3.8"
 
 import subprocess
 import sys
@@ -122,6 +122,8 @@ REQUIRED_LIGHT = {
     'curl_cffi': 'curl-cffi',
 }
 REQUIRED_HEAVY = {
+    'whisper':        'openai-whisper',
+    'faster_whisper': 'faster-whisper',
     'groq':           'groq',
     'google.genai':   'google-genai',
     'openai':         'openai',
@@ -129,12 +131,6 @@ REQUIRED_HEAVY = {
     'cv2':            'opencv-python',
     'soundfile':      'soundfile',
     'numpy':          'numpy',
-}
-# torch/whisper/demucs are OPTIONAL — installed separately via Settings
-# They require large downloads and Visual C++ — don't auto-install
-REQUIRED_OPTIONAL = {
-    'whisper':        'openai-whisper',
-    'faster_whisper': 'faster-whisper',
 }
 # Combined dict kept for backward-compat references elsewhere
 REQUIRED = {**REQUIRED_LIGHT, **REQUIRED_HEAVY}
@@ -150,19 +146,7 @@ def _get_pip_executable():
     if _exe.name.lower() in ("python.exe", "python3.exe", "python", "python3"):
         return str(_exe)
 
-    # Mode 2: Frozen EXE — check bundled embedded Python FIRST
-    # Installer puts python.exe at: <install_dir>\python\python.exe
-    _install_dir = _exe.parent  # e.g. C:\Users\Speedy\AppData\Local\ClipFinder
-    _bundled = _install_dir / 'python' / 'python.exe'
-    if _bundled.exists():
-        return str(_bundled)
-
-    # Also check one level up (if EXE is in a subdirectory)
-    _bundled2 = _exe.parent.parent / 'python' / 'python.exe'
-    if _bundled2.exists():
-        return str(_bundled2)
-
-    # Mode 3: py launcher
+    # Mode 2: Frozen EXE — must find real Python separately
     py = _sh.which("py")
     if py:
         try:
@@ -340,8 +324,7 @@ def auto_install():
     Script mode -> installs everything then restarts via os.execv.
     """
     _frozen = getattr(sys, 'frozen', False)
-    # Always install everything — EXE has bundled python.exe that can handle it
-    target = REQUIRED
+    target = REQUIRED_LIGHT if _frozen else REQUIRED
 
     missing = []
     for mod, pkg in target.items():
@@ -2248,7 +2231,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f'ClipFinder {APP_VERSION} — AI Clip Extractor')
-        self.geometry('1200x800')
+        self.geometry('1200x860')
         # Load previously decommissioned models so we never retry them
         _load_dead_models()
         # Restore Groq TPD state if it hasn't expired yet
@@ -2286,7 +2269,7 @@ class App(tk.Tk):
                         break
         except Exception:
             pass
-        self.minsize(1000, 700)
+        self.minsize(1000, 750)
         self.configure(bg=BG)
 
         self.cfg = load_cfg()
@@ -2977,13 +2960,14 @@ class App(tk.Tk):
         self.nb_btns   = {}
 
         TABS = [
-            ('clips',      '✂',  'Clip Finder'),
-            ('transcript', '📝', 'Transcript'),
-            ('downloader', '⬇',  'Downloader'),
-            ('thumbs',     '🖼',  'Thumbnails'),
-            ('studio',     '🔬', 'Studio'),
-            ('censor',     '🔇', 'Censor'),
-            ('music',      '🎵', 'Music Removal'),
+            ('clips',       '✂',  'Clip Finder'),
+            ('transcript',  '📝', 'Transcript'),
+            ('poststudio',  '🚀', 'Post Studio'),
+            ('downloader',  '⬇',  'Downloader'),
+            ('thumbs',      '🖼', 'Thumbnails'),
+            ('studio',      '🔬', 'Studio'),
+            ('censor',      '🔇', 'Censor'),
+            ('music',       '🎵', 'Music Removal'),
         ]
         for key, icon, label in TABS:
             b = tk.Button(nb_bar, text=f'{icon}  {label}', font=('Segoe UI', 9),
@@ -3008,6 +2992,7 @@ class App(tk.Tk):
         # Lazy-build remaining tabs on first visit
         _lazy_builders = {
             'transcript': (self._build_trans_tab,),
+            'poststudio': (self._build_post_studio_tab,),
             'downloader': (self._build_dl_tab,),
             'thumbs':     (self._build_thumb_tab,),
             'studio':     (self._build_studio_tab,),
@@ -4074,123 +4059,45 @@ class App(tk.Tk):
 
         tk.Frame(pane, bg=BORDER, width=1).pack(side='left', fill='y')
 
-        # ── RIGHT: tweet generator ────────────────────────────────────────────
-        right = tk.Frame(pane, bg=BG)
-        right.pack(side='left', fill='both', expand=True)
+        tk.Frame(pane, bg=BORDER, width=1).pack(side='left', fill='y')
 
-        tk.Label(right, text='TWEET GENERATOR', font=('Segoe UI', 9, 'bold'),
-                 fg=ACCENT, bg=BG).pack(anchor='w', pady=(0, 6))
+        # ── RIGHT: quick actions ──────────────────────────────────────────────
+        right = tk.Frame(pane, bg=BG, width=170)
+        right.pack(side='left', fill='y', padx=10, pady=8)
+        right.pack_propagate(False)
 
-        # Context input
-        tk.Label(right, text='CONTEXT  (optional)', font=('Segoe UI', 8, 'bold'),
-                 fg=FG2, bg=BG).pack(anchor='w')
-        tk.Label(right, text="Who's in it, what's the drama, names, etc.",
-                 font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', pady=(1, 3))
-        self.tweet_context = tk.Text(right, height=3, font=FONT_SMALL,
-                                     bg=BG3, fg=FG, insertbackground=ACCENT,
-                                     relief='flat', bd=6, wrap='word')
-        self.tweet_context.pack(fill='x', pady=(0, 8))
-        self.tweet_context.insert('1.0', self.cfg.get('tweet_context', self.cfg.get('video_context', '')))
+        tk.Label(right, text='EXPORT', font=('Segoe UI', 9, 'bold'),
+                 fg=ACCENT, bg=BG).pack(anchor='w', pady=(0, 8))
 
-        # Tone selector
-        tk.Label(right, text='TONE', font=('Segoe UI', 8, 'bold'),
-                 fg=FG2, bg=BG).pack(anchor='w')
-        tone_row = tk.Frame(right, bg=BG)
-        tone_row.pack(fill='x', pady=(3, 8))
-        self.tweet_tone = tk.StringVar(value='drama')
-        self._tweet_tone_btns = {}
-        for tone, label in [('drama','🔥 Drama'),('tea','☕ Tea'),
-                             ('breaking','📰 Breaking'),('hype','💥 Hype'),
-                             ('exaggerate','🤯 Exaggerate')]:
-            b = tk.Button(tone_row, text=label, font=FONT_SMALL,
-                          relief='flat', bd=0, cursor='hand2', padx=8, pady=5,
-                          command=lambda t=tone: self._set_tweet_tone(t))
-            b.pack(side='left', padx=(0, 3))
-            self._tweet_tone_btns[tone] = b
-        self._refresh_tweet_tones()
+        def _copy_trans():
+            txt = self.trans_box.get('1.0','end').strip() if hasattr(self,'trans_box') else ''
+            if txt:
+                self.clipboard_clear(); self.clipboard_append(txt)
+                _cb.config(text='✅ Copied!', fg=GREEN)
+                self.after(1500, lambda: _cb.config(text='📋 Copy Transcript', fg=FG))
+        _cb = tk.Button(right, text='📋 Copy Transcript', font=FONT_SMALL,
+                        bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2',
+                        padx=8, pady=6, command=_copy_trans)
+        _cb.pack(fill='x', pady=(0,4))
 
-        tk.Frame(right, bg=BORDER, height=1).pack(fill='x', pady=6)
+        def _save_trans():
+            import tkinter.filedialog as _fd
+            _p = _fd.asksaveasfilename(defaultextension='.txt',
+                filetypes=[('Text','*.txt'),('All','*.*')], initialfile='transcript.txt')
+            if _p:
+                txt = self.trans_box.get('1.0','end').strip() if hasattr(self,'trans_box') else ''
+                open(_p,'w',encoding='utf-8').write(txt)
+        tk.Button(right, text='💾 Save .txt', font=FONT_SMALL,
+                  bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2',
+                  padx=8, pady=6, command=_save_trans).pack(fill='x', pady=(0,12))
 
-        # Generate button + spinner label
-        gen_row = tk.Frame(right, bg=BG)
-        gen_row.pack(fill='x', pady=(0, 6))
-        self.tweet_gen_btn = tk.Button(gen_row, text='⚡  GENERATE TWEET',
-                                       font=('Segoe UI', 9, 'bold'),
-                                       bg=ACCENT, fg='#000', relief='flat', bd=0,
-                                       cursor='hand2', pady=8,
-                                       activebackground=ACCENT2,
-                                       command=self._generate_tweet)
-        self.tweet_gen_btn.pack(fill='x')
-        self.tweet_gen_lbl = tk.Label(right, text='', font=FONT_SMALL, fg=FG2, bg=BG)
-        self.tweet_gen_lbl.pack(anchor='w', pady=(2, 0))
+        tk.Frame(right, bg=BORDER, height=1).pack(fill='x', pady=(0,8))
+        tk.Label(right, text='Generate posts from transcript:', font=('Segoe UI', 7), fg=FG3, bg=BG).pack(anchor='w')
+        tk.Button(right, text='🚀 Post Studio →', font=FONT_SMALL,
+                  bg='#1a2a1a', fg='#88ff88', relief='flat', bd=0,
+                  cursor='hand2', padx=8, pady=6,
+                  command=lambda: self._switch_nb('poststudio')).pack(fill='x', pady=(4,0))
 
-        tk.Frame(right, bg=BORDER, height=1).pack(fill='x', pady=6)
-
-        # 3-tab output area
-        out_hdr = tk.Frame(right, bg=BG)
-        out_hdr.pack(fill='x', pady=(0, 4))
-        tk.Label(out_hdr, text='GENERATED TWEETS', font=('Segoe UI', 8, 'bold'),
-                 fg=FG2, bg=BG).pack(side='left')
-        tk.Button(out_hdr, text='Regenerate All', font=FONT_SMALL, bg=BG3, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=8, pady=2,
-                  command=self._generate_tweet).pack(side='right', padx=4)
-
-        # Tab bar for 3 options
-        self._tweet_tab_idx = 0
-        self.tweet_tabs_data = ['', '', '']  # store text for each tab
-        tab_bar = tk.Frame(right, bg=BG2)
-        tab_bar.pack(fill='x')
-        self._tweet_tab_btns = []
-        def _switch_tweet_tab(i):
-            self._tweet_tab_idx = i
-            for j, tb in enumerate(self._tweet_tab_btns):
-                tb.config(bg=ACCENT if j == i else BG3,
-                          fg='#000' if j == i else FG2)
-            txt = self.tweet_tabs_data[i]
-            self.tweet_out.config(state='normal')
-            self.tweet_out.delete('1.0', 'end')
-            self.tweet_out.insert('1.0', txt if txt else 'Hit ⚡ Generate Tweet to get options.')
-            _update_char_count()
-        for i, lbl in enumerate(['🔥 Hot Take', '💬 Quote', '📢 Announcement']):
-            tb = tk.Button(tab_bar, text=lbl, font=FONT_SMALL,
-                           bg=ACCENT if i == 0 else BG3,
-                           fg='#000' if i == 0 else FG2,
-                           relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
-                           command=lambda idx=i: _switch_tweet_tab(idx))
-            tb.pack(side='left', padx=(0,2))
-            self._tweet_tab_btns.append(tb)
-
-        # Output text box (editable)
-        tw = tk.Frame(right, bg=BG3)
-        tw.pack(fill='both', expand=True)
-        self.tweet_out = tk.Text(tw, font=FONT_MONO_S, bg=BG3, fg=FG,
-                                 insertbackground=ACCENT, relief='flat', bd=8,
-                                 wrap='word')
-        _make_scrollbar(tw, self.tweet_out)
-        self.tweet_out.pack(side='left', fill='both', expand=True)
-        self.tweet_out.insert('1.0', 'Hit ⚡ Generate Tweet to get 3 different options.')
-
-        # Char count + copy row
-        bot_row = tk.Frame(right, bg=BG); bot_row.pack(fill='x', pady=(3,0))
-        self.tweet_char_lbl = tk.Label(bot_row, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
-        self.tweet_char_lbl.pack(side='left')
-        tk.Button(bot_row, text='Copy This', font=FONT_SMALL, bg=BG3, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=10, pady=2,
-                  command=self._copy_tweet).pack(side='right')
-
-        def _update_char_count(*_):
-            txt = self.tweet_out.get('1.0', 'end').strip()
-            chars = len(txt)
-            self.tweet_char_lbl.config(
-                text=f'{chars} chars',
-                fg=GREEN if chars <= 280 else YELLOW if chars <= 500 else ACCENT)
-        self.tweet_out.bind('<KeyRelease>', _update_char_count)
-        self.tweet_out.bind('<Double-Button-1>', lambda e: (
-            self.clipboard_clear(),
-            self.clipboard_append(self.tweet_out.get('1.0','end').strip()),
-            self.tweet_gen_lbl.config(text='Copied!', fg=GREEN)))
-
-        # ── BURN SUBTITLES sub-tab content ────────────────────────────────────
         sub_body = tk.Frame(_sub_p, bg=BG); sub_body.pack(fill='both', expand=True, padx=20, pady=8)
 
         # Row 1: Video input with browse + transcribe button built-in
@@ -7901,21 +7808,56 @@ Return ONLY the JSON array, no other text."""
             _opt1, _opt2, _opt3 = _parts[0], _parts[1], _parts[2]
 
             def _update():
-                self.tweet_tabs_data = [_opt1, _opt2, _opt3]
-                # Show option 1 by default, reset tab selection
-                for j, tb in enumerate(self._tweet_tab_btns):
-                    tb.config(bg=ACCENT if j == 0 else BG3,
-                              fg='#000' if j == 0 else FG2)
-                self._tweet_tab_idx = 0
-                self.tweet_out.config(state='normal')
-                self.tweet_out.delete('1.0', 'end')
-                self.tweet_out.insert('1.0', _opt1 or raw)
-                chars = len(self.tweet_out.get('1.0','end').strip())
-                self.tweet_char_lbl.config(
-                    text=f'{chars} chars',
-                    fg=GREEN if chars <= 280 else YELLOW if chars <= 500 else ACCENT)
-                self.tweet_gen_btn.config(state='normal', text='⚡  GENERATE TWEET')
-                self.tweet_gen_lbl.config(text=f'Done via {prov} — 3 options generated')
+                try:
+                    for pk in _sel:
+                        _txt = _results.get(pk,'')
+                        if pk not in self._ps_out: continue
+                        _b = self._ps_out[pk]['box']
+                        _b.config(state='normal', fg=FG if _txt else FG3)
+                        _b.delete('1.0','end')
+                        _b.insert('1.0', _txt if _txt else f'(No {pk} output — check API keys)')
+                        def _resize(box=_b):
+                            box.update_idletasks()
+                            box.config(height=1)
+                            box.update_idletasks()
+                            _visual = 0
+                            _idx = '1.0'
+                            while True:
+                                _di = box.dlineinfo(_idx)
+                                if _di is None: break
+                                _visual += 1
+                                _next = box.index(f'{_idx} +1 display lines')
+                                if _next == _idx: break
+                                _idx = _next
+                            box.config(height=max(4, _visual + 1))
+                        self.after(100, _resize)
+                        if _txt:
+                            def _run_score(p=pk, t=_txt, gk=[k for _,k in _groq_keys_list], mk=[k for _,k in _gem_keys_list]):
+                                _sc, _rs = self._ps_score_post(p, t, gk, mk)
+                                self._ps_update_score(p, _sc, _rs)
+                            import threading as _sct
+                            _sct.Thread(target=_run_score, daemon=True).start()
+                    # Save handles to memory
+                    if _name1 and any([_h_x,_h_ig,_h_tt,_h_yt]):
+                        try:
+                            MEM_PATH = USER_DIR / 'handle_memory.json'
+                            _m2 = {}
+                            try: _m2 = _psj2.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
+                            except: pass
+                            _m2[_name1.lower().replace(' ','_')] = {
+                                'x':_h_x,'instagram':_h_ig,'tiktok':_h_tt,'youtube':_h_yt,'name':_name1}
+                            MEM_PATH.write_text(_psj2.dumps(_m2,indent=2))
+                        except: pass
+                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
+                    self._ps_status.config(text=f'✅ Generated for: {", ".join(_sel)}', fg=GREEN)
+                    self.set_progress(f'✅ Post Studio — Done!', pct=100)
+                    self.after(3000, lambda: self.set_progress('', pct=0))
+                except Exception as _ue:
+                    import traceback as _utb
+                    print(f'[PostStudio _update ERROR]\n{_utb.format_exc()}')
+                    self.log(f'[Post Studio] ❌ Update error: {str(_ue)[:80]}', RED)
+                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
+
             self.after(0, _update)
 
         except Exception:
@@ -8396,6 +8338,996 @@ Return ONLY the JSON array, no other text."""
     # DOWNLOADER TAB
     # ═══════════════════════════════════════════════════════════════════════════
 
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  POST STUDIO TAB
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_post_studio_tab(self, p):
+        """Post Studio — algo-optimized social posts from transcript."""
+        import json as _psj
+
+        MEM_PATH = USER_DIR / 'handle_memory.json'
+        def _mem_load():
+            try: return _psj.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
+            except: return {}
+        def _mem_save(m):
+            try: MEM_PATH.write_text(_psj.dumps(m, indent=2))
+            except: pass
+
+        # ── Layout: left inputs | right outputs ───────────────────────────────
+        outer = tk.Frame(p, bg=BG); outer.pack(fill='both', expand=True)
+        left  = tk.Frame(outer, bg=BG, width=320)
+        left.pack(side='left', fill='y', padx=(10,0), pady=8)
+        left.pack_propagate(False)
+        tk.Frame(outer, bg=BORDER, width=1).pack(side='left', fill='y', padx=(8,0))
+        right = tk.Frame(outer, bg=BG)
+        right.pack(side='left', fill='both', expand=True, padx=10, pady=8)
+
+        # ── LEFT: inputs ──────────────────────────────────────────────────────
+        tk.Label(left, text='🚀  POST STUDIO', font=('Segoe UI',10,'bold'),
+                 fg=ACCENT, bg=BG).pack(anchor='w', pady=(0,8))
+
+        # Transcript
+        tk.Label(left, text='TRANSCRIPT', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w')
+        _tw = tk.Frame(left, bg=BG3); _tw.pack(fill='x', pady=(2,4))
+        self._ps_trans = tk.Text(_tw, height=5, font=FONT_MONO_S, bg=BG3, fg=FG3,
+                                  insertbackground=ACCENT, relief='flat', bd=4, wrap='word')
+        self._ps_trans.pack(side='left', fill='both', expand=True)
+        _make_scrollbar(_tw, self._ps_trans)
+        _PS_TRANS_PH = 'Paste transcript here, or use current clip below...'
+        self._ps_trans.insert('1.0', _PS_TRANS_PH)
+        def _pt_in(e):
+            if self._ps_trans.get('1.0','end').strip() == _PS_TRANS_PH:
+                self._ps_trans.delete('1.0','end'); self._ps_trans.config(fg=FG)
+        def _pt_out(e):
+            if not self._ps_trans.get('1.0','end').strip():
+                self._ps_trans.insert('1.0', _PS_TRANS_PH); self._ps_trans.config(fg=FG3)
+        self._ps_trans.bind('<FocusIn>', _pt_in)
+        self._ps_trans.bind('<FocusOut>', _pt_out)
+
+        # Transcript action buttons
+        _tbr = tk.Frame(left, bg=BG); _tbr.pack(fill='x', pady=(0,8))
+        def _ps_use_current():
+            t = getattr(self, 'transcript', '')
+            if t:
+                self._ps_trans.config(fg=FG)
+                self._ps_trans.delete('1.0','end')
+                self._ps_trans.insert('1.0', t[:8000])
+                self._ps_status.config(text='✅ Loaded from current clip', fg=GREEN)
+            else:
+                self._ps_status.config(text='⚠ No transcript yet — run Find Clips first', fg=YELLOW)
+        tk.Button(_tbr, text='⬆ Use Current Clip', font=FONT_SMALL, bg=ACCENT, fg='#000',
+                  relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  command=_ps_use_current).pack(side='left', padx=(0,4))
+
+        self._ps_vid_path = None
+        def _ps_load_video():
+            import tkinter.filedialog as _fd2
+            _vp = _fd2.askopenfilename(filetypes=[('Video','*.mp4 *.mkv *.mov *.webm *.avi'),('All','*.*')])
+            if not _vp: return
+            self._ps_vid_path = _vp
+            import os as _ov; _fn = _ov.path.basename(_vp)
+            self._ps_status.config(text=f'📂 {_fn} — hit Transcribe', fg=FG2)
+            self._ps_transcribe_btn.config(state='normal', bg=ACCENT2, fg='#000')
+        tk.Button(_tbr, text='📂 Load Video', font=FONT_SMALL, bg=BG3, fg=FG,
+                  relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  command=_ps_load_video).pack(side='left', padx=(0,4))
+
+        def _ps_do_transcribe():
+            _vp = self._ps_vid_path
+            if not _vp: return
+            self._ps_transcribe_btn.config(state='disabled', text='Transcribing...')
+            self._ps_status.config(text='🎬 Transcribing... this may take a few minutes', fg=FG2)
+            self.set_progress('🎬 Post Studio — Transcribing...', pct=5)
+            import threading as _vt
+            def _run():
+                try:
+                    ff = find_ffmpeg()
+                    model_size = self.v_whisper.get() or 'base'
+                    self.after(0, lambda: self._ps_status.config(
+                        text=f'🎬 Transcribing [{model_size}]...', fg=FG2))
+                    result = _do_transcribe(
+                        vid=_vp, model_size=model_size,
+                        use_gpu=self.v_gpu.get() if hasattr(self,'v_gpu') else True,
+                        ffmpeg_path=ff,
+                        log_cb=lambda msg, col=FG2: self.after(0, lambda m=msg: self._ps_status.config(text=str(m)[:80], fg=FG2)))
+                    if result and result.get('segments'):
+                        _lines = [f'[{ts(s["start"])}] {s["text"].strip()}' for s in result['segments']]
+                        _txt = '\n'.join(_lines)
+                        def _apply():
+                            self._ps_trans.config(fg=FG)
+                            self._ps_trans.delete('1.0','end')
+                            self._ps_trans.insert('1.0', _txt[:8000])
+                            self._ps_status.config(text=f'✅ Transcribed {len(_lines)} segments', fg=GREEN)
+                            self.set_progress(f'✅ Post Studio — Transcribed {len(_lines)} segments', pct=100)
+                            self._ps_transcribe_btn.config(state='disabled', bg=BG4, fg=FG3, text='🎬 Transcribe')
+                        self.after(0, _apply)
+                    else:
+                        self.after(0, lambda: self._ps_status.config(text='⚠ No segments returned', fg=YELLOW))
+                        self.after(0, lambda: self._ps_transcribe_btn.config(state='normal', text='🎬 Transcribe'))
+                except Exception as _te:
+                    import traceback as _tb
+                    print(f'[PostStudio] {_tb.format_exc()}')
+                    self.after(0, lambda e=str(_te): self._ps_status.config(text=f'❌ {e[:70]}', fg=RED))
+                    self.after(0, lambda: self._ps_transcribe_btn.config(state='normal', text='🎬 Transcribe'))
+            _vt.Thread(target=_run, daemon=True).start()
+
+        self._ps_transcribe_btn = tk.Button(_tbr, text='🎬 Transcribe', font=FONT_SMALL,
+                  bg=BG4, fg=FG3, relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  state='disabled', command=_ps_do_transcribe)
+        self._ps_transcribe_btn.pack(side='left')
+
+        # Person Name
+        tk.Label(left, text='PERSON NAME', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(4,2))
+        _nr = tk.Frame(left, bg=BG); _nr.pack(fill='x', pady=(0,4))
+        self._ps_name_var = tk.StringVar()
+        self._ps_name = tk.Entry(_nr, textvariable=self._ps_name_var, font=FONT_SMALL, bg=BG3, fg=FG3,
+                                  insertbackground=ACCENT, relief='flat', bd=4)
+        self._ps_name.pack(side='left', fill='x', expand=True, padx=(0,4))
+        _PS_NAME_PH = 'Mizkif, Sophie Rain...'
+        self._ps_name.insert(0, _PS_NAME_PH)
+        self._ps_mem_lbl = tk.Label(_nr, text='', font=('Segoe UI',7), fg=GREEN, bg=BG)
+        self._ps_mem_lbl.pack(side='left')
+        def _name_focus_in(e):
+            if self._ps_name.get() == _PS_NAME_PH:
+                self._ps_name.delete(0,'end'); self._ps_name.config(fg=FG)
+        def _name_focus_out(e):
+            val = self._ps_name.get().strip()
+            if not val:
+                self._ps_name.insert(0, _PS_NAME_PH); self._ps_name.config(fg=FG3)
+                return
+            self._ps_name.config(fg=FG)
+            # Check handle memory
+            _mem = _mem_load()
+            _key = val.lower().replace(' ','_').split(',')[0].strip()
+            if _key in _mem:
+                _h = _mem[_key]
+                for _pk, _wgt in [('x', self._ps_h_x), ('instagram', self._ps_h_ig),
+                                   ('tiktok', self._ps_h_tt), ('youtube', self._ps_h_yt)]:
+                    if _h.get(_pk,'') and not _wgt.get().strip():
+                        _wgt.set(_h[_pk])
+                self._ps_mem_lbl.config(text='💾 remembered', fg=GREEN)
+            else:
+                self._ps_mem_lbl.config(text='')
+        self._ps_name.bind('<FocusIn>', _name_focus_in)
+        self._ps_name.bind('<FocusOut>', _name_focus_out)
+
+        # Context
+        tk.Label(left, text='CONTEXT / ANGLE  (optional)', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(4,2))
+        tk.Label(left, text='hot take · funny recap · drama breakdown · interview',
+                 font=('Segoe UI',7), fg=FG3, bg=BG).pack(anchor='w')
+        self._ps_ctx = tk.Text(left, height=2, font=FONT_SMALL, bg=BG3, fg=FG3,
+                                insertbackground=ACCENT, relief='flat', bd=4, wrap='word')
+        self._ps_ctx.pack(fill='x', pady=(2,8))
+        _PS_CTX_PH = 'e.g. hot take · drama breakdown · funny recap'
+        self._ps_ctx.insert('1.0', _PS_CTX_PH)
+        def _ctx_in(e):
+            if self._ps_ctx.get('1.0','end').strip() == _PS_CTX_PH:
+                self._ps_ctx.delete('1.0','end'); self._ps_ctx.config(fg=FG)
+        def _ctx_out(e):
+            if not self._ps_ctx.get('1.0','end').strip():
+                self._ps_ctx.insert('1.0', _PS_CTX_PH); self._ps_ctx.config(fg=FG3)
+        self._ps_ctx.bind('<FocusIn>', _ctx_in)
+        self._ps_ctx.bind('<FocusOut>', _ctx_out)
+
+        # Platforms label — rows built below
+        tk.Label(left, text='PLATFORMS', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(0,4))
+        self._ps_plats = {
+            'x':          tk.BooleanVar(value=True),
+            'tiktok':     tk.BooleanVar(value=True),
+            'instagram':  tk.BooleanVar(value=True),
+            'yt_shorts':  tk.BooleanVar(value=True),
+            'youtube':    tk.BooleanVar(value=False),
+        }
+        _plat_cfg = [('x','𝕏 Twitter','#1d9bf0'), ('tiktok','🎵 TikTok','#69c9d0'),
+                     ('instagram','📸 Instagram','#e1306c'),
+                     ('yt_shorts','▶ YT Shorts','#ff4444'),
+                     ('youtube','▶ YouTube (long)','#ff0000')]
+
+        # Row 1: X, TikTok, Instagram
+        _pr1 = tk.Frame(left, bg=BG); _pr1.pack(fill='x', pady=(0,2))
+        for _pk in ['x','tiktok','instagram']:
+            _pl = next(l for k,l,c in _plat_cfg if k==_pk)
+            tk.Checkbutton(_pr1, text=_pl, variable=self._ps_plats[_pk],
+                           font=FONT_SMALL, bg=BG, fg=FG, selectcolor=BG3,
+                           activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0,8))
+
+        # Row 2: YT Shorts + YouTube (separate)
+        _pr2 = tk.Frame(left, bg=BG); _pr2.pack(fill='x', pady=(0,6))
+        for _pk in ['yt_shorts','youtube']:
+            _pl = next(l for k,l,c in _plat_cfg if k==_pk)
+            _pc = next(c for k,l,c in _plat_cfg if k==_pk)
+            tk.Checkbutton(_pr2, text=_pl, variable=self._ps_plats[_pk],
+                           font=FONT_SMALL, bg=BG, fg=_pc, selectcolor=BG3,
+                           activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0,8))
+
+        # Handles
+        tk.Label(left, text='HANDLES', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(4,2))
+        self._ps_h_x  = tk.StringVar(); self._ps_h_ig = tk.StringVar()
+        self._ps_h_tt = tk.StringVar(); self._ps_h_yt = tk.StringVar()
+        self._ps_handle_entries = {}
+        for _hl, _hv, _hph, _hk in [
+            ('𝕏',  self._ps_h_x,  '@handle',        'x'),
+            ('📸', self._ps_h_ig, '@instagram',     'instagram'),
+            ('🎵', self._ps_h_tt, '@tiktok',        'tiktok'),
+            ('▶',  self._ps_h_yt, 'YouTube channel','youtube'),
+        ]:
+            _hr2 = tk.Frame(left, bg=BG); _hr2.pack(fill='x', pady=1)
+            tk.Label(_hr2, text=_hl, font=FONT_SMALL, fg=FG2, bg=BG, width=3).pack(side='left')
+            # Don't use textvariable — use plain Entry to avoid placeholder conflicts
+            _he = tk.Entry(_hr2, font=FONT_SMALL, bg=BG3, fg=FG3,
+                           insertbackground=ACCENT, relief='flat', bd=3)
+            _he.pack(side='left', fill='x', expand=True)
+            _he.insert(0, _hph)
+            def _hin(e, w=_he, p=_hph, sv=_hv):
+                if w.get() == p: w.delete(0,'end'); w.config(fg=FG)
+            def _hout(e, w=_he, p=_hph, sv=_hv):
+                val = w.get().strip()
+                if not val: w.insert(0,p); w.config(fg=FG3)
+                else: w.config(fg=FG); sv.set(val)  # sync to StringVar on exit
+            _he.bind('<FocusIn>', _hin); _he.bind('<FocusOut>', _hout)
+            self._ps_handle_entries[_hk] = (_he, _hv, _hph)
+
+        # Spice it up
+        tk.Frame(left, bg=BORDER, height=1).pack(fill='x', pady=(10,6))
+        tk.Label(left, text='✨  Spice it up', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w')
+        tk.Label(left, text='May reduce algorithmic reach — use for engaged audiences',
+                 font=('Segoe UI',7), fg=FG3, bg=BG).pack(anchor='w', pady=(0,4))
+        _sr = tk.Frame(left, bg=BG); _sr.pack(fill='x', pady=(0,8))
+        self._ps_spice = {}
+        for _sk, _sl in [('drama','🔥 Drama'),('breaking','📰 Breaking'),
+                          ('exaggerate','🤯 Exaggerate'),('clickbait','🎣 Clickbait')]:
+            self._ps_spice[_sk] = tk.BooleanVar(value=False)
+            tk.Checkbutton(_sr, text=_sl, variable=self._ps_spice[_sk],
+                           font=FONT_SMALL, bg=BG, fg=FG, selectcolor=BG3,
+                           activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0,6))
+
+        # Generate button
+        self._ps_gen_btn = tk.Button(left, text='⚡  GENERATE POSTS',
+                                      font=('Segoe UI',10,'bold'), bg=ACCENT, fg='#000',
+                                      relief='flat', bd=0, cursor='hand2', pady=10,
+                                      activebackground=ACCENT2, command=self._ps_generate)
+        self._ps_gen_btn.pack(fill='x', pady=(0,4))
+        self._ps_status = tk.Label(left, text='', font=('Segoe UI',1), fg=BG, bg=BG)  # hidden — kept for transcription callbacks
+        self._ps_status.pack(anchor='w')
+
+        # ── RIGHT: output boxes per platform ─────────────────────────────────
+        tk.Label(right, text='GENERATED POSTS', font=('Segoe UI',9,'bold'),
+                 fg=ACCENT, bg=BG).pack(anchor='w', pady=(0,8))
+
+        self._ps_out = {}
+        for _pk, _pl, _pc in _plat_cfg:
+            _pf = tk.Frame(right, bg=BG3, relief='flat')
+            _pf.pack(fill='x', pady=(0,8))
+            _ph = tk.Frame(_pf, bg=BG4); _ph.pack(fill='x')
+            tk.Label(_ph, text=_pl, font=('Segoe UI',8,'bold'), fg=_pc, bg=BG4).pack(side='left', padx=8, pady=4)
+
+            def _mk_copy(k=_pk):
+                def _do():
+                    _t = self._ps_out[k]['box'].get('1.0','end').strip()
+                    if _t:
+                        self.clipboard_clear(); self.clipboard_append(_t)
+                        self._ps_out[k]['btn'].config(text='✅ Copied!', fg=GREEN)
+                        self.after(1500, lambda: self._ps_out[k]['btn'].config(text='📋 Copy', fg=FG2))
+                return _do
+
+            def _mk_regen(k=_pk):
+                def _do():
+                    self._ps_out[k]['regen'].config(state='disabled', text='⏳')
+                    import threading as _rt
+                    def _run():
+                        result = self._ps_regen_one(k)
+                        def _upd():
+                            if result:
+                                _b = self._ps_out[k]['box']
+                                _b.config(fg=FG)
+                                _b.delete('1.0','end')
+                                _b.insert('1.0', result)
+                                def _resize(box=_b):
+                                    box.update_idletasks()
+                                    box.config(height=1)
+                                    box.update_idletasks()
+                                    _visual = 0
+                                    _idx = '1.0'
+                                    while True:
+                                        _di = box.dlineinfo(_idx)
+                                        if _di is None: break
+                                        _visual += 1
+                                        _next = box.index(f'{_idx} +1 display lines')
+                                        if _next == _idx: break
+                                        _idx = _next
+                                    box.config(height=max(4, _visual + 1))
+                                self.after(100, _resize)
+                                # Score in background
+                                def _do_score(pk=k, t=result):
+                                    _gk = [key for _, key in [(p,key) for p,key in
+                                           [('groq', self.cfg.get('key_groq','').strip())] +
+                                           [('groq', ek.strip()) for ek in self.cfg.get('key_groq_extra','').split(',') if ek.strip()]]
+                                           if _]
+                                    _mk = [key for _, key in [(p,key) for p,key in
+                                           [('gemini', self.cfg.get('key_gemini','').strip())] +
+                                           [('gemini', ek.strip()) for ek in self.cfg.get('key_gemini_extra','').split(',') if ek.strip()]]
+                                           if _]
+                                    _sc, _rs = self._ps_score_post(pk, t, _gk, _mk)
+                                    self._ps_update_score(pk, _sc, _rs)
+                                _rt.Thread(target=_do_score, daemon=True).start()
+                            self._ps_out[k]['regen'].config(state='normal', text='🔄 Regen')
+                        self.after(0, _upd)
+                    _rt.Thread(target=_run, daemon=True).start()
+                return _do
+
+            _btn = tk.Button(_ph, text='📋 Copy', font=FONT_SMALL, bg=BG4, fg=FG2,
+                             relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                             command=_mk_copy(_pk))
+            _btn.pack(side='right', padx=4)
+            _regen_btn = tk.Button(_ph, text='🔄 Regen', font=FONT_SMALL, bg=BG4, fg=FG2,
+                                   relief='flat', bd=0, cursor='hand2', padx=6, pady=4,
+                                   command=_mk_regen(_pk))
+            _regen_btn.pack(side='right', padx=(0,2))
+            # Score badge — shows algo score after generation
+            _score_lbl = tk.Label(_ph, text='', font=('Segoe UI',8,'bold'),
+                                  bg=BG4, fg=FG3, padx=6, pady=2)
+            _score_lbl.pack(side='right', padx=(0,4))
+            _box = tk.Text(_pf, height=6, font=FONT_SMALL, bg=BG3, fg=FG3,
+                           insertbackground=ACCENT, relief='flat', bd=6, wrap='word')
+            _box.pack(fill='x')
+            _box.insert('1.0', f'Hit ⚡ Generate Posts to create {_pl} content.')
+            self._ps_out[_pk] = {'box': _box, 'btn': _btn, 'regen': _regen_btn,
+                                 'score': _score_lbl, 'frame': _pf}
+
+            # Show/hide based on toggle
+            def _toggle_vis(pk=_pk, frame=_pf):
+                if self._ps_plats[pk].get():
+                    frame.pack(fill='x', pady=(0,8))
+                else:
+                    frame.pack_forget()
+            self._ps_plats[_pk].trace_add('write', lambda *a, pk=_pk, f=_pf: _toggle_vis(pk, f))
+            if not self._ps_plats[_pk].get():
+                _pf.pack_forget()
+
+
+    def _ps_regen_one(self, pk):
+        """Regenerate a single platform post using current inputs."""
+        try:
+            # Reuse _ps_run logic but for one platform only
+            import re as _re2
+            _trans = self._ps_trans.get('1.0','end').strip()
+            if _trans in ('', 'Paste transcript here, or use current clip below...'):
+                _trans = getattr(self, 'transcript', '')
+            _ctx = self._ps_ctx.get('1.0','end').strip()
+            if _ctx == 'e.g. hot take · drama breakdown · funny recap': _ctx = ''
+            _name = self._ps_name.get().strip()
+            if _name in ('', 'Mizkif, Sophie Rain...'): _name = ''
+            _name1 = _name.split(',')[0].strip() if _name else ''
+            _h_x  = self._ps_handle_entries['x'][0].get().strip()
+            _h_ig = self._ps_handle_entries['instagram'][0].get().strip()
+            _h_tt = self._ps_handle_entries['tiktok'][0].get().strip()
+            _h_yt = self._ps_handle_entries['youtube'][0].get().strip()
+            _h_x  = '' if _h_x  in ('@handle','')          else _h_x
+            _h_ig = '' if _h_ig in ('@instagram','')        else _h_ig
+            _h_tt = '' if _h_tt in ('@tiktok','')           else _h_tt
+            _h_yt = '' if _h_yt in ('YouTube channel','')   else _h_yt
+            _spice = [k for k,v in self._ps_spice.items() if v.get()]
+            _spice_map = {'drama':'Drama energy.','breaking':'Breaking news tone.',
+                          'exaggerate':'Amplify drama.','clickbait':'Curiosity gap hooks.'}
+            _spice_txt = ' '.join(_spice_map[s] for s in _spice)
+            _tr_raw = _trans[:1000] if _trans else ''
+            _tr = _re2.sub(r'\[\d+:\d+:\d+\]\s*', '', _tr_raw).strip()
+            _who   = _name or 'the person in the video'
+            _angle = _ctx or 'find the most viral moment'
+            _tc = f"""TRANSCRIPT (use ONLY these exact words):
+{_tr if _tr else '(no transcript)'}
+PERSON: {_who} | CONTEXT: {_angle}
+CRITICAL: Do NOT invent topics not in the transcript."""
+            # Build one prompt for this platform
+            _prompts_map = {
+                'x':         (f"Complete X/Twitter post under 280 chars. Handle in sentence. 1 hashtag. End with question. NEVER cut off.", f"{_tc}\nX: {_h_x or _who}\n\nWrite complete post:\n[{_h_x or _who} + statement]\n[quote from transcript]\n[question?]\n#{(_name1 or 'clips').lower()}"),
+                'tiktok':    (f"Complete TikTok caption. Line 1=SEO phrase. No hooks. CTA. 3-4 hashtags. NEVER cut off.", f"{_tc}\nTT: {_h_tt or _who}\n\nWrite complete caption:\n{_name1.lower() or 'streamer'} [topic from transcript] explained\n[what happened]\ndo you agree? drop it in the comments 👇\n#{(_name1 or 'clips').lower()} #[topic] #[niche]"),
+                'instagram': (f"Complete Instagram caption. Line 1: [Role] @handle [what happened] [emoji]. NO timestamps. DM-bait. Save-bait. 3-5 hashtags. NEVER cut off.", f"{_tc}\nIG: {_h_ig if _h_ig else '(no handle — use name without @)'}\n\nLine 1: [Role] {_h_ig if _h_ig else _who} [what happened] [emoji] — use @ ONLY if handle given\n\n[2-3 clean sentences]\n\nwhat do you think — is he right? 👇\nsave this for when the conversation comes up 📌\n#{(_name1 or 'clips').lower()} #[topic] #drama #clips #[5th]"),
+                'yt_shorts': (f"YouTube Shorts title under 60 chars + 3 hashtags only. NEVER cut off.", f"{_tc}\n\nTITLE: [punchy, under 60 chars]\n\n#[person] #[topic] #[niche]"),
+                'youtube':   (f"Complete YouTube title + description + 10 tags. Title keyword-first under 60 chars. NEVER cut off.", f"{_tc}\nYT: {_h_yt or _who}\n\nTITLE: [keyword-first under 60 chars]\n\nDESCRIPTION:\n[Sentence 1: who + what happened]\n[Sentence 2: why it matters]\nMore clips → @MarsScumbags\n\nTAGS: {_name1 or 'streaming'}, [topic], drama, streaming, clips, MarsScumbags, [4 more]"),
+            }
+            if pk not in _prompts_map: return ''
+            _sys_msg, _usr_msg = _prompts_map[pk]
+            _max_tok = {'youtube':1200,'yt_shorts':500,'instagram':1000,'x':700,'tiktok':800}.get(pk,800)
+            # Build key pool
+            _all_keys = []
+            _gk = self.cfg.get('key_gemini','').strip()
+            if _gk: _all_keys.append(('gemini',_gk))
+            for _ek in self.cfg.get('key_gemini_extra','').split(','):
+                if _ek.strip(): _all_keys.append(('gemini',_ek.strip()))
+            _grk = self.cfg.get('key_groq','').strip()
+            if _grk: _all_keys.append(('groq',_grk))
+            for _ek2 in self.cfg.get('key_groq_extra','').split(','):
+                if _ek2.strip(): _all_keys.append(('groq',_ek2.strip()))
+            _pool = ([k for k in _all_keys if k[0]=='groq'] + [k for k in _all_keys if k[0]=='gemini'])
+            for _prov, _key in _pool:
+                try:
+                    if _prov == 'gemini':
+                        # Create fresh client each call — avoid closed client errors
+                        import importlib as _il
+                        _gmod = _il.import_module('google.genai')
+                        _out = ''
+                        for _mdl in ['gemini-2.5-flash', 'gemini-2.5-flash-lite']:
+                            try:
+                                _cl2 = _gmod.Client(api_key=_key)
+                                _r = _cl2.models.generate_content(
+                                    model=_mdl, contents=f"{_sys_msg}\n\n{_usr_msg}",
+                                    config={'temperature':0.5,'max_output_tokens':_max_tok})
+                                _out = (_r.text or '').strip()
+                                if _out: break
+                            except Exception as _me2:
+                                if any(x in str(_me2) for x in ['503','429','UNAVAILABLE','RESOURCE_EXHAUSTED','closed']): continue
+                                raise
+                    else:
+                        from groq import Groq as _GQ2
+                        _r = _GQ2(api_key=_key).chat.completions.create(
+                            model='llama-3.3-70b-versatile',
+                            messages=[{'role':'system','content':_sys_msg},{'role':'user','content':_usr_msg}],
+                            temperature=0.5, max_tokens=_max_tok)
+                        _out = _r.choices[0].message.content.strip()
+                    if _out and len(_out) > 20:
+                        self.log(f'[Post Studio] 🔄 {pk.upper()} regenerated via {_prov} ({len(_out)} chars)', GREEN)
+                        return _out
+                except Exception as _e:
+                    self.log(f'[Post Studio] ⚠ regen {pk} {_prov}: {str(_e)[:60]}', YELLOW)
+        except Exception as _e2:
+            self.log(f'[Post Studio] ❌ regen {pk}: {str(_e2)[:60]}', RED)
+        return ''
+
+    def _ps_score_post(self, pk, text, groq_keys, gemini_keys):
+        """Score a generated post 1-10 against platform algo rules. Returns (score, reason)."""
+        _score_prompts = {
+            'x': """Score this X/Twitter post 1-10 for algorithmic reach. Be strict.
+Scoring criteria (X For You algorithm weights):
+- Reply-bait question present? (+2) Reply chains score 150x a like
+- Handle woven naturally in sentence, not just tagged? (+1)
+- Positive/neutral tone? Grok penalizes negativity (-2 if negative)
+- Under 280 chars? (+1)
+- Exactly 1 niche hashtag? (+1)
+- Zero external links? (+1)
+- Drives profile clicks? (+1)
+- Clear hook in first line? (+1)
+- Ends with complete sentence? (+1)
+
+Respond ONLY with JSON: {"score": 7, "reason": "Missing reply-bait question, tone is slightly negative"}""",
+            'tiktok': """Score this TikTok caption 1-10 for algorithmic reach. Be strict.
+Scoring criteria:
+- Line 1 is a search phrase (SEO)? (+2) Search = 40% of views
+- No hooks in caption? (+1) Video handles that
+- Save/share bait CTA present? (+2)
+- 3-5 niche hashtags, no #fyp? (+1)
+- Keywords match what's actually in the video? (+2)
+- Complete sentences, nothing cut off? (+1)
+
+Respond ONLY with JSON: {"score": 7, "reason": "No save-bait CTA, hashtags too generic"}""",
+            'instagram': """Score this Instagram Reels caption 1-10 for algorithmic reach. Be strict.
+Scoring criteria:
+- Line 1: Role + @handle + what happened format? (+2) Hook must work on mute
+- DM-bait line present? (+2) 694k reels shared via DM every minute
+- Save-bait line present? (+2) Saves > likes for algo
+- Handle in sentence naturally (not just tagged at end)? (+1)
+- 3-5 hashtags, no mega tags? (+1)
+- Complete sentences? (+1)
+
+Respond ONLY with JSON: {"score": 7, "reason": "DM-bait missing, handle only tagged at end"}""",
+            'yt_shorts': """Score this YouTube Shorts title+hashtags 1-10 for algorithmic reach. Be strict.
+Scoring criteria:
+- Title keyword-first (searchable term first)? (+3)
+- Under 60 chars? (+2)
+- Title, hashtags all align to same keyword intent? (+2) Gemini semantic update Jan 2026
+- 3 relevant hashtags? (+2)
+- Avoids clickbait mismatch? (+1)
+
+Respond ONLY with JSON: {"score": 7, "reason": "Title not keyword-first, hashtags misaligned"}""",
+            'youtube': """Score this YouTube video title+description+tags 1-10 for algorithmic reach. Be strict.
+Scoring criteria:
+- Title keyword-first under 60 chars? (+2)
+- Description 2-3 complete sentences? (+2)
+- Title/description/tags all semantically aligned? (+2) Gemini update Jan 2026
+- Channel plug included? (+1)
+- 8-10 specific tags? (+2)
+- No clickbait mismatch? (+1)
+
+Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too generic"}""",
+        }
+        if pk not in _score_prompts: return None, None
+        _prompt = f"{_score_prompts[pk]}\n\nPOST TO SCORE:\n{text[:800]}"
+        import json as _sj, re as _sr
+        # Use Groq first (fast, cheap)
+        for _key in groq_keys:
+            try:
+                from groq import Groq as _GQs
+                _r = _GQs(api_key=_key).chat.completions.create(
+                    model='llama-3.3-70b-versatile',
+                    messages=[{'role':'user','content':_prompt}],
+                    temperature=0.1, max_tokens=80)
+                _raw = _r.choices[0].message.content.strip()
+                _raw = _sr.sub(r'```(?:json)?|```','',_raw).strip()
+                _d = _sj.loads(_raw)
+                return int(_d.get('score',5)), str(_d.get('reason',''))
+            except: continue
+        # Gemini fallback
+        for _key in gemini_keys:
+            try:
+                from google import genai as _gscore
+                _r = _gscore.Client(api_key=_key).models.generate_content(
+                    model='gemini-2.5-flash', contents=_prompt,
+                    config={'temperature':0.1,'max_output_tokens':80})
+                _raw = (_r.text or '').strip()
+                _raw = _sr.sub(r'```(?:json)?|```','',_raw).strip()
+                _d = _sj.loads(_raw)
+                return int(_d.get('score',5)), str(_d.get('reason',''))
+            except: continue
+        return None, None
+
+    def _ps_update_score(self, pk, score, reason):
+        """Update the score badge for a platform."""
+        if pk not in self._ps_out: return
+        _lbl = self._ps_out[pk].get('score')
+        if not _lbl: return
+        if score is None:
+            self.after(0, lambda: _lbl.config(text='', bg=BG4))
+            return
+        # Color: green 8-10, yellow 5-7, red 1-4
+        _color = GREEN if score >= 8 else (YELLOW if score >= 5 else RED)
+        _bg = '#1a2a1a' if score >= 8 else ('#2a2a0a' if score >= 5 else '#2a0a0a')
+        _text = f'⬤ {score}/10'
+        self.after(0, lambda t=_text, c=_color, b=_bg, r=reason or '':
+            (_lbl.config(text=t, fg=c, bg=b),
+             _lbl.bind('<Enter>', lambda e, tip=r: self._ps_show_score_tip(_lbl, tip)),
+             _lbl.bind('<Leave>', lambda e: self._ps_hide_score_tip())))
+
+    def _ps_show_score_tip(self, widget, text):
+        """Show tooltip with score reason on hover."""
+        if not text: return
+        x = widget.winfo_rootx()
+        y = widget.winfo_rooty() - 30
+        self._score_tip = tk.Toplevel(self)
+        self._score_tip.wm_overrideredirect(True)
+        self._score_tip.geometry(f'+{x}+{y}')
+        tk.Label(self._score_tip, text=text, font=('Segoe UI',8), bg='#1e1e1e',
+                 fg=FG, relief='solid', bd=1, padx=6, pady=3,
+                 wraplength=280, justify='left').pack()
+
+    def _ps_hide_score_tip(self):
+        if hasattr(self, '_score_tip') and self._score_tip:
+            try: self._score_tip.destroy()
+            except: pass
+
+    def _ps_generate(self):
+        # Check transcript or context is provided
+        _trans_val = self._ps_trans.get('1.0','end').strip()
+        _ctx_val = self._ps_ctx.get('1.0','end').strip()
+        _ph_trans = 'Paste transcript here, or use current clip below...'
+        _ph_ctx = 'e.g. hot take · drama breakdown · funny recap'
+        _has_trans = _trans_val and _trans_val != _ph_trans
+        _has_ctx = _ctx_val and _ctx_val != _ph_ctx
+        _has_clip = bool(getattr(self, 'transcript', ''))
+
+        if not _has_trans and not _has_ctx and not _has_clip:
+            import tkinter.messagebox as _mb
+            _mb.showwarning('Post Studio',
+                'Add a transcript or context before generating.\n\n'
+                '• Paste a transcript in the box above\n'
+                '• Or use ⬆ Use Current Clip if you have a clip loaded\n'
+                '• Or type context/angle in the Context box\n\n'
+                'Without content the AI will hallucinate.')
+            return
+
+        self._ps_gen_btn.config(state='disabled', text='⏳ Generating...')
+        import threading as _pst
+        _pst.Thread(target=self._ps_run, daemon=True).start()
+
+    def _ps_run(self):
+        import json as _psj2, re as _psr, traceback as _pstb
+
+        def _log(msg, col=None):
+            c = col or FG2
+            self.log(f'[Post Studio] {msg}', c)
+            # Mirror key steps to main progress bar
+            _pct_map = {
+                'Starting generation': 5,
+                'Transcript:': 10,
+                'X...': 20, 'X via': 30,
+                'TIKTOK...': 35, 'TIKTOK via': 45,
+                'INSTAGRAM...': 50, 'INSTAGRAM via': 62,
+                'YT_SHORTS...': 68, 'YT_SHORTS via': 78,
+                'YOUTUBE...': 82, 'YOUTUBE via': 92,
+                'Generated for': 100,
+            }
+            for _k, _p in _pct_map.items():
+                if _k in str(msg):
+                    self.after(0, lambda m=str(msg)[:50], p=_p:
+                        self.set_progress(f'🚀 Post Studio — {m}', pct=p))
+                    break
+
+        try:
+            _log('Starting generation...')
+            # ── Gather inputs ─────────────────────────────────────────────────
+            _trans = self._ps_trans.get('1.0','end').strip()
+            if _trans in ('', 'Paste transcript here, or use current clip below...'):
+                _trans = getattr(self, 'transcript', '')
+
+            _ctx = self._ps_ctx.get('1.0','end').strip()
+            if _ctx == 'e.g. hot take · drama breakdown · funny recap': _ctx = ''
+
+            _name = self._ps_name.get().strip()
+            _name_placeholders = ('', 'Mizkif, Sophie Rain...', 'mizkif, sophie rain...')
+            if _name in _name_placeholders or _name.lower() == 'mizkif, sophie rain...': _name = ''
+            _name1 = _name.split(',')[0].strip() if _name else ''
+
+            _h_x  = self._ps_handle_entries['x'][0].get().strip()
+            _h_ig = self._ps_handle_entries['instagram'][0].get().strip()
+            _h_tt = self._ps_handle_entries['tiktok'][0].get().strip()
+            _h_yt = self._ps_handle_entries['youtube'][0].get().strip()
+            # Clear placeholder values
+            _h_x  = '' if _h_x  in ('@handle', '')         else _h_x
+            _h_ig = '' if _h_ig in ('@instagram', '')       else _h_ig
+            _h_tt = '' if _h_tt in ('@tiktok', '')          else _h_tt
+            _h_yt = '' if _h_yt in ('YouTube channel', '')  else _h_yt
+
+            _sel = [k for k,v in self._ps_plats.items() if v.get()]
+            if not _sel:
+                _log('⚠ Select at least one platform', YELLOW)
+                self.after(0, lambda: self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS'))
+                return
+
+            _spice = [k for k,v in self._ps_spice.items() if v.get()]
+            _spice_map = {
+                'drama':      'Use drama/tea account energy — shocking but not mean-spirited.',
+                'breaking':   'Frame as BREAKING news — urgent journalistic tone.',
+                'exaggerate': 'Amplify the drama — make it feel bigger than it is while staying factual.',
+                'clickbait':  'Use curiosity gap hooks — make them need to know what happens.',
+            }
+            _spice_txt = ' '.join(_spice_map[s] for s in _spice) if _spice else ''
+
+            # Strip timestamps from transcript — AI doesn't need them and they confuse output
+            import re as _re2
+            _tr_raw = _trans[:1000] if _trans else ''
+            _tr = _re2.sub(r'\[\d+:\d+:\d+\]\s*', '', _tr_raw).strip()
+            _tr = _re2.sub(r'\s{2,}', ' ', _tr)  # collapse extra spaces
+            _who   = _name or 'the person in the video'
+            _angle = _ctx or 'find the most viral/interesting moment'
+
+            # ── Auto-find handles via Gemini if empty ─────────────────────────
+            _placeholders = {'x':'@handle','instagram':'@instagram','tiktok':'@tiktok','youtube':'YouTube channel'}
+            _plat_to_attr = {'x': '_ps_h_x', 'instagram': '_ps_h_ig', 'tiktok': '_ps_h_tt', 'youtube': '_ps_h_yt'}
+            _needs_handles = _name1 and any(
+                not getattr(self, _plat_to_attr[k]).get().strip() or
+                getattr(self, _plat_to_attr[k]).get().strip() == p
+                for k,p in _placeholders.items()
+            )
+            if _needs_handles:
+                _log(f'🔍 Looking up handles for {_name1}...', FG2)
+                # Check memory first
+                MEM_PATH = USER_DIR / 'handle_memory.json'
+                _mem = {}
+                try: _mem = _psj2.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
+                except: pass
+                _mkey = _name1.lower().replace(' ','_')
+                if _mkey in _mem:
+                    _mh = _mem[_mkey]
+                    if not _h_x  and _mh.get('x'):        _h_x  = _mh['x']
+                    if not _h_ig and _mh.get('instagram'): _h_ig = _mh['instagram']
+                    if not _h_tt and _mh.get('tiktok'):    _h_tt = _mh['tiktok']
+                    if not _h_yt and _mh.get('youtube'):   _h_yt = _mh['youtube']
+                    _log(f'💾 Loaded handles from memory for {_name1}', GREEN)
+                else:
+                    # Ask Gemini
+                    try:
+                        _gkey0 = self.cfg.get('key_gemini','').strip()
+                        if not _gkey0:
+                            _gkey0 = next((k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()),'')
+                        if _gkey0:
+                            from google import genai as _gps0
+                            _r0 = _gps0.Client(api_key=_gkey0).models.generate_content(
+                                model='gemini-2.5-flash',
+                                contents=f'Official verified social media handles for "{_name1}"? JSON only: {{"x":"","instagram":"","tiktok":"","youtube":""}}',
+                                config={'temperature':0.0,'max_output_tokens':80})
+                            _raw0 = _psr.sub(r'```(?:json)?','',(_r0.text or '')).replace('`','').strip()
+                            _s0,_e0 = _raw0.find('{'),_raw0.rfind('}')
+                            if _s0!=-1 and _e0>_s0:
+                                _d0 = _psj2.loads(_raw0[_s0:_e0+1])
+                                if not _h_x  and _d0.get('x'):         _h_x  = _d0['x']
+                                if not _h_ig and _d0.get('instagram'): _h_ig = _d0['instagram']
+                                if not _h_tt and _d0.get('tiktok'):    _h_tt = _d0['tiktok']
+                                if not _h_yt and _d0.get('youtube'):   _h_yt = _d0['youtube']
+                                # Save to memory
+                                _mem[_mkey] = {'x':_h_x,'instagram':_h_ig,'tiktok':_h_tt,'youtube':_h_yt,'name':_name1}
+                                try: MEM_PATH.write_text(_psj2.dumps(_mem,indent=2))
+                                except: pass
+                                # Update UI fields
+                                for _fk, _fv, _fw in [('x',_h_x,self._ps_h_x),('ig',_h_ig,self._ps_h_ig),
+                                                       ('tt',_h_tt,self._ps_h_tt),('yt',_h_yt,self._ps_h_yt)]:
+                                    if _fv:
+                                        self.after(0, lambda v=_fv, sv=_fw: sv.set(v))
+                                _log(f'✅ Found handles for {_name1}', GREEN)
+                    except Exception as _he0:
+                        _log(f'⚠ Handle lookup failed: {str(_he0)[:40]}', YELLOW)
+
+            # ── Platform messages: system=rules, user=format template ────────────
+            # Shared transcript context block injected into every prompt
+            _tc = f"""TRANSCRIPT (use ONLY these exact words, nothing else):
+{_tr if _tr else '(no transcript — use context only)'}
+
+PERSON: {_who}
+CONTEXT/ANGLE: {_angle}
+{f"TONE: {_spice_txt}" if _spice_txt else ""}
+CRITICAL: Do NOT invent topics, names, or phrases not in the transcript above. If a word is unclear, skip it."""
+
+            _platform_msgs = {
+                'x': (
+                    "Write a complete X/Twitter post under 280 chars total. Rules: weave handle into sentence naturally (not at end). Positive tone. Zero links. Exactly 1 hashtag on its own line. End with question. NEVER cut off. Use ONLY words that appear in the transcript.",
+                    f"""{_tc}
+X HANDLE: {_h_x or 'use their name'}
+
+Write the complete post:
+[{_h_x or _who} + punchy statement using exact words from transcript]
+[short direct quote from transcript in quotes]
+[question ending with ?]
+#{(_name1 or 'streaming').lower().replace(' ','')}
+
+⚠️ Paste clip link as reply"""
+                ),
+                'tiktok': (
+                    "Write a complete TikTok caption. Rules: line 1 = SEO search phrase using exact topic from transcript. No hooks. CTA. 3-4 niche hashtags no #fyp. NEVER cut off. Use ONLY words from transcript. Do NOT add on-screen text suggestions.",
+                    f"""{_tc}
+TIKTOK HANDLE: {_h_tt or 'use their name'}
+
+Write the complete caption using ONLY what is in the transcript:
+{_name1.lower() if _name1 else 'streamer'} [exact topic from transcript — read it carefully] explained
+[what he actually said — from transcript]
+do you agree? drop it in the comments 👇
+#{(_name1 or 'clips').lower().replace(' ','')} #[exact topic from transcript] #[niche]"""
+                ),
+                'instagram': (
+                    "Write a complete Instagram caption. Rules: line 1 = [Role] @handle [what happened from transcript] [emoji]. Then 2-3 clean sentences — NO timestamps, NO brackets, NO raw transcript lines. DM-bait. Save-bait. 3-5 hashtags. Use ONLY what is in the transcript.",
+                    f"""{_tc}
+INSTAGRAM HANDLE: {_h_ig if _h_ig else 'NONE — use name only, NO @ symbol'}
+
+Write the complete caption — NO timestamps, NO [00:00:00] format:
+Line 1: [Role] {_h_ig if _h_ig else _who} [what happened] [emoji]
+
+[2-3 clean natural sentences about what he said — rewrite in your own words, no timestamps]
+
+what do you think — is he right? 👇
+save this for when the conversation comes up 📌
+#{(_name1 or 'clips').lower().replace(' ','')} #[exact topic] #drama #clips #[5th]"""
+                ),
+                'yt_shorts': (
+                    "Write a YouTube Shorts title and 3 hashtags. Title punchy under 60 chars using exact topic from transcript. Then exactly 3 hashtags. Nothing else.",
+                    f"""{_tc}
+
+Write the Shorts entry:
+TITLE: [punchy title under 60 chars using exact topic from transcript]
+
+#[person] #[exact topic from transcript] #[niche]"""
+                ),
+                'youtube': (
+                    "Write a complete YouTube video title + description + tags. Title keyword-first under 60 chars. 2-3 COMPLETE sentences. Channel plug. 10 specific tags. Use ONLY what is in the transcript.",
+                    f"""{_tc}
+YOUTUBE HANDLE: {_h_yt or 'use their name'}
+
+Write the full YouTube entry:
+TITLE: [keyword-first, under 60 chars]
+
+DESCRIPTION:
+[Complete sentence 1: who + what happened from transcript]
+[Complete sentence 2: why it matters]
+More clips → @MarsScumbags
+
+TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, clips, MarsScumbags, [4 more specific]"""
+                ),
+            }
+
+
+            # ── Generate all platforms in parallel ────────────────────────────
+            import threading as _pst2
+            _results = {}
+            _lock = _pst2.Lock()
+
+            # Debug: verify transcript is populated
+            _log(f'📋 Transcript: {len(_tr)} chars | Person: {_who} | Platforms: {_sel}')
+            if not _tr:
+                _log('⚠ No transcript — posts may be generic', YELLOW)
+            if not _name:
+                _log('⚠ No person name — add name in the field for better posts', YELLOW)
+
+            # Also add OpenRouter keys to pool
+            _or_keys = []
+            _or_k = self.cfg.get('key_openrouter','').strip()
+            if _or_k: _or_keys.append(_or_k)
+            for _ek3 in self.cfg.get('key_openrouter_extra','').split(','):
+                if _ek3.strip(): _or_keys.append(_ek3.strip())
+
+            # Build _all_keys from Gemini + Groq config
+            _all_keys = []
+            _gk = self.cfg.get('key_gemini','').strip()
+            if _gk: _all_keys.append(('gemini', _gk))
+            for _ek in self.cfg.get('key_gemini_extra','').split(','):
+                if _ek.strip(): _all_keys.append(('gemini', _ek.strip()))
+            _grk = self.cfg.get('key_groq','').strip()
+            if _grk: _all_keys.append(('groq', _grk))
+            for _ek2 in self.cfg.get('key_groq_extra','').split(','):
+                if _ek2.strip(): _all_keys.append(('groq', _ek2.strip()))
+
+            # Build provider pools
+            _gem_keys_list  = [(p,k) for p,k in _all_keys if p == 'gemini']
+            _groq_keys_list = [(p,k) for p,k in _all_keys if p == 'groq']
+            _or_keys_list   = list(dict.fromkeys([('openrouter', k) for k in _or_keys]))
+
+            # Groq primary for ALL platforms — Gemini is busy with transcription
+            # Groq: 334 t/s, 32k output tokens, generous free tier
+            # Gemini: only ~20 req/day free, gets hammered by transcription
+            _x_pool     = _groq_keys_list + _or_keys_list + _gem_keys_list
+            _other_pool = _groq_keys_list + _or_keys_list + _gem_keys_list
+            _all_pool   = _groq_keys_list + _or_keys_list + _gem_keys_list
+            if not _all_pool:
+                _log('❌ No API keys found — add keys in Settings', RED)
+                self.after(0, lambda: self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS'))
+                return
+
+            _n_keys = len(set(k for _,k in _all_pool))
+            _log(f'🔑 {len(_all_pool)} key slot(s) | Groq primary | Gemini backup (reserved for transcription)')
+
+            # Gap based on available unique keys
+            _unique_keys = max(len(_all_pool), 1)
+            _gap = max(0.3, 4.0 / _unique_keys)
+            _log(f'⏱ {_gap:.1f}s between calls')
+
+            import time as _pst_time
+            _results = {}
+            _pool_idx = [0]
+
+            _platform_max_tok  = {'youtube': 1200, 'yt_shorts': 500, 'instagram': 1000, 'x': 700, 'tiktok': 800}
+            _platform_min_len  = {'youtube': 20, 'yt_shorts': 20, 'instagram': 20, 'x': 20, 'tiktok': 20}  # just reject blanks
+
+            def _call_one(provider, key, system_msg, user_msg, max_tok=800):
+                """Single API call. Returns text or raises."""
+                _full = f"{system_msg}\n\n{user_msg}"
+                if provider == 'gemini':
+                    from google import genai as _gps_ps
+                    _cl = _gps_ps.Client(api_key=key)
+                    for _mdl in ['gemini-2.5-flash', 'gemini-2.5-flash-lite']:
+                        try:
+                            _r = _cl.models.generate_content(
+                                model=_mdl, contents=_full,
+                                config={'temperature':0.4,'max_output_tokens':max_tok})
+                            _t = (_r.text or '').strip()
+                            if _t: return _t
+                        except Exception as _me:
+                            if any(x in str(_me) for x in ['503','429','UNAVAILABLE','RESOURCE_EXHAUSTED']): continue
+                            raise
+                    raise Exception('Gemini rate limited on all models')
+                else:  # groq
+                    from groq import Groq as _GQ
+                    _r = _GQ(api_key=key).chat.completions.create(
+                        model='llama-3.3-70b-versatile',
+                        messages=[{'role':'system','content':system_msg},
+                                  {'role':'user',  'content':user_msg}],
+                        temperature=0.4, max_tokens=max_tok)
+                    return _r.choices[0].message.content.strip()
+
+            def _call_platform(pk):
+                _sys_msg, _usr_msg = _platform_msgs[pk]
+                _max_tok = _platform_max_tok.get(pk, 800)
+                _min_len = _platform_min_len.get(pk, 100)
+                _pool = _x_pool if pk == 'x' else _other_pool
+                if not _pool: _pool = _all_pool
+                _log(f'🚀 {pk.upper()}...')
+                for _prov, _key in _pool:
+                    try:
+                        if _prov == 'openrouter':
+                            import requests as _rq
+                            _or_r = _rq.post('https://openrouter.ai/api/v1/chat/completions',
+                                headers={'Authorization': f'Bearer {_key}','Content-Type': 'application/json',
+                                         'HTTP-Referer': 'https://github.com/thatspeedykid/clipfinder'},
+                                json={'model': 'meta-llama/llama-3.3-70b-instruct:free',
+                                      'messages': [{'role':'system','content':_sys_msg},{'role':'user','content':_usr_msg}],
+                                      'max_tokens': _max_tok}, timeout=30)
+                            _or_d = _or_r.json()
+                            if 'error' in _or_d:
+                                _or_msg = _or_d['error'].get('message','?')
+                                if any(x in _or_msg for x in ['Provider','provider','upstream','No endpoints']):
+                                    _log(f'⚠ {pk.upper()} OpenRouter unavailable — skipping', YELLOW)
+                                    continue
+                                raise Exception(f"OR: {_or_msg[:60]}")
+                            _out = _or_d.get('choices',[{}])[0].get('message',{}).get('content','').strip()
+                        else:
+                            _out = _call_one(_prov, _key, _sys_msg, _usr_msg, max_tok=_max_tok)
+                        if _out and len(_out) >= _min_len:
+                            # Only retry if clearly cut off mid-sentence
+                            if _out.rstrip() and _out.rstrip()[-1] not in '.!?#🔑📌👇💡\n':
+                                _pst_time.sleep(0.5)
+                                try:
+                                    _r2 = _call_one(_prov, _key, _sys_msg, _usr_msg, max_tok=_max_tok)
+                                    if _r2 and len(_r2) > len(_out): _out = _r2
+                                except: pass
+                            _log(f'✅ {pk.upper()} via {_prov} ({len(_out)} chars)', GREEN)
+                            return _out
+                        _log(f'⚠ {pk.upper()} {_prov} too short ({len(_out)}c < {_min_len}) — next', YELLOW)
+                    except Exception as _e:
+                        _es = str(_e)
+                        if any(x in _es for x in ['503','429','UNAVAILABLE','RESOURCE_EXHAUSTED','rate limited','daily']):
+                            _log(f'⚠ {pk.upper()} {_prov} rate limited — next', YELLOW)
+                        else:
+                            _log(f'⚠ {pk.upper()} {_prov}: {_es[:60]}', YELLOW)
+                    _pst_time.sleep(min(_gap, 1.0))
+                _log(f'❌ {pk.upper()} failed all keys', RED)
+                return ''
+
+
+            # Generate sequentially — dynamic gap between platforms
+            for _pk in _sel:
+                if _pk not in _platform_msgs: continue
+                _results[_pk] = _call_platform(_pk)
+                _pst_time.sleep(_gap)
+
+
+            # ── Update output boxes ───────────────────────────────────────────
+            def _update():
+                try:
+                    for pk in _sel:
+                        _txt = _results.get(pk,'')
+                        if pk not in self._ps_out: continue
+                        _b = self._ps_out[pk]['box']
+                        _b.config(state='normal', fg=FG if _txt else FG3)
+                        _b.delete('1.0','end')
+                        _b.insert('1.0', _txt if _txt else f'(No {pk} output — check API keys)')
+                        def _resize(box=_b):
+                            box.update_idletasks()
+                            box.config(height=1)
+                            box.update_idletasks()
+                            _visual = 0
+                            _idx = '1.0'
+                            while True:
+                                _di = box.dlineinfo(_idx)
+                                if _di is None: break
+                                _visual += 1
+                                _next = box.index(f'{_idx} +1 display lines')
+                                if _next == _idx: break
+                                _idx = _next
+                            box.config(height=max(4, _visual + 1))
+                        self.after(100, _resize)
+                        if _txt:
+                            def _run_score(p=pk, t=_txt, gk=[k for _,k in _groq_keys_list], mk=[k for _,k in _gem_keys_list]):
+                                _sc, _rs = self._ps_score_post(p, t, gk, mk)
+                                self._ps_update_score(p, _sc, _rs)
+                            import threading as _sct
+                            _sct.Thread(target=_run_score, daemon=True).start()
+                    if _name1 and any([_h_x,_h_ig,_h_tt,_h_yt]):
+                        try:
+                            MEM_PATH = USER_DIR / 'handle_memory.json'
+                            _m2 = {}
+                            try: _m2 = _psj2.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
+                            except: pass
+                            _m2[_name1.lower().replace(' ','_')] = {
+                                'x':_h_x,'instagram':_h_ig,'tiktok':_h_tt,'youtube':_h_yt,'name':_name1}
+                            MEM_PATH.write_text(_psj2.dumps(_m2,indent=2))
+                        except: pass
+                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
+                    self._ps_status.config(text=f'✅ Generated for: {", ".join(_sel)}', fg=GREEN)
+                    self.set_progress(f'✅ Post Studio — Done!', pct=100)
+                    self.after(3000, lambda: self.set_progress('', pct=0))
+                except Exception as _ue:
+                    import traceback as _utb
+                    print(f'[PostStudio _update ERROR]\n{_utb.format_exc()}')
+                    self.log(f'[Post Studio] ❌ Update error: {str(_ue)[:80]}', RED)
+                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
+
+            self.after(0, _update)
+
+        except Exception as _e:
+            import traceback as _pstb2
+            _tb = _pstb2.format_exc()
+            print(f'[PostStudio ERROR]\n{_tb}')
+            # Log each line of traceback to app log
+            for _tline in _tb.strip().split('\n')[-4:]:
+                self.log(f'[Post Studio] {_tline}', RED)
+            self.after(0, lambda: self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS'))
+
     def _build_dl_tab(self, p):
         def sec(t):
             tk.Label(p, text=t, font=('Segoe UI', 9, 'bold'),
@@ -8706,9 +9638,13 @@ Return ONLY the JSON array, no other text."""
                 self._dl_log_write('📼  VOD detected — saving to vod/ folder', ACCENT2)
                 self._dl_log_write('⚡  Concurrent fragment download enabled', FG2)
 
+            # Use timestamp in temp filename so yt-dlp never thinks file exists already
+            import time as _dl_time
+            _dl_tmp_id = int(_dl_time.time())
+
             ydl_opts = {
                 'format': fmt,
-                'outtmpl': str(Path(_out_folder) / '%(uploader)s - %(title)s - ClipFinder.%(ext)s'),
+                'outtmpl': str(Path(_out_folder) / f'_cftmp_{_dl_tmp_id}_%(uploader)s - %(title)s.%(ext)s'),
                 'postprocessors': pp,
                 'merge_output_format': 'mp4',
                 'postprocessor_args': {'ffmpeg': ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k']},
@@ -8784,7 +9720,7 @@ Return ONLY the JSON array, no other text."""
                         import re as _re_k
                         _ks = _re_k.sub(r'[\/:*?"<>|]', '', _kick_streamer or 'Kick').strip()
                         _kt = _re_k.sub(r'[\/:*?"<>|]', '', _kick_title or 'clip').strip()[:60]
-                        ydl_opts['outtmpl'] = str(Path(_out_folder) / f'{_ks} - {_kt} - ClipFinder.%(ext)s')
+                        ydl_opts['outtmpl'] = str(Path(_out_folder) / f'_cftmp_{_dl_tmp_id}_{_ks} - {_kt}.%(ext)s')
                         self._dl_log_write(f'📁  Name: {_ks} - {_kt} - ClipFinder', FG2)
                 else:
                     self._dl_log_write('⚠️  Kick API failed — trying yt-dlp...', YELLOW)
@@ -9002,20 +9938,30 @@ Return ONLY the JSON array, no other text."""
             except Exception:
                 pass
 
-            # Rename downloaded file — only the specific file we just downloaded, never others
-            if uploader and uploader.upper() != 'NA' and downloaded and Path(downloaded).exists():
+            # Rename: strip temp prefix, add ClipFinder, handle duplicates with (1)(2) etc
+            if downloaded and Path(downloaded).exists():
                 import re as _re_fn
-                _safe_up = _re_fn.sub(r'[\/:*?"<>|]', '', uploader).strip()
-                _safe_ti = _re_fn.sub(r'[\/:*?"<>|]', '', title).strip()[:60]
-                _new_name = f'{_safe_up} - {_safe_ti} - ClipFinder.mp4' if _safe_ti else f'{_safe_up} - ClipFinder.mp4'
+                _safe_up = _re_fn.sub(r'[\\/:*?"<>|]', '', uploader or '').strip()
+                _safe_ti = _re_fn.sub(r'[\\/:*?"<>|]', '', title or '').strip()[:60]
+                if _safe_up and _safe_ti:   _new_name = f'{_safe_up} - {_safe_ti} - ClipFinder.mp4'
+                elif _safe_ti:              _new_name = f'{_safe_ti} - ClipFinder.mp4'
+                elif _safe_up:             _new_name = f'{_safe_up} - ClipFinder.mp4'
+                else:                      _new_name = f'ClipFinder_{_dl_tmp_id}.mp4'
                 try:
                     _new_path = Path(downloaded).parent / _new_name
-                    if not _new_path.exists():
-                        Path(downloaded).rename(_new_path)
-                        downloaded = str(_new_path)
-                        self._last_dl_path = downloaded
-                        self._dl_log_write(f'✏️  Renamed: {_new_name}', FG2)
-                except Exception: pass
+                    # Always add (1)(2) if same name exists — never overwrite or skip
+                    if _new_path.exists() and _new_path.resolve() != Path(downloaded).resolve():
+                        _stem, _ext = _new_path.stem, _new_path.suffix
+                        _n = 1
+                        while _new_path.exists():
+                            _new_path = Path(downloaded).parent / f'{_stem} ({_n}){_ext}'
+                            _n += 1
+                    Path(downloaded).rename(_new_path)
+                    downloaded = str(_new_path)
+                    self._last_dl_path = downloaded
+                    self._dl_log_write(f'✏️  Saved as: {_new_path.name}', FG2)
+                except Exception as _re:
+                    self._dl_log_write(f'⚠ Rename failed: {_re}', YELLOW)
             self._dl_log_write('', FG2)
             self._dl_log_write(f'✅  Done: {title}', GREEN)
             self._dl_log_write(f'📁  Saved to: {folder}', FG2)
@@ -11408,21 +12354,21 @@ Return ONLY the JSON array, no other text."""
             _inst_prog_lbl.config(text=msg)
 
         _INSTALL_HEAVY_PKGS = [
-            # Pure Python AI providers first — small, fast
+            # Pure Python AI providers first
             'google-genai', 'groq', 'openai', 'yt-dlp', 'requests', 'curl-cffi',
             # Numeric base MUST come before imagehash/soundfile/whisper
             'numpy', 'scipy',
             # Audio + image (depend on numpy)
             'Pillow', 'soundfile', 'imagehash',
+            # Whisper engines
+            'faster-whisper', 'openai-whisper',
             # Video processing
             'opencv-python',
             # Optional face tracking
             'mediapipe',
+            # Music removal
+            'torch', 'torchaudio', 'demucs',
         ]
-        # Torch/whisper/demucs installed separately with special handling
-        _INSTALL_TORCH_PKGS = ['torch', 'torchaudio']
-        _INSTALL_WHISPER_PKGS = ['faster-whisper', 'openai-whisper']
-        _INSTALL_DEMUCS_PKGS = ['demucs']
 
         def _install_all_heavy():
             _install_btn.config(text='⟳ Installing... (check log)', state='disabled', bg=BG4, fg=FG2)
@@ -11433,89 +12379,37 @@ Return ONLY the JSON array, no other text."""
 
             def _do_heavy():
                 import subprocess as _sp
-                _all_pkgs = (list(_INSTALL_HEAVY_PKGS) +
-                             _INSTALL_TORCH_PKGS +
-                             _INSTALL_WHISPER_PKGS +
-                             _INSTALL_DEMUCS_PKGS)
-                n = len(_all_pkgs)
+                n = len(_INSTALL_HEAVY_PKGS)
                 self.log('🔄 Installing all AI/transcription packages...', ACCENT2)
-                self.log('  This may take 10-20 minutes — torch alone is ~2GB.', FG2)
+                self.log('This may take 5-15 minutes depending on connection speed.', FG2)
                 ok_count = 0
-
-                for i, pkg in enumerate(_all_pkgs):
+                for i, pkg in enumerate(_INSTALL_HEAVY_PKGS):
                     pct_before = max(2, int(i / n * 95))
                     self.after(0, lambda p=pkg, pct=pct_before: (
                         _draw_inst_progress(pct, f'Installing {p}... ({pct}%)'),
                         self.set_progress(f'⬇ Installing {p}...', pct=pct)
                     ))
                     self.log(f'  → {pkg}...', FG2)
-
+                    _nodeps = pkg in {'faster-whisper', 'openai-whisper'}
+                    _cmd = _pip_cmd([pkg], ['--no-deps'] if _nodeps else [])
                     if _cmd is None:
-                        _cmd2 = _pip_cmd([pkg])
-                        if _cmd2 is None:
-                            self.after(0, lambda: self.log('❌ Cannot find Python — check Settings', RED))
-                            break
-
-                    # torch/torchaudio: use PyTorch CPU index first (always works),
-                    # then GPU-specific if needed
-                    if pkg in ('torch', 'torchaudio'):
-                        # Try CPU index first (100% reliable), then GPU
-                        _torch_urls = [
-                            # CPU — always works, no CUDA needed
-                            ['--index-url', 'https://download.pytorch.org/whl/cpu'],
-                            # CUDA 12.1 for NVIDIA
-                            ['--index-url', 'https://download.pytorch.org/whl/cu121'],
-                            # ROCm 6.0 for AMD
-                            ['--index-url', 'https://download.pytorch.org/whl/rocm6.0'],
-                            # Default PyPI
-                            [],
-                        ]
-                        _ok = False
-                        for _extra_args in _torch_urls:
-                            _cmd_t = _pip_cmd([pkg], _extra_args)
-                            if _cmd_t:
-                                r = _sp.run(_cmd_t, capture_output=True, text=True, timeout=600)
-                                if r.returncode == 0:
-                                    _ok = True
-                                    break
-                                else:
-                                    self.log(f'  ⚠ torch attempt failed: {(r.stderr or "")[-80:]}', YELLOW)
-                    elif pkg in ('faster-whisper', 'openai-whisper'):
-                        # Try with --no-deps first (avoids torch conflict), then normal
-                        r = _sp.run(_pip_cmd([pkg], ['--no-deps']), capture_output=True, text=True, timeout=300)
-                        _ok = r.returncode == 0
-                        if not _ok:
-                            r = _sp.run(_pip_cmd([pkg]), capture_output=True, text=True, timeout=300)
-                            _ok = r.returncode == 0
-                    elif pkg == 'demucs':
-                        # demucs needs torch pre-installed — check first
-                        try:
-                            import importlib; importlib.import_module('torch')
-                            _torch_ok = True
-                        except ImportError:
-                            _torch_ok = any(PKGS_DIR.glob('torch*')) if PKGS_DIR.exists() else False
-                        if not _torch_ok:
-                            self.log('  ⚠ demucs skipped — torch not installed yet. Install torch first.', YELLOW)
-                            continue
-                        r = _sp.run(_pip_cmd([pkg]), capture_output=True, text=True, timeout=600)
-                        _ok = r.returncode == 0
-                    else:
-                        _cmd2 = _pip_cmd([pkg])
-                        if _cmd2 is None:
-                            self.after(0, lambda: self.log('❌ Cannot find Python', RED)); break
-                        r = _sp.run(_cmd2, capture_output=True, text=True, timeout=300)
-                        if r.returncode != 0 and b'Access is denied' in (r.stderr or b'').encode():
-                            self.after(0, lambda p=pkg: self.log(
-                                f'⚠ {p} is locked (in use). Restart to complete.', YELLOW))
-                            r = type('R', (), {'returncode': 0})()
-                        _ok = r.returncode == 0
-
+                        self.after(0, lambda: self.log('❌ Cannot find Python — check Settings', RED))
+                        break
+                    r = _sp.run(_cmd, capture_output=True, text=True, timeout=300)
+                    if r.returncode != 0 and _nodeps:
+                        r = _sp.run(_pip_cmd([pkg]), capture_output=True, text=True, timeout=300)
+                    if r.returncode != 0 and b'Access is denied' in (r.stderr or b'').encode():
+                        self.after(0, lambda p=pkg: self.log(
+                            f'⚠ {p} is locked (in use). Restart ClipFinder to complete install.', YELLOW))
+                        r = type('R', (), {'returncode': 0})()  # treat as ok, will work after restart
+                    _ok = r.returncode == 0
                     if _ok:
                         ok_count += 1
-                        self.after(0, lambda p=pkg: self.log(f'  ✅ {p}', GREEN))
-                    else:
-                        _err_tail = (r.stderr if hasattr(r,'stderr') and r.stderr else '')[-200:].strip()
+                    if not _ok:
+                        _err_tail = (r.stderr or '')[-150:].strip()
                         self.after(0, lambda p=pkg, e=_err_tail: self.log(f'  ❌ {p}: {e}', RED))
+                    else:
+                        self.after(0, lambda p=pkg: self.log(f'  ✅ {p}', GREEN))
 
                 def _finish():
                     _draw_inst_progress(100, f'Done! {ok_count}/{n} packages installed.')
