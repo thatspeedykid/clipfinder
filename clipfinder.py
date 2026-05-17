@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.3.8.1"
 
 import subprocess
 import sys
@@ -8357,7 +8357,7 @@ Return ONLY the JSON array, no other text."""
 
         # ── Layout: left inputs | right outputs ───────────────────────────────
         outer = tk.Frame(p, bg=BG); outer.pack(fill='both', expand=True)
-        left  = tk.Frame(outer, bg=BG, width=320)
+        left = tk.Frame(outer, bg=BG, width=330)
         left.pack(side='left', fill='y', padx=(10,0), pady=8)
         left.pack_propagate(False)
         tk.Frame(outer, bg=BORDER, width=1).pack(side='left', fill='y', padx=(8,0))
@@ -8574,12 +8574,13 @@ Return ONLY the JSON array, no other text."""
         tk.Label(left, text='✨  Spice it up', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w')
         tk.Label(left, text='May reduce algorithmic reach — use for engaged audiences',
                  font=('Segoe UI',7), fg=FG3, bg=BG).pack(anchor='w', pady=(0,4))
-        _sr = tk.Frame(left, bg=BG); _sr.pack(fill='x', pady=(0,8))
+        _sr1 = tk.Frame(left, bg=BG); _sr1.pack(fill='x', pady=(0,2))
+        _sr2 = tk.Frame(left, bg=BG); _sr2.pack(fill='x', pady=(0,8))
         self._ps_spice = {}
-        for _sk, _sl in [('drama','🔥 Drama'),('breaking','📰 Breaking'),
-                          ('exaggerate','🤯 Exaggerate'),('clickbait','🎣 Clickbait')]:
+        for _sk, _sl, _row in [('drama','🔥 Drama',_sr1),('breaking','📰 Breaking',_sr1),
+                                ('exaggerate','🤯 Exaggerate',_sr2),('clickbait','🎣 Clickbait',_sr2)]:
             self._ps_spice[_sk] = tk.BooleanVar(value=False)
-            tk.Checkbutton(_sr, text=_sl, variable=self._ps_spice[_sk],
+            tk.Checkbutton(_row, text=_sl, variable=self._ps_spice[_sk],
                            font=FONT_SMALL, bg=BG, fg=FG, selectcolor=BG3,
                            activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0,6))
 
@@ -11819,10 +11820,10 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                      width=_COL_RIGHT, anchor='e').pack(side='right')
 
             # RIGHT: + button (fixed, before entry) — hide for single-key services
-            _plus_holder = tk.Frame(pr, bg=BG3, width=28)
-            _plus_holder.pack(side='right'); _plus_holder.pack_propagate(False)
-            _plus_btn = tk.Button(_plus_holder, text='＋', font=('Segoe UI',9,'bold'),
-                                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2')
+            _plus_holder = tk.Frame(pr, bg=BG3)
+            _plus_holder.pack(side='right', padx=(4,0))
+            _plus_btn = tk.Button(_plus_holder, text='+ Add Key', font=('Segoe UI',8),
+                                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8, pady=4)
             if pkey not in ('_unsplash',):
                 _plus_btn.pack(expand=True)
 
@@ -13451,8 +13452,8 @@ sys.exit(main())
         if not stems_to_mix:
             raise RuntimeError(f'No stems found in {sep_track} — check demucs output')
 
-        # Mix stems back together
-        mixed_audio = str(tmp_dir / 'mixed.mp3')
+        # Mix stems back together — use WAV to avoid codec issues
+        mixed_audio = str(tmp_dir / 'mixed.wav')
         if len(stems_to_mix) == 1:
             import shutil as _sh
             _sh.copy2(stems_to_mix[0], mixed_audio)
@@ -13472,22 +13473,29 @@ sys.exit(main())
         self.set_progress('🎵 Music Removal: merging audio + video...', pct=90)
         self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Merging audio + video...', fg=ACCENT2))
         stem = Path(vid).stem
+        # Ensure output folder exists
+        Path(out).mkdir(parents=True, exist_ok=True)
         out_path = str(Path(out) / f'{stem} - NoMusic - ClipFinder.mp4')
         _vcodec, _acodec, _extra = get_encoder(ff)
-        # MOV/non-MP4 containers can't use -c:v copy into MP4 — re-encode
         _vid_ext = Path(vid).suffix.lower()
         _needs_reencode = _vid_ext in ('.mov', '.avi', '.wmv', '.flv', '.mkv', '.webm')
         _cv = ['-c:v', _vcodec] + _extra if _needs_reencode else ['-c:v', 'copy']
-        _sp.run([ff, '-y',
-                 '-i', vid,
-                 '-i', mixed_audio,
-                 ] + _cv + [
-                 '-c:a', _acodec,
-                 '-map', '0:v:0',
-                 '-map', '1:a:0',
-                 '-shortest',
-                 out_path],
-                stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+        _cmd = [ff, '-y',
+                '-i', vid,
+                '-i', mixed_audio,
+                ] + _cv + [
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-map', '0:v:0',
+                '-map', '1:a:0',
+                '-shortest',
+                out_path]
+        self.log(f'[Music] ffmpeg merge: {" ".join(_cmd[-6:])}', FG2)
+        _res = _sp.run(_cmd, stdout=_sp.PIPE, stderr=_sp.PIPE)
+        if _res.returncode != 0:
+            _err = (_res.stderr or b'').decode(errors='replace')[-500:]
+            self.log(f'[Music] ffmpeg stderr: {_err}', RED)
+            raise _sp.CalledProcessError(_res.returncode, _cmd, _res.stdout, _res.stderr)
 
         # Cleanup
         import shutil as _sh2
