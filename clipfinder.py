@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.8.1"
+APP_VERSION = "1.3.8.2"
 
 import subprocess
 import sys
@@ -2247,7 +2247,6 @@ class App(tk.Tk):
             pass
         # Set window + taskbar icon
         try:
-            # Look for clipfinder.ico next to the script or exe
             _ico_search = [
                 _PathBase(__file__).parent / 'clipfinder.ico',
                 _PathBase(sys.executable).parent / 'clipfinder.ico',
@@ -2256,17 +2255,25 @@ class App(tk.Tk):
             for _ico_path in _ico_search:
                 if _ico_path.exists():
                     self.iconbitmap(str(_ico_path))
+                    try:
+                        import ctypes
+                        _u32 = ctypes.windll.user32
+                        _ico_str = str(_ico_path)
+                        _LR_LOADFROMFILE = 0x00000010
+                        _IMAGE_ICON      = 1
+                        # SM_CXICON/SM_CYICON = taskbar icon size, already DPI-scaled by Windows
+                        # e.g. 32 at 100%, 40 at 125%, 48 at 150%, 64 at 200%
+                        _sz_lg = _u32.GetSystemMetrics(11)  # SM_CXICON
+                        _sz_sm = _u32.GetSystemMetrics(49)  # SM_CXSMICON
+                        _hicon_lg = _u32.LoadImageW(None, _ico_str, _IMAGE_ICON, _sz_lg, _sz_lg, _LR_LOADFROMFILE)
+                        _hicon_sm = _u32.LoadImageW(None, _ico_str, _IMAGE_ICON, _sz_sm, _sz_sm, _LR_LOADFROMFILE)
+                        _WM_SETICON = 0x0080
+                        _hwnd = int(self.frame(), 16)
+                        if _hicon_lg: _u32.SendMessageW(_hwnd, _WM_SETICON, 1, _hicon_lg)
+                        if _hicon_sm: _u32.SendMessageW(_hwnd, _WM_SETICON, 0, _hicon_sm)
+                    except Exception:
+                        pass
                     break
-            else:
-                # Fallback: use PIL to set icon from any found image
-                from PIL import Image as _PI4, ImageTk as _PT4
-                for _ico_path in _ico_search:
-                    _png = _ico_path.with_suffix('.png')
-                    if _png.exists():
-                        _img = _PI4.open(str(_png))
-                        self._win_icon = _PT4.PhotoImage(_img)
-                        self.iconphoto(True, self._win_icon)
-                        break
         except Exception:
             pass
         self.minsize(1000, 750)
@@ -2569,20 +2576,28 @@ class App(tk.Tk):
         # Orange left accent stripe
         tk.Frame(hdr, bg=ACCENT, width=4).pack(side='left', fill='y')
         # Logo + icon
-        logo_f = tk.Frame(hdr, bg=BG2); logo_f.pack(side='left', padx=14)
-        # App icon left of text
+        logo_f = tk.Frame(hdr, bg=BG2); logo_f.pack(side='left', padx=(14, 6))
+        # App icon left of text — load from PNG for sharpness, fallback to ICO
         try:
             from PIL import Image as _PI3, ImageTk as _PT3
-            for _ip in [_PathBase(__file__).parent / 'clipfinder.ico',
+            _hdr_frame = None
+            # Prefer the 512px PNG next to the exe/script — much sharper than pulling from ICO
+            for _ip in [_PathBase(__file__).parent / 'clipfinder_logo_512.png',
+                        _PathBase(sys.executable).parent / 'clipfinder_logo_512.png',
+                        _PathBase(__file__).parent / 'clipfinder.ico',
                         _PathBase(sys.executable).parent / 'clipfinder.ico']:
                 if _ip.exists():
-                    self._hdr_icon = _PT3.PhotoImage(_PI3.open(str(_ip)).resize((22,22), _PI3.LANCZOS))
-                    tk.Label(logo_f, image=self._hdr_icon, bg=BG2).pack(side='left', padx=(0,6))
+                    _hdr_img = _PI3.open(str(_ip)).convert('RGBA')
+                    # Downscale from large source for crisp result
+                    _hdr_frame = _hdr_img.resize((40, 40), _PI3.LANCZOS)
                     break
+            if _hdr_frame:
+                self._hdr_icon = _PT3.PhotoImage(_hdr_frame)
+                tk.Label(logo_f, image=self._hdr_icon, bg=BG2).pack(side='left', padx=(0, 4))
         except Exception: pass
-        tk.Label(logo_f, text='CLIP', font=('Segoe UI', 14, 'bold'),
+        tk.Label(logo_f, text='CLIP', font=('Segoe UI', 17, 'bold'),
                  fg=ACCENT, bg=BG2).pack(side='left')
-        tk.Label(logo_f, text='FINDER', font=('Segoe UI', 14, 'bold'),
+        tk.Label(logo_f, text='FINDER', font=('Segoe UI', 17, 'bold'),
                  fg=FG, bg=BG2).pack(side='left')
         tk.Label(hdr, text='AI Drama Clip Extractor',
                  font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(side='left', padx=4)
@@ -4776,6 +4791,22 @@ class App(tk.Tk):
                 except Exception as _core_err:
                     # Core download failure is non-fatal — old core still works
                     print(f'[CF] Core module update skipped: {_core_err}')
+
+                # 1.3.8.2: Download new logo PNG so existing installs get the updated icon
+                # This block can be removed in 1.3.9+ once all users have updated
+                try:
+                    _pw.after(0, lambda: _status_var.set('Downloading updated logo...'))
+                    _logo_dst = Path(_sys3.argv[0]).parent / 'clipfinder_logo_512.png'
+                    _tag = release_data.get('tag_name', 'v1.3.8.2')
+                    _logo_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{_tag}/assets/clipfinder_logo_512.png'
+                    _ur3.urlretrieve(_logo_url, str(_logo_dst))
+                    print(f'[CF] Logo updated at {_logo_dst}')
+                    _ico_dst = Path(_sys3.argv[0]).parent / 'clipfinder.ico'
+                    _ico_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{_tag}/clipfinder.ico'
+                    _ur3.urlretrieve(_ico_url, str(_ico_dst))
+                    print(f'[CF] ICO updated at {_ico_dst}')
+                except Exception as _logo_err:
+                    print(f'[CF] Logo update skipped: {_logo_err}')
 
                 # Write a relaunch flag so the launcher knows to show splash
                 _flag = USER_DIR / '.force_install'

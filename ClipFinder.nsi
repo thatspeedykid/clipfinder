@@ -1,9 +1,9 @@
 ; ============================================================
-; ClipFinder v1.3.7.1 — NSIS Installer
+; ClipFinder v1.3.8.2 — NSIS Installer
 ; ============================================================
 
 !define APP_NAME     "ClipFinder"
-!define APP_VERSION  "1.3.8.1"
+!define APP_VERSION  "1.3.8.2"
 !define APP_EXE      "clipfinder.exe"
 !define INSTALL_DIR  "$LOCALAPPDATA\ClipFinder"
 !define PUBLISHER    "MarsScumbags"
@@ -44,6 +44,7 @@ Section "ClipFinder" SecMain
     File "ClipFinder_dist\clipfinder_core.py"
     File "ClipFinder_dist\README.md"
     File "ClipFinder_dist\CHANGELOG.md"
+    File "ClipFinder_dist\clipfinder_logo_512.png"
 
     ; Embedded Python
     SetOutPath "$INSTDIR\python"
@@ -85,6 +86,7 @@ Section "Uninstall"
     Delete "$INSTDIR\clipfinder.ico"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\CHANGELOG.md"
+    Delete "$INSTDIR\clipfinder_logo_512.png"
     Delete "$INSTDIR\Uninstall.exe"
     Delete "$INSTDIR\install_done.stamp"
     Delete "$INSTDIR\pending_update.flag"
