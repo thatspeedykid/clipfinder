@@ -11,17 +11,13 @@ ClipFinder automatically finds, cuts, censors, and exports viral clips from stre
 
 ## Screenshots
 
-### Clip Finder
-![Clip Finder Tab](assets/screenshot_1_clipfinder.png)
+<img src="assets/screenshot_1_clipfinder.png" width="800" alt="Clip Finder Tab"/>
 
-### Transcript
-![Transcript Tab](assets/screenshot_2_transcript.png)
+<img src="assets/screenshot_2_clipfinder.png" width="800" alt="Transcript Tab"/>
 
-### Post Studio
-![Post Studio Tab](assets/screenshot_3_poststudio.png)
+<img src="assets/screenshot_3_clipfinder.png" width="800" alt="Post Studio Tab"/>
 
-### Settings
-![Settings Tab](assets/screenshot_4_settings.png)
+<img src="assets/screenshot_4_clipfinder.png" width="800" alt="Settings Tab"/>
 
 ---
 
