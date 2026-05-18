@@ -131,11 +131,13 @@ Download clips from any platform directly in the app.
 
 ## 🔬 Studio
 
-Post-processing tools for your clips.
+Clip management and enhancement tools.
 
-- **Trim/cut** — precise frame-level trimming
-- **Export** — configurable quality and format settings
-- **Merge** — combine multiple clips
+- **Duplicate Finder** — scans a folder for duplicate/similar images and moves them to `/duplicates`
+- **Sensitivity control** — Exact only, Similar, or Very similar matching
+- **AI Upscaler** — Real-ESRGAN upscaling, runs fully locally after first install
+- **Scale options** — 2x, 3x, or 4x upscale
+- **Batch input** — load up to 5 images at once
 
 ---
 
