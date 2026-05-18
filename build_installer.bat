@@ -44,6 +44,7 @@ copy "clipfinder.py"       "ClipFinder_dist\clipfinder.py"       >nul
 copy "clipfinder_core.py"  "ClipFinder_dist\clipfinder_core.py"  >nul
 if exist "clipfinder.ico"  copy "clipfinder.ico"  "ClipFinder_dist\clipfinder.ico"  >nul
 if exist "preview.webp"    copy "preview.webp"    "ClipFinder_dist\preview.webp"    >nul
+if exist "assets\clipfinder_logo_512.png"  copy "assets\clipfinder_logo_512.png"  "ClipFinder_dist\clipfinder_logo_512.png"  >nul
 copy "README.md"    "ClipFinder_dist\README.md"    >nul 2>&1
 copy "CHANGELOG.md" "ClipFinder_dist\CHANGELOG.md" >nul 2>&1
 
