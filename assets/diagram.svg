@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 800 800" height="800" width="800">
+  
+  <circle fill="#FF6200" r="265" cy="400" cx="400"></circle>
+  
+  
+  <circle opacity="0.25" fill="#E55A00" r="265" cy="400" cx="400"></circle>
+
+  
+  <circle opacity="0.38" fill="#0A0A0A" r="52" cy="315" cx="275"></circle>
+  <circle opacity="0.36" fill="#0A0A0A" r="68" cy="335" cx="525"></circle>
+  <circle opacity="0.33" fill="#0A0A0A" r="41" cy="505" cx="305"></circle>
+  <circle opacity="0.34" fill="#0A0A0A" r="56" cy="475" cx="495"></circle>
+  <circle opacity="0.28" fill="#0A0A0A" r="34" cy="435" cx="615"></circle>
+
+  
+  <polygon fill="#0A0A0A" points="305,285 305,515 555,400"></polygon>
+
+  
+  <circle opacity="0.55" stroke-width="20" stroke="#FF6200" r="295" cy="400" cx="400"></circle>
+</svg>
