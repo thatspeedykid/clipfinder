@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.8.3"
+APP_VERSION = "1.3.8.4"
 
 import subprocess
 import sys
@@ -7582,6 +7582,7 @@ Return ONLY the JSON array, no other text."""
         base = Path(vid).stem
         ff = find_ffmpeg()
         ok = 0
+        Path(out).mkdir(parents=True, exist_ok=True)
         def _to_sec(t):
             try:
                 p = t.split(':')
@@ -7647,7 +7648,7 @@ Return ONLY the JSON array, no other text."""
                 _ok = _r.returncode == 0 and _out_size > 10240
                 if not _ok:
                     if _r.returncode != 0:
-                        self.log(f'[Export] {"9:16" if vertical else "16:9"} failed: {_err[-120:]}', RED)
+                        self.log(f'[Export] {"9:16" if vertical else "16:9"} failed → {out_path}\n{_err[-120:]}', RED)
                     else:
                         self.log(f'[Export] {"9:16" if vertical else "16:9"} produced empty file ({_out_size}B) — retrying with libx264', YELLOW)
                     if vertical:
