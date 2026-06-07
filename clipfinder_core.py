@@ -16,8 +16,8 @@ from pathlib import Path
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
-        # NOTE: gemini-1.5-* ALL DEAD (404). gemini-2.0-flash shuts down June 1 2026.
+        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+        # NOTE: gemini-1.5-* ALL DEAD (404). gemini-2.0-flash DEAD June 1 2026.
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
@@ -25,9 +25,9 @@ PROVIDERS = {
         'lib':    'groq',
         'models': [
             'llama-3.3-70b-versatile', # 32k context, smarter
-            'mixtral-8x7b-32768',      # 32k context window
-            'llama-3.1-8b-instant',    # 8k context — fast but small
-            'llama3-8b-8192',          # 8k context fallback
+            'llama-3.1-8b-instant',    # 8k context — fast fallback
+            # DEAD: mixtral-8x7b-32768 (deprecated Mar 2025)
+            # DEAD: llama3-8b-8192 (deprecated May 2025, use llama-3.1-8b-instant)
         ],
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
@@ -36,12 +36,15 @@ PROVIDERS = {
         'lib':    'openrouter',
         'models': [
             'openrouter/auto',                              # OR's own free router — auto-picks best available
-            'meta-llama/llama-3.3-70b-instruct:free',      # Llama 3.3 70B — top free model
-            'nvidia/nemotron-3-super-120b-a12b:free',       # NVIDIA 120B — large context
-            'google/gemma-3-12b-it:free',                   # Gemma 3 12B
-            'meta-llama/llama-3.1-8b-instruct:free',        # Llama 3.1 8B — fast fallback
-            'mistralai/mistral-small-3.1:free',              # Mistral Small 3.1
-            'qwen/qwen3.6-plus:free',                        # Qwen — last resort
+            'qwen/qwen3-235b-a22b:free',                   # Qwen3 235B MoE — top free model Jun 2026
+            'nvidia/nemotron-3-super-120b-a12b:free',       # NVIDIA 120B — strong reasoning
+            'nvidia/nemotron-3-nano-30b-a3b:free',          # NVIDIA 30B — fast, good quality
+            'google/gemma-3-27b-it:free',                   # Gemma 3 27B — reliable
+            'meta-llama/llama-3.3-70b-instruct:free',       # Llama 3.3 70B — solid fallback
+            'meta-llama/llama-3.1-8b-instruct:free',        # Llama 3.1 8B — last resort
+            # DEAD: google/gemma-3-12b-it:free (replaced by 27B)
+            # DEAD: mistralai/mistral-small-3.1:free
+            # DEAD: qwen/qwen3.6-plus:free (old slug, use qwen3-235b-a22b:free)
         ],
         'url':    'https://openrouter.ai/keys',
         'note':   '50+ free models — no credit card needed',
@@ -1285,10 +1288,15 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
             vad_parameters={
                 'min_silence_duration_ms': 400,
                 'speech_pad_ms': 200,
+                'threshold': 0.6,           # more aggressive silence filtering
             },
             beam_size=5,
             best_of=5,
             temperature=0.0,
+            no_speech_threshold=0.6,        # drop segments whisper thinks are silence
+            compression_ratio_threshold=2.4, # kill looping/repetition (same as -et)
+            log_prob_threshold=-0.7,        # drop low-confidence segments
+            condition_on_previous_text=False, # CRITICAL: prevents "Go. Go. Go." repeat loops
         )
 
         # Consume iterator and report progress

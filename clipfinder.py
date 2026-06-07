@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.8.4"
+APP_VERSION = "1.3.8.5"
 
 import subprocess
 import sys
@@ -1820,6 +1820,12 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                        '-bo', '5',
                        '-bs', '5',
                        '-l', 'auto',
+                       # ── Hallucination suppression ──────────────────────────
+                       '-et', '2.4',    # entropy threshold — kills looping/repetition
+                       '-lpt', '-0.7',  # logprob threshold — drops low-confidence segments
+                       '-wt', '0.01',   # word threshold — avoids near-silence transcription
+                       '--no-fallback', # skip temperature fallback that causes hallucinations
+                       '-vth', '0.6',   # VAD threshold — more aggressive silence detection
                 ]
                 if initial_prompt:
                     clean_prompt = initial_prompt[:200].replace('"', "'").strip()
@@ -2160,10 +2166,15 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
             vad_parameters={
                 'min_silence_duration_ms': 400,
                 'speech_pad_ms': 200,
+                'threshold': 0.6,           # more aggressive silence filtering
             },
             beam_size=5,
             best_of=5,
             temperature=0.0,
+            no_speech_threshold=0.6,        # drop segments whisper thinks are silence
+            compression_ratio_threshold=2.4, # kill looping/repetition (same as -et)
+            log_prob_threshold=-0.7,        # drop low-confidence segments
+            condition_on_previous_text=False, # CRITICAL: prevents "Go. Go. Go." repeat loops
         )
 
         # Consume iterator and report progress
@@ -2479,36 +2490,26 @@ class App(tk.Tk):
                 _latest_t  = _ver_tuple(_latest)
                 _current_t = _ver_tuple(APP_VERSION)
                 if _latest and _latest_t > _current_t:
-                    def _show_update():
-                        # Floating update banner — always visible, over everything
-                        _uw = tk.Toplevel(self)
-                        _uw.overrideredirect(True)
-                        _uw.attributes('-topmost', True)
-                        _uw.configure(bg='#1e3a1e')
-                        _bar_h = 36
-                        def _pos_update(*_):
-                            try:
-                                x = self.winfo_x()
-                                y = self.winfo_y()
-                                w = self.winfo_width()
-                                wh = self.winfo_height()
-                                _uw.geometry(f'{w}x{_bar_h}+{x}+{y+wh-_bar_h-30}')
-                            except: pass
+                    def _show_update(_v=_latest, _d=_data):
+                        # Inline update bar — sits inside the app, no floating window
+                        _uw = tk.Frame(self, bg='#1e3a1e', height=32)
+                        _uw.pack(side='bottom', fill='x')
+                        _uw.pack_propagate(False)
                         tk.Label(_uw,
-                                text=f'⬆  ClipFinder v{_latest} available  —  you have v{APP_VERSION}',
+                                text=f'⬆  ClipFinder v{_v} available  —  you have v{APP_VERSION}',
                                 font=('Segoe UI',9,'bold'), fg='#00ff88', bg='#1e3a1e'
                                 ).pack(side='left', padx=14)
-                        def _do_auto_update(_v=_latest, _d=_data):
+                        def _do_auto_update():
                             _uw.destroy()
                             self._apply_auto_update(_v, _d)
                         tk.Button(_uw, text='⬇ Download Now', font=('Segoe UI',8,'bold'),
                                  bg=ACCENT, fg='#000', relief='flat', bd=0,
-                                 cursor='hand2', padx=10, pady=6,
+                                 cursor='hand2', padx=10, pady=4,
                                  command=_do_auto_update
                                  ).pack(side='left', padx=6)
                         tk.Button(_uw, text='Open in Browser', font=('Segoe UI',8),
                                  bg='#1e3a1e', fg='#00ff88', relief='flat', bd=0,
-                                 cursor='hand2', padx=8, pady=6,
+                                 cursor='hand2', padx=8, pady=4,
                                  command=lambda: __import__('webbrowser').open(
                                      'https://github.com/thatspeedykid/clipfinder/releases/latest')
                                  ).pack(side='left', padx=2)
@@ -2516,8 +2517,6 @@ class App(tk.Tk):
                                  fg='#00ff88', bg='#1e3a1e', relief='flat', bd=0,
                                  cursor='hand2', padx=12,
                                  command=_uw.destroy).pack(side='right', padx=8)
-                        _pos_update()
-                        self.bind('<Configure>', _pos_update)
                     self.after(2000, _show_update)
             except Exception:
                 pass  # Silent fail — no internet or API down
