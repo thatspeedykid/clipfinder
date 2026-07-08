@@ -38,7 +38,7 @@ jobs:
         run: |
           $ver = "${{ steps.version.outputs.VER }}"
           $nsi = Get-Content ClipFinder.nsi -Raw
-          $nsi = $nsi -replace '!define APP_VERSION "\d+\.\d+(\.\d+(\.\d+)?)?"', "!define APP_VERSION `"$ver`""
+          $nsi = $nsi -replace '!define APP_VERSION\s+"\d+\.\d+(\.\d+(\.\d+)?)?"', "!define APP_VERSION `"$ver`""
           Set-Content ClipFinder.nsi $nsi
         shell: pwsh
 

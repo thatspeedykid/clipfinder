@@ -1,9 +1,10 @@
 ; ============================================================
-; ClipFinder v1.3.8.2 — NSIS Installer
+; ClipFinder - NSIS Installer
+; (APP_VERSION is auto-patched from the git tag by build.yml)
 ; ============================================================
 
 !define APP_NAME     "ClipFinder"
-!define APP_VERSION  "1.3.8.2"
+!define APP_VERSION "1.3.9.0"
 !define APP_EXE      "clipfinder.exe"
 !define INSTALL_DIR  "$LOCALAPPDATA\ClipFinder"
 !define PUBLISHER    "MarsScumbags"
@@ -21,7 +22,7 @@ Unicode       True
 !define MUI_ICON   "clipfinder.ico"
 !define MUI_UNICON "clipfinder.ico"
 !define MUI_WELCOMEPAGE_TITLE    "Install ClipFinder ${APP_VERSION}"
-!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nTranscription and music removal are pre-bundled — works immediately after install."
+!define MUI_WELCOMEPAGE_TEXT     "ClipFinder is an AI-powered drama clip extractor.$\n$\nTranscription and music removal are pre-bundled - works immediately after install."
 !define MUI_FINISHPAGE_RUN       "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT  "Launch ClipFinder now"
 !define MUI_FINISHPAGE_LINK      "Visit GitHub for updates"
@@ -50,7 +51,7 @@ Section "ClipFinder" SecMain
     SetOutPath "$INSTDIR\python"
     File /r "ClipFinder_dist\python\*.*"
 
-    ; Pre-built packages — torch, faster-whisper, demucs pre-installed
+    ; Pre-built packages - torch, faster-whisper, demucs pre-installed
     SetOutPath "$LOCALAPPDATA\ClipFinder\pkgs"
     File /r "ClipFinder_dist\pkgs\*.*"
 
@@ -60,7 +61,7 @@ Section "ClipFinder" SecMain
     File /nonfatal "ClipFinder_dist\vision_refs\roobet_casino.png"
     File /nonfatal "ClipFinder_dist\vision_refs\rainbet_casino.png"
 
-    ; Bundled VLC DLLs — enables Editor tab player without separate VLC install
+    ; Bundled VLC DLLs - enables Editor tab player without separate VLC install
     SetOutPath "$INSTDIR\vlc"
     File /nonfatal /r "ClipFinder_dist\vlc\*.*"
 
