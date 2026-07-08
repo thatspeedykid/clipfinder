@@ -1288,10 +1288,15 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
             vad_parameters={
                 'min_silence_duration_ms': 400,
                 'speech_pad_ms': 200,
+                'threshold': 0.6,           # more aggressive silence filtering
             },
             beam_size=5,
             best_of=5,
             temperature=0.0,
+            no_speech_threshold=0.6,        # drop segments whisper thinks are silence
+            compression_ratio_threshold=2.4, # kill looping/repetition (same as -et)
+            log_prob_threshold=-0.7,        # drop low-confidence segments
+            condition_on_previous_text=False, # CRITICAL: prevents "Go. Go. Go." repeat loops
         )
 
         # Consume iterator and report progress

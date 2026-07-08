@@ -428,37 +428,50 @@ if _hf_os.name == 'nt':
     subprocess.check_call = _silent_check_call
     subprocess.Popen      = _SilentPopen
 
-# Pre-patch curl_cffi — install a meta path finder that stubs ANY missing
-# curl_cffi submodule (aio, const, etc.) so broken installs still work
+# Pre-patch curl_cffi — intercept ANY missing submodule or attribute dynamically
 try:
-    import sys as _sys_cffi, types as _types_cffi, importlib.abc as _iabc, importlib.machinery as _imach
-    class _CurlCffiSubmoduleFinder(_iabc.MetaPathFinder):
+    import sys as _sys_cffi, types as _types_cffi, importlib.abc as _iabc_cffi
+
+    class _CurlDummy:
+        def __init__(self, *a, **kw): pass
+        def __call__(self, *a, **kw): return self
+        def __getattr__(self, item): return _CurlDummy()
+        def __int__(self): return 0
+        def __str__(self): return ''
+        def __bool__(self): return False
+        def __iter__(self): return iter([])
+
+    def _make_cffi_stub(name):
+        _stub = _types_cffi.ModuleType(name)
+        _stub.__getattr__ = lambda n, D=_CurlDummy: D
+        _sys_cffi.modules[name] = _stub
+        return _stub
+
+    class _CurlCffiFinder(_iabc_cffi.MetaPathFinder):
         def find_spec(self, fullname, path, target=None):
-            if fullname.startswith('curl_cffi.') and fullname not in _sys_cffi.modules:
-                try:
-                    # Try real import first
-                    return None
-                except Exception:
-                    pass
-            return None
-        def find_module(self, fullname, path=None):
-            if fullname.startswith('curl_cffi.'):
-                return self
-            return None
-        def load_module(self, fullname):
+            if not fullname.startswith('curl_cffi.'): return None
+            try:
+                import importlib.util as _ilu
+                if _ilu.find_spec(fullname): return None
+            except Exception: pass
             if fullname not in _sys_cffi.modules:
-                _stub = _types_cffi.ModuleType(fullname)
-                # Add common attributes that curl_cffi submodules export
-                class _Stub: pass
-                for _attr in ('AsyncCurl', 'Curl', 'CurlInfo', 'CurlOpt',
-                              'CurlHttpVersion', 'CurlWsFlag', 'CURL_HTTP_VERSION_2'):
-                    setattr(_stub, _attr, _Stub)
-                _sys_cffi.modules[fullname] = _stub
-            return _sys_cffi.modules[fullname]
-    # Only add if not already there
-    if not any(isinstance(f, _CurlCffiSubmoduleFinder) for f in _sys_cffi.meta_path):
-        _sys_cffi.meta_path.append(_CurlCffiSubmoduleFinder())
-except Exception: pass
+                _make_cffi_stub(fullname)
+            import importlib.machinery as _imach_cffi
+            return _imach_cffi.ModuleSpec(fullname, None)
+        def create_module(self, spec):
+            return _sys_cffi.modules.get(spec.name) or _make_cffi_stub(spec.name)
+        def exec_module(self, module): pass
+
+    if not any(type(f).__name__ == '_CurlCffiFinder' for f in _sys_cffi.meta_path):
+        _sys_cffi.meta_path.insert(0, _CurlCffiFinder())
+
+    # Patch any already-loaded curl_cffi submodules missing attributes
+    for _k, _m in list(_sys_cffi.modules.items()):
+        if _k.startswith('curl_cffi.') and not hasattr(_m, '__getattr__'):
+            try: _m.__getattr__ = lambda n: _CurlDummy
+            except Exception: pass
+except Exception:
+    pass
 
 def auto_install_gpu_whisper():
     """Detect GPU and install the right acceleration package for faster-whisper.
@@ -1832,9 +1845,12 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                        '-bo', '5',
                        '-bs', '5',
                        '-l', 'auto',
-                       # ── Hallucination suppression (ported from v1.3.8.5) ──
-                       '-lpt', '-0.7',   # logprob threshold — drop low-confidence segments
-                       '--no-fallback',  # skip temperature fallback that causes hallucinations
+                       # ── Hallucination suppression ──────────────────────────
+                       '-et', '2.4',    # entropy threshold — kills looping/repetition
+                       '-lpt', '-0.7',  # logprob threshold — drops low-confidence segments
+                       '-wt', '0.01',   # word threshold — avoids near-silence transcription
+                       '--no-fallback', # skip temperature fallback that causes hallucinations
+                       '-vth', '0.6',   # VAD threshold — more aggressive silence detection
                 ]
                 if initial_prompt:
                     clean_prompt = initial_prompt[:200].replace('"', "'").strip()
@@ -2175,13 +2191,14 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
             vad_parameters={
                 'min_silence_duration_ms': 400,
                 'speech_pad_ms': 200,
+                'threshold': 0.6,           # more aggressive silence filtering
             },
             beam_size=5,
             best_of=5,
             temperature=0.0,
-            # ── Hallucination suppression (ported from v1.3.8.5) ──
-            no_speech_threshold=0.6,          # drop segments whisper thinks are silence
-            compression_ratio_threshold=2.4,  # kill looping/repetition
+            no_speech_threshold=0.6,        # drop segments whisper thinks are silence
+            compression_ratio_threshold=2.4, # kill looping/repetition (same as -et)
+            log_prob_threshold=-0.7,        # drop low-confidence segments
             condition_on_previous_text=False, # CRITICAL: prevents "Go. Go. Go." repeat loops
         )
 
@@ -2498,36 +2515,26 @@ class App(tk.Tk):
                 _latest_t  = _ver_tuple(_latest)
                 _current_t = _ver_tuple(APP_VERSION)
                 if _latest and _latest_t > _current_t:
-                    def _show_update():
-                        # Floating update banner — always visible, over everything
-                        _uw = tk.Toplevel(self)
-                        _uw.overrideredirect(True)
-                        _uw.attributes('-topmost', True)
-                        _uw.configure(bg='#1e3a1e')
-                        _bar_h = 36
-                        def _pos_update(*_):
-                            try:
-                                x = self.winfo_x()
-                                y = self.winfo_y()
-                                w = self.winfo_width()
-                                wh = self.winfo_height()
-                                _uw.geometry(f'{w}x{_bar_h}+{x}+{y+wh-_bar_h-30}')
-                            except: pass
+                    def _show_update(_v=_latest, _d=_data):
+                        # Inline update bar — sits inside the app, no floating window
+                        _uw = tk.Frame(self, bg='#1e3a1e', height=32)
+                        _uw.pack(side='bottom', fill='x')
+                        _uw.pack_propagate(False)
                         tk.Label(_uw,
-                                text=f'⬆  ClipFinder v{_latest} available  —  you have v{APP_VERSION}',
+                                text=f'⬆  ClipFinder v{_v} available  —  you have v{APP_VERSION}',
                                 font=('Segoe UI',9,'bold'), fg='#00ff88', bg='#1e3a1e'
                                 ).pack(side='left', padx=14)
-                        def _do_auto_update(_v=_latest, _d=_data):
+                        def _do_auto_update():
                             _uw.destroy()
                             self._apply_auto_update(_v, _d)
                         tk.Button(_uw, text='⬇ Download Now', font=('Segoe UI',8,'bold'),
                                  bg=ACCENT, fg='#000', relief='flat', bd=0,
-                                 cursor='hand2', padx=10, pady=6,
+                                 cursor='hand2', padx=10, pady=4,
                                  command=_do_auto_update
                                  ).pack(side='left', padx=6)
                         tk.Button(_uw, text='Open in Browser', font=('Segoe UI',8),
                                  bg='#1e3a1e', fg='#00ff88', relief='flat', bd=0,
-                                 cursor='hand2', padx=8, pady=6,
+                                 cursor='hand2', padx=8, pady=4,
                                  command=lambda: __import__('webbrowser').open(
                                      'https://github.com/thatspeedykid/clipfinder/releases/latest')
                                  ).pack(side='left', padx=2)
@@ -2535,8 +2542,6 @@ class App(tk.Tk):
                                  fg='#00ff88', bg='#1e3a1e', relief='flat', bd=0,
                                  cursor='hand2', padx=12,
                                  command=_uw.destroy).pack(side='right', padx=8)
-                        _pos_update()
-                        self.bind('<Configure>', _pos_update)
                     self.after(2000, _show_update)
             except Exception:
                 pass  # Silent fail — no internet or API down
@@ -8421,6 +8426,7 @@ Return ONLY the JSON array, no other text."""
         base = Path(vid).stem
         ff = find_ffmpeg()
         ok = 0
+        Path(out).mkdir(parents=True, exist_ok=True)
         def _to_sec(t):
             try:
                 p = t.split(':')
@@ -8486,7 +8492,7 @@ Return ONLY the JSON array, no other text."""
                 _ok = _r.returncode == 0 and _out_size > 10240
                 if not _ok:
                     if _r.returncode != 0:
-                        self.log(f'[Export] {"9:16" if vertical else "16:9"} failed: {_err[-120:]}', RED)
+                        self.log(f'[Export] {"9:16" if vertical else "16:9"} failed → {out_path}\n{_err[-120:]}', RED)
                     else:
                         self.log(f'[Export] {"9:16" if vertical else "16:9"} produced empty file ({_out_size}B) — retrying with libx264', YELLOW)
                     if vertical:
@@ -9610,7 +9616,6 @@ CRITICAL: Post MUST reflect the angle above. Do NOT invent topics not in transcr
                 'x':         (f"Complete X/Twitter post under 280 chars. Handle in sentence. 1 hashtag. End with question. NEVER cut off.", f"{_tc}\nX: {_h_x or _who}\n\nWrite complete post:\n[{_h_x or _who} + statement]\n[quote from transcript]\n[question?]\n#{(_name1 or 'clips').lower()}"),
                 'tiktok':    (f"Complete TikTok caption. Line 1=SEO phrase. No hooks. CTA. 3-4 hashtags. NEVER cut off.", f"{_tc}\nTT: {_h_tt or _who}\n\nWrite complete caption:\n{_name1.lower() or 'streamer'} [topic from transcript] explained\n[what happened]\ndo you agree? drop it in the comments 👇\n#{(_name1 or 'clips').lower()} #[topic] #[niche]"),
                 'instagram': (f"Complete Instagram caption. Line 1: [Role] @handle [what happened] [emoji]. NO timestamps. DM-bait. Save-bait. 3-5 hashtags. NEVER cut off.", f"{_tc}\nIG: {_h_ig if _h_ig else '(no handle — use name without @)'}\n\nLine 1: [Role] {_h_ig if _h_ig else _who} [what happened] [emoji] — use @ ONLY if handle given\n\n[2-3 clean sentences]\n\nwhat do you think — is he right? 👇\nsave this for when the conversation comes up 📌\n#{(_name1 or 'clips').lower()} #[topic] #drama #clips #[5th]"),
-                'yt_shorts': (f"YouTube Shorts title under 60 chars + 3 hashtags only. NEVER cut off.", f"{_tc}\n\nTITLE: [punchy, under 60 chars]\n\n#[person] #[topic] #[niche]"),
                 'youtube':   (f"Complete YouTube title + description + 10 tags. Title keyword-first under 60 chars. NEVER cut off.", f"{_tc}\nYT: {_h_yt or _who}\n\nTITLE: [keyword-first under 60 chars]\n\nDESCRIPTION:\n[Sentence 1: who + what happened]\n[Sentence 2: why it matters]\nMore clips → @MarsScumbags\n\nTAGS: {_name1 or 'streaming'}, [topic], drama, streaming, clips, MarsScumbags, [4 more]"),
             }
             if pk not in _prompts_map: return ''
@@ -10559,46 +10564,76 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             if ffmpeg_loc:
                 ydl_opts['ffmpeg_location'] = ffmpeg_loc
 
-            # Kick.com — curl_cffi Chrome impersonation to bypass Cloudflare
+            # Kick.com — direct API with session token + requests fallback
             if 'kick.com' in url.lower():
                 video_url = None
                 clip_match = _re.search(r'clips/(clip_[A-Za-z0-9]+)', url)
                 vod_match  = _re.search(r'/videos/([a-f0-9-]{36})', url)
                 try:
-                    from curl_cffi import requests as _cffi
-                    _hdrs = {'Referer': 'https://kick.com/', 'Accept': 'application/json',
-                             'Accept-Language': 'en-US,en;q=0.9'}
+                    # Use requests (always available) with browser headers
+                    import requests as _kick_req
+                    class _cffi:
+                        @staticmethod
+                        def get(url, headers=None, timeout=15, **kw):
+                            return _kick_req.get(url, headers=headers, timeout=timeout)
+                    _hdrs = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                        'Referer': 'https://kick.com/',
+                        'Accept': 'application/json',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Origin': 'https://kick.com',
+                    }
+                    # Add session token if available
+                    _ck_early = self.v_cookies.get().strip() if hasattr(self, 'v_cookies') else ''
+                    _kw_early = {'headers': _hdrs, 'timeout': 15}
+                    if _ck_early and Path(_ck_early).exists():
+                        try:
+                            import http.cookiejar as _cj_e, urllib.parse as _up_e
+                            _jar_e = _cj_e.MozillaCookieJar(_ck_early)
+                            _jar_e.load(ignore_discard=True, ignore_expires=True)
+                            for _ck_e in _jar_e:
+                                if _ck_e.name == 'session_token' and 'kick.com' in _ck_e.domain:
+                                    _hdrs['Authorization'] = f'Bearer {_up_e.unquote(_ck_e.value)}'
+                                    break
+                        except Exception: pass
                     _kick_title    = None
                     _kick_streamer = None
                     if clip_match:
                         clip_id = clip_match.group(1)
                         self._dl_log_write('🔧  Kick clip — Chrome impersonation...', FG2)
-                        _resp = _cffi.get(f'https://kick.com/api/v2/clips/{clip_id}',
-                                          impersonate='chrome120', headers=_hdrs, timeout=15)
-                        if _resp.status_code == 200:
-                            cd = _resp.json()
-                            video_url = (cd.get('clip_url') or cd.get('video_url') or
-                                        (cd.get('clip') or {}).get('video_url'))
-                            _kick_streamer = (cd.get('channel', {}).get('slug') or
-                                             cd.get('broadcaster', {}).get('username') or
-                                             cd.get('streamer', {}).get('username'))
-                            _kick_title = (cd.get('title') or cd.get('clip_title') or
-                                          (cd.get('clip') or {}).get('title'))
+                        # Try both endpoints
+                        for _ep_clip in [f'https://kick.com/api/v2/clips/{clip_id}/play',
+                                         f'https://kick.com/api/v2/clips/{clip_id}',
+                                         f'https://kick.com/api/v1/clips/{clip_id}']:
+                            try:
+                                _resp = _cffi.get(_ep_clip, **_kw_early)
+                                if _resp.status_code == 200:
+                                    cd = _resp.json()
+                                    video_url = (cd.get('clip_url') or
+                                                cd.get('video_url') or
+                                                (cd.get('clip') or {}).get('clip_url') or
+                                                (cd.get('clip') or {}).get('video_url'))
+                                    _kick_streamer = (cd.get('channel', {}).get('slug') or
+                                                     cd.get('broadcaster', {}).get('username'))
+                                    _kick_title = cd.get('title') or cd.get('clip_title')
+                                    if video_url: break
+                            except Exception: continue
                     elif vod_match:
                         vod_id = vod_match.group(1)
                         self._dl_log_write('🔧  Kick VOD — Chrome impersonation...', FG2)
                         for ep in [f'v1/video/{vod_id}', f'v2/videos/{vod_id}']:
-                            _resp = _cffi.get(f'https://kick.com/api/{ep}',
-                                              impersonate='chrome120', headers=_hdrs, timeout=15)
-                            if _resp.status_code == 200:
-                                vd = _resp.json()
-                                video_url = (vd.get('source') or vd.get('playback_url') or
-                                            vd.get('hls_url') or vd.get('video_url') or
-                                            (vd.get('livestream') or {}).get('source'))
-                                _kick_streamer = (vd.get('channel', {}).get('slug') or
-                                                 vd.get('user', {}).get('username'))
-                                _kick_title = vd.get('session_title') or vd.get('title')
-                                if video_url: break
+                            try:
+                                _resp = _cffi.get(f'https://kick.com/api/{ep}', **_kw_early)
+                                if _resp.status_code == 200:
+                                    vd = _resp.json()
+                                    video_url = (vd.get('source') or vd.get('playback_url') or
+                                                vd.get('hls_url') or vd.get('video_url') or
+                                                (vd.get('livestream') or {}).get('source'))
+                                    _kick_streamer = (vd.get('channel', {}).get('slug') or
+                                                     vd.get('user', {}).get('username'))
+                                    _kick_title = vd.get('session_title') or vd.get('title')
+                                    if video_url: break
+                            except Exception: continue
                 except Exception as ke:
                     self._dl_log_write(f'⚠️  curl_cffi: {ke}', YELLOW)
                 if video_url:
@@ -10737,7 +10772,110 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     (['web'],              fmt),
                     (None,                 'best[ext=mp4]/best'),
                 ]
-            if not (is_youtube and quality != 'audio' and info):
+
+            # Kick-specific: use curl_cffi with Chrome impersonation + session token
+            # yt-dlp's Kick extractor fails with 403 even with cookies because it
+            # doesn't do Cloudflare challenge bypass — curl_cffi does
+            is_kick = 'kick.com' in url.lower()
+            _kick_direct_ok = False
+            if is_kick:
+                _kick_token = None
+                _ck_path = ydl_opts.get('cookiefile', '')
+                if _ck_path and Path(_ck_path).exists():
+                    try:
+                        import http.cookiejar as _cj_kick, urllib.parse as _up_kick
+                        _jar_kick = _cj_kick.MozillaCookieJar(_ck_path)
+                        _jar_kick.load(ignore_discard=True, ignore_expires=True)
+                        for _ck in _jar_kick:
+                            if _ck.name == 'session_token' and 'kick.com' in _ck.domain:
+                                _kick_token = _up_kick.unquote(_ck.value)
+                                break
+                    except Exception as _kt_err:
+                        self._dl_log_write(f'⚠️  Could not read session_token: {_kt_err}', YELLOW)
+
+                # Try direct API download first using requests
+                _kick_direct_ok = False
+                try:
+                    import requests as _cffi_kick_req, re as _re_kick, json as _js_kick
+                    class _cffi_kick:
+                        @staticmethod
+                        def get(url, headers=None, timeout=15, **kw):
+                            return _cffi_kick_req.get(url, headers=headers, timeout=timeout)
+
+                    _hdrs_kick = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                        'Accept': 'application/json',
+                        'Referer': 'https://kick.com/',
+                        'Origin': 'https://kick.com',
+                    }
+                    if _kick_token:
+                        _hdrs_kick['Authorization'] = f'Bearer {_kick_token}'
+                        self._dl_log_write(f'🔑  Kick session_token found', GREEN)
+                    _kw_kick = {'headers': _hdrs_kick, 'timeout': 15}
+
+                    # Detect clip vs VOD
+                    _clip_match = _re_kick.search(r'/clips/(clip_[A-Z0-9]+)', url, _re_kick.I)
+                    _vod_match  = _re_kick.search(r'/videos/([a-f0-9-]{36})', url, _re_kick.I)
+
+                    _stream_url = None
+                    if _clip_match:
+                        _clip_id = _clip_match.group(1)
+                        self._dl_log_write(f'🎬  Fetching Kick clip: {_clip_id}', FG2)
+                        _r = _cffi_kick.get(f'https://kick.com/api/v2/clips/{_clip_id}/play',
+                                            **_kw_kick)
+                        if _r.status_code == 200:
+                            _data = _r.json()
+                            _stream_url = (_data.get('clip', {}).get('clip_url') or
+                                           _data.get('source') or _data.get('url'))
+                    elif _vod_match:
+                        _vod_id = _vod_match.group(1)
+                        self._dl_log_write(f'📼  Fetching Kick VOD: {_vod_id}', FG2)
+                        _r = _cffi_kick.get(f'https://kick.com/api/v1/video/{_vod_id}',
+                                            **_kw_kick)
+                        if _r.status_code == 200:
+                            _data = _r.json()
+                            _stream_url = (_data.get('source') or _data.get('playback_url') or
+                                           _data.get('hls_url'))
+
+                    if _stream_url:
+                        self._dl_log_write(f'✅  Got Kick stream URL — downloading with ffmpeg', GREEN)
+                        # Use ffmpeg to download the stream directly
+                        import subprocess as _sp_kick
+                        _out_name = _re_kick.sub(r'[^\w\-.]', '_', url.split('/')[-1][:60]) + '.mp4'
+                        _dest_folder = _vod_folder if _is_vod_url else _clip_folder
+                        Path(_dest_folder).mkdir(parents=True, exist_ok=True)
+                        _out_path = str(Path(_dest_folder) / _out_name)
+                        _ffmpeg = self.cfg.get('ffmpeg_path', 'ffmpeg')
+                        _ff_cmd = [_ffmpeg, '-y', '-i', _stream_url,
+                                   '-c', 'copy', '-movflags', '+faststart', _out_path]
+                        self._dl_log_write(f'⬇️  Saving to {_out_path}', FG2)
+                        _proc = _sp_kick.Popen(_ff_cmd, stdout=_sp_kick.PIPE, stderr=_sp_kick.PIPE)
+                        _proc.wait()
+                        if _proc.returncode == 0 and Path(_out_path).exists():
+                            self._dl_log_write(f'✅  Saved: {_out_name}', GREEN)
+                            _kick_direct_ok = True
+                        else:
+                            _err_out = _proc.stderr.read().decode(errors='ignore')[-200:]
+                            self._dl_log_write(f'⚠️  ffmpeg failed: {_err_out}', YELLOW)
+                    else:
+                        self._dl_log_write(f'⚠️  Kick API returned no stream URL — falling back to yt-dlp', YELLOW)
+                except Exception as _kick_err:
+                    self._dl_log_write(f'⚠️  Kick direct failed: {str(_kick_err)[:80]} — trying yt-dlp', YELLOW)
+
+                if _kick_direct_ok:
+                    info = {'title': url.split('/')[-1]}  # dummy info to skip yt-dlp loop
+                else:
+                    # yt-dlp fallback with auth headers
+                    if _kick_token:
+                        ydl_opts['http_headers'] = {
+                            'Authorization': f'Bearer {_kick_token}',
+                            'Referer': 'https://kick.com/',
+                        }
+                    client_attempts = [
+                        (None, 'best[ext=mp4]/best'),
+                        (None, 'best'),
+                    ]
+            if not (is_youtube and quality != 'audio' and info) and not (is_kick and _kick_direct_ok):
               for _clients, _fmt in client_attempts:
                 try:
                     _opts = dict(ydl_opts)
@@ -13877,7 +14015,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             ('openai',         'openai',                    'OpenRouter/OpenAI provider'),
             # ── Video / Download ────────────────────────────────────────────
             ('yt-dlp',         'yt-dlp',                   'Video downloader — update for new sites/fixes'),
-            ('curl-cffi',      'curl-cffi',                 'Kick/Cloudflare bypass'),
+            ('curl-cffi',      'curl-cffi==0.7.4',          'Kick/Cloudflare bypass — pinned v0.7.4 (newer versions have broken submodules)'),
             # ── Image / Video Processing ────────────────────────────────────
             ('Pillow',         'Pillow',                    'Image processing'),
             ('opencv-python',  'opencv-python',             'Video frame analysis + face tracking'),
@@ -14096,7 +14234,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 ('faster_whisper','faster-whisper', 'CUDA/CPU transcription fallback'),
                 ('yt_dlp',        'yt-dlp',         'Video downloader'),
                 ('cv2',           'opencv-python',  'Video frame processing'),
-                ('curl_cffi',     'curl-cffi',      'Kick/Cloudflare bypass'),
+                ('curl_cffi',     'curl-cffi==0.7.4', 'Kick/Cloudflare bypass — pinned v0.7.4'),
                 ('soundfile',     'soundfile',       'Audio processing for censor'),
                 ('imagehash',     'imagehash',       'Image deduplication for thumbnails'),
             ]
@@ -15771,7 +15909,8 @@ if __name__ == '__main__':
         _CNW = 0x08000000
         _flag  = USER_DIR / 'pending_update.flag'
         _stamp = USER_DIR / 'install_done.stamp'
-        _ALL = [('setuptools', 'setuptools'), ('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider'), ('vlc', 'python-vlc')]
+        # curl-cffi pinned to 0.7.4 (remote stability fix); python-vlc kept from local work
+        _ALL = [('setuptools', 'setuptools'), ('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi==0.7.4'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider'), ('vlc', 'python-vlc')]
         _force = _flag.exists() or not _stamp.exists()
         if not _force:
             _miss = []
@@ -15812,7 +15951,13 @@ if __name__ == '__main__':
         if 'all' in _req or not _stamp.exists():
             _todo = [p for _, p in _ALL]
         else:
-            _todo = list(_req)
+            # Map pinned packages — never install unpinned versions of these
+            _PINNED = {p.split('==')[0].lower(): p for _, p in _ALL if '==' in p}
+            _todo = []
+            for _req_pkg in _req:
+                _base = _req_pkg.split('==')[0].lower()
+                # Use pinned version if available, otherwise use as-is
+                _todo.append(_PINNED.get(_base, _req_pkg))
             for _m, _p in _ALL:
                 _pip_name = _p.split('==')[0].replace('-','_').lower()
                 _has_distinfo = False
