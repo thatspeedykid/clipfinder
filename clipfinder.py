@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.8.5"
+APP_VERSION = "1.3.9.0"
 
 import subprocess
 import sys
@@ -64,6 +64,20 @@ if getattr(sys, 'frozen', False):
     APP_DIR = _PathBase(sys.executable).parent
 else:
     APP_DIR = _PathBase(__file__).parent
+
+# ── Point python-vlc at bundled VLC DLLs if present ─────────────────────────
+# This lets the Editor tab work without a separate VLC install
+import os as _os_vlc
+_vlc_bundle = APP_DIR / 'vlc'
+if _vlc_bundle.exists() and (_vlc_bundle / 'libvlc.dll').exists():
+    _os_vlc.environ['PYTHON_VLC_LIB_PATH'] = str(_vlc_bundle / 'libvlc.dll')
+    _os_vlc.environ['PYTHON_VLC_MODULE_PATH'] = str(_vlc_bundle / 'plugins')
+    # Also add to DLL search path
+    try:
+        import ctypes as _ct_vlc
+        _ct_vlc.windll.kernel32.AddDllDirectory(str(_vlc_bundle))
+    except Exception:
+        pass
 
 # ── Fix Tcl/Tk paths for embedded Python ─────────────────────────────────────
 # When launched from an embedded python.exe, TCL_LIBRARY and TK_LIBRARY must
@@ -326,11 +340,18 @@ def auto_install():
     _frozen = getattr(sys, 'frozen', False)
     target = REQUIRED_LIGHT if _frozen else REQUIRED
 
+    import importlib.util as _ilu
     missing = []
     for mod, pkg in target.items():
+        # Presence check WITHOUT importing. find_spec() locates a module but does
+        # not execute it, so heavy libs (torch via openai-whisper, cv2, numpy, …)
+        # are never loaded at boot. Using __import__ here made every launch freeze
+        # ~5s while it imported the entire ML stack just to see if it existed.
         try:
-            __import__(mod)
-        except ImportError:
+            if _ilu.find_spec(mod) is None:
+                missing.append(pkg)
+        except (ImportError, ModuleNotFoundError, ValueError):
+            # parent package missing, or name isn't a package → treat as missing
             missing.append(pkg)
 
     if not missing:
@@ -702,8 +723,8 @@ BG4     = '#1E1E22'
 ACCENT  = '#FF6B1A'
 ACCENT2 = '#FFB020'
 FG      = '#F2EFE9'
-FG2     = '#6B6862'
-FG3     = '#9A948E'
+FG2     = '#A6A099'   # secondary text — raised for readable contrast on near-black bg
+FG3     = '#7E7A73'   # tertiary / faint hints (below FG2 in the hierarchy)
 BORDER  = '#28282C'
 GREEN   = '#2ECC71'
 RED     = '#E74C3C'
@@ -720,34 +741,38 @@ PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
         'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-        # NOTE: gemini-2.0-flash DEPRECATED — shuts down June 1 2026
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
     'Groq (Free)': {
         'lib':    'groq',
+        # Verified current on Groq (Jul 2026). llama-3.1-70b-versatile and
+        # llama3-8b-8192 were decommissioned — removed. gpt-oss added as the
+        # future-proof successors (llama-3.x versatile/instant deprecate Aug 16 2026).
         'models': [
-            'llama-3.3-70b-versatile',   # 32k context, smarter
-            'llama-3.1-70b-versatile',   # fallback 70b
-            'llama-3.1-8b-instant',      # 8k context — fast
-            'llama3-8b-8192',            # 8k fallback
+            'llama-3.3-70b-versatile',   # 32k context — smartest working today
+            'openai/gpt-oss-120b',       # future-proof large (post Aug 2026)
+            'llama-3.1-8b-instant',      # fast, low latency
+            'openai/gpt-oss-20b',        # fast future-proof fallback
         ],
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
     },
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
+        # Verified against OpenRouter free catalog (Jul 2026). Removed dead ids:
+        # qwen3.6-plus (never existed), gemma-3-12b (now Gemma 4), mistral-small-3.1
+        # (no free Mistral tier). Bad ids also self-heal via _DEAD_MODELS at runtime.
         'models': [
-            'openrouter/auto',                              # OR's own free router — auto-picks best available
-            'meta-llama/llama-3.3-70b-instruct:free',      # Llama 3.3 70B — top free model
-            'nvidia/nemotron-3-super-120b-a12b:free',       # NVIDIA 120B — large context
-            'google/gemma-3-12b-it:free',                   # Gemma 3 12B
-            'meta-llama/llama-3.1-8b-instruct:free',        # Llama 3.1 8B — fast fallback
-            'mistralai/mistral-small-3.1:free',              # Mistral Small 3.1
-            'qwen/qwen3.6-plus:free',                        # Qwen — last resort
+            'openrouter/auto',                          # OR free router — auto-picks best available
+            'nvidia/nemotron-3-super-120b-a12b:free',   # NVIDIA 120B MoE — 1M context, top free
+            'meta-llama/llama-3.3-70b-instruct:free',   # Llama 3.3 70B — reliable
+            'qwen/qwen3-next-80b-a3b-instruct:free',    # Qwen3-Next 80B
+            'google/gemma-4-31b-it:free',               # Gemma 4 31B
+            'nvidia/nemotron-nano-9b-v2:free',          # fast small fallback
         ],
         'url':    'https://openrouter.ai/keys',
-        'note':   '50+ free models — no credit card needed',
+        'note':   'Free — no credit card needed',
     },
 }
 
@@ -2992,6 +3017,7 @@ class App(tk.Tk):
             ('poststudio',  '🚀', 'Post Studio'),
             ('downloader',  '⬇',  'Downloader'),
             ('thumbs',      '🖼', 'Thumbnails'),
+            ('editor',      '🎬', 'Editor'),
             ('studio',      '🔬', 'Studio'),
             ('censor',      '🔇', 'Censor'),
             ('music',       '🎵', 'Music Removal'),
@@ -3022,6 +3048,7 @@ class App(tk.Tk):
             'poststudio': (self._build_post_studio_tab,),
             'downloader': (self._build_dl_tab,),
             'thumbs':     (self._build_thumb_tab,),
+            'editor':     (self._build_editor_tab,),
             'studio':     (self._build_studio_tab,),
             'censor':     (self._build_censor_tab,),
             'music':      (self._build_music_removal_tab,),
@@ -3289,7 +3316,7 @@ class App(tk.Tk):
                 else:
                     b.config(bg=BG3, fg=ACCENT2, font=('Segoe UI',8))
 
-        for sub_key, sub_lbl in [('ai_clips','✂  AI Clips'), ('auto_edit','⚡  Auto Edit')]:
+        for sub_key, sub_lbl in [('ai_clips','✂  AI Clips'), ('kick','🎮  Kick'), ('auto_edit','⚡  Auto Edit')]:
             sb = tk.Button(sub_bar, text=sub_lbl, font=('Segoe UI',8),
                           relief='flat', bd=0, cursor='hand2',
                           padx=20, pady=6, bg=BG3, fg=FG2,
@@ -3301,6 +3328,11 @@ class App(tk.Tk):
         # AI Clips sub-frame (default)
         ai_clips_frame = tk.Frame(p, bg=BG)
         self._clips_sub_frames['ai_clips'] = ai_clips_frame
+
+        # Kick sub-frame
+        kick_frame = tk.Frame(p, bg=BG)
+        self._clips_sub_frames['kick'] = kick_frame
+        self._build_kick_sub(kick_frame)
 
         # Auto Edit sub-frame
         ae_frame = tk.Frame(p, bg=BG)
@@ -3507,6 +3539,15 @@ class App(tk.Tk):
                                 relief='flat', bd=0, cursor='hand2', padx=16, pady=5,
                                 activebackground=ACCENT2, command=self._start)
         self.go_btn.pack(side='right', padx=(0,4))
+
+        # Heatmap transcribe button — only visible when heatmap mode is ON
+        self._hm_transcribe_btn = tk.Button(
+            r4, text='🌡 Transcribe', font=('Segoe UI', 9),
+            bg=BG3, fg=ACCENT, relief='flat', bd=0, cursor='hand2', padx=10, pady=5,
+            activebackground=BG2, activeforeground=ACCENT,
+            command=self._transcribe_only)
+        # Hidden by default — _toggle_heatmap_mode shows/hides it
+
         self.cancel_btn = tk.Button(r4, text='✕ Cancel',
                                 font=('Segoe UI', 9), bg=BG3, fg=FG2,
                                 relief='flat', bd=0, cursor='hand2', padx=10, pady=5,
@@ -3558,6 +3599,149 @@ class App(tk.Tk):
                            selectcolor=BG3, activebackground=BG2, relief='flat',
                            cursor='hand2').pack(side='left', padx=(4,0))
         self._toggle_mode_frames()
+
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+
+        # ── Drama Heatmap ──────────────────────────────────────────────────────
+        # ── Drama Heatmap — single compact header row, expands only when data exists ──
+        self._heatmap_frame = tk.Frame(p, bg=BG2)
+        self._heatmap_frame.pack(fill='x', padx=8, pady=(2,0))
+
+        # Single header row — all controls inline, nothing expands until data
+        hm_hdr = tk.Frame(self._heatmap_frame, bg=BG2)
+        hm_hdr.pack(fill='x')
+        tk.Label(hm_hdr, text='🌡  DRAMA HEATMAP', font=('Segoe UI', 8, 'bold'),
+                 fg=ACCENT, bg=BG2).pack(side='left')
+
+        self._heatmap_mode_on = tk.BooleanVar(value=False)
+        self._heatmap_toggle_btn = tk.Button(
+            hm_hdr, text='OFF', font=('Segoe UI', 8, 'bold'),
+            bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=6, pady=1,
+            command=self._toggle_heatmap_mode)
+        self._heatmap_toggle_btn.pack(side='left', padx=(6,0))
+
+        # These only appear once heatmap has data
+        self._hm_select_hot_btn = tk.Button(
+            hm_hdr, text='🔴 Hot', font=('Segoe UI', 8),
+            bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=6, pady=1,
+            command=lambda: self._heatmap_select_by_score(threshold=self._hm_threshold.get()))
+        self._hm_clear_btn = tk.Button(
+            hm_hdr, text='✕ Clear', font=('Segoe UI', 8),
+            bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=6, pady=1,
+            command=self._heatmap_clear_selection)
+        # Slider inline — label + compact slider
+        self._hm_threshold = tk.IntVar(value=6)
+        self._hm_slider_lbl = tk.Label(hm_hdr, text='min score:', font=('Segoe UI', 8),
+                                        fg=FG2, bg=BG2)
+        self._hm_slider = tk.Scale(
+            hm_hdr, from_=1, to=10, orient='horizontal',
+            variable=self._hm_threshold, font=('Segoe UI', 7),
+            bg=BG2, fg=FG, troughcolor=BG3, activebackground=ACCENT,
+            highlightthickness=0, bd=0, sliderrelief='flat', width=8, length=80,
+            showvalue=True,
+            command=lambda v: self._heatmap_select_by_score(threshold=int(v)))
+        self._hm_token_lbl = tk.Label(hm_hdr, text='', font=('Segoe UI', 8),
+                                       fg=ACCENT2, bg=BG2)
+        self._hm_token_lbl.pack(side='right')
+
+        # Canvas — hidden until data, compact height
+        _hm_h = 32
+        self._heatmap_canvas = tk.Canvas(
+            self._heatmap_frame, bg=BG3, height=_hm_h,
+            bd=0, highlightthickness=1, highlightbackground=BORDER,
+            cursor='hand2')
+
+        # Hover label — single line, shown only when canvas visible
+        self._hm_hover_lbl = tk.Label(
+            self._heatmap_frame, text='', font=('Segoe UI', 8),
+            fg=FG2, bg=BG2, anchor='w')
+
+        # Internal state
+        self._hm_zones      = []
+        self._hm_built      = False
+        self._hm_total_segs = 0
+
+        def _hm_on_click(event):
+            if not self._hm_zones: return
+            w = self._heatmap_canvas.winfo_width() or 1
+            total_dur = self._hm_zones[-1]['end'] if self._hm_zones else 1
+            t = (event.x / w) * total_dur
+            for z in self._hm_zones:
+                if z['start'] <= t <= z['end']:
+                    z['selected'] = not z['selected']
+                    self._heatmap_redraw()
+                    self._hm_update_token_estimate()
+                    break
+
+        def _hm_get_zone_at(x):
+            if not self._hm_zones: return None
+            w = self._heatmap_canvas.winfo_width() or 1
+            total_dur = self._hm_zones[-1]['end']
+            t = (x / w) * total_dur
+            for z in self._hm_zones:
+                if z['start'] <= t <= z['end']:
+                    return z
+            return None
+
+        def _hm_on_rightclick(event):
+            z = _hm_get_zone_at(event.x)
+            if not z: return
+            vid = self.v_video.get().strip()
+            placeholder = getattr(self, '_video_placeholder', '')
+            has_file = vid and vid != placeholder and Path(vid).exists()
+
+            menu = tk.Menu(self, tearoff=0, bg=BG2, fg=FG, activebackground=ACCENT,
+                           activeforeground='#000', relief='flat', bd=1)
+
+            def _fmt(s):
+                s = int(s)
+                return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+
+            menu.add_command(
+                label=f'▶  Preview  {_fmt(z["start"])} → {_fmt(z["end"])}',
+                command=lambda: self._heatmap_preview_zone(z) if has_file else
+                    messagebox.showwarning('No video', 'Load a local video file to preview zones.\nURL-only sources must be downloaded first.'),
+                state='normal' if has_file else 'disabled')
+            menu.add_separator()
+            menu.add_command(
+                label='✓  Select this zone',
+                command=lambda: [z.update({'selected': True}), self._heatmap_redraw(), self._hm_update_token_estimate()])
+            menu.add_command(
+                label='✕  Deselect this zone',
+                command=lambda: [z.update({'selected': False}), self._heatmap_redraw(), self._hm_update_token_estimate()])
+            menu.add_separator()
+            menu.add_command(label='🔴  Select all hot zones',
+                             command=lambda: self._heatmap_select_by_score(self._hm_threshold.get()))
+            menu.add_command(label='✕  Clear all selections',
+                             command=self._heatmap_clear_selection)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        def _hm_on_motion(event):
+            if not self._hm_zones: return
+            w = self._heatmap_canvas.winfo_width() or 1
+            total_dur = self._hm_zones[-1]['end'] if self._hm_zones else 1
+            t = (event.x / w) * total_dur
+            def _fmt(s):
+                s = int(s)
+                return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+            for z in self._hm_zones:
+                if z['start'] <= t <= z['end']:
+                    sel_txt = '✓ selected' if z['selected'] else 'click to select'
+                    self._hm_hover_lbl.config(
+                        text=f"  {_fmt(z['start'])} → {_fmt(z['end'])}  ·  score {z['score']}/10  ·  {sel_txt}")
+                    break
+
+        def _hm_on_leave(event):
+            self._hm_hover_lbl.config(text='')
+
+        self._heatmap_canvas.bind('<Button-1>',   _hm_on_click)
+        self._heatmap_canvas.bind('<Button-3>',   _hm_on_rightclick)
+        self._heatmap_canvas.bind('<Motion>',      _hm_on_motion)
+        self._heatmap_canvas.bind('<Leave>',       _hm_on_leave)
+        self._heatmap_canvas.bind('<Configure>',   lambda e: self._heatmap_redraw())
 
         tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
 
@@ -3750,6 +3934,295 @@ class App(tk.Tk):
         tk.Label(self.clip_frame, text='\n  Click ▶ FIND CLIPS to analyze your video.\n',
                  font=FONT_MONO_S, fg=FG2, bg=BG3).pack(pady=30)
 
+
+    def _build_kick_sub(self, p):
+        """Kick VOD browser + direct clip streaming sub-tab."""
+        import threading as _th_kick
+
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = tk.Frame(p, bg=BG2); hdr.pack(fill='x', padx=0)
+        tk.Label(hdr, text='🎮  KICK VOD BROWSER', font=('Segoe UI', 10, 'bold'),
+                 fg=ACCENT, bg=BG2).pack(side='left', padx=12, pady=8)
+        tk.Label(hdr, text='Browse VODs · Load into Clip Finder · Direct stream clip',
+                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(side='left')
+
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+
+        # ── Search bar ────────────────────────────────────────────────────────
+        search_row = tk.Frame(p, bg=BG2); search_row.pack(fill='x', padx=12, pady=(8,4))
+        tk.Label(search_row, text='Kick username:', font=FONT_SMALL,
+                 fg=FG2, bg=BG2).pack(side='left')
+        _kick_sf = tk.Frame(search_row, bg=BG3)
+        _kick_sf.pack(side='left', fill='x', expand=True, padx=(6,6))
+        self._kick_slug_var = tk.StringVar()
+        _kick_entry = tk.Entry(_kick_sf, textvariable=self._kick_slug_var,
+                               font=FONT_SMALL, bg=BG3, fg=FG,
+                               insertbackground=ACCENT, relief='flat', bd=4)
+        _kick_entry.pack(side='left', fill='x', expand=True)
+        _kick_entry.insert(0, 'xqc')
+
+        self._kick_browse_btn = tk.Button(
+            search_row, text='🔍  Browse VODs', font=('Segoe UI', 9, 'bold'),
+            bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=12, pady=5,
+            activebackground=ACCENT2, command=self._kick_fetch_vods)
+        self._kick_browse_btn.pack(side='left')
+
+        # ── Direct clip toggle ────────────────────────────────────────────────
+        opt_row = tk.Frame(p, bg=BG2); opt_row.pack(fill='x', padx=12, pady=(0,6))
+        self._kick_direct_clip = tk.BooleanVar(value=True)
+        tk.Checkbutton(opt_row, text='⚡ Direct clip mode — stream zones from Kick CDN (no full download)',
+                       variable=self._kick_direct_clip,
+                       font=('Segoe UI', 8), fg=FG, bg=BG2,
+                       selectcolor=BG3, activebackground=BG2,
+                       relief='flat', cursor='hand2').pack(side='left')
+
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+
+        # ── VOD list ─────────────────────────────────────────────────────────
+        list_outer = tk.Frame(p, bg=BG); list_outer.pack(fill='both', expand=True, padx=0)
+
+        # Scrollable VOD list
+        _kick_cv = tk.Canvas(list_outer, bg=BG, bd=0, highlightthickness=0)
+        _kick_sb = tk.Scrollbar(list_outer, orient='vertical', command=_kick_cv.yview,
+                                bg=BG2, troughcolor=BG3, relief='flat')
+        _kick_cv.configure(yscrollcommand=_kick_sb.set)
+        _kick_sb.pack(side='right', fill='y')
+        _kick_cv.pack(side='left', fill='both', expand=True)
+
+        self._kick_list_frame = tk.Frame(_kick_cv, bg=BG)
+        self._kick_list_win = _kick_cv.create_window((0,0), window=self._kick_list_frame, anchor='nw')
+
+        def _kick_on_frame_configure(e):
+            _kick_cv.configure(scrollregion=_kick_cv.bbox('all'))
+        def _kick_on_canvas_configure(e):
+            _kick_cv.itemconfig(self._kick_list_win, width=e.width)
+        self._kick_list_frame.bind('<Configure>', _kick_on_frame_configure)
+        _kick_cv.bind('<Configure>', _kick_on_canvas_configure)
+
+        # Mousewheel scroll
+        def _kick_scroll(e):
+            _kick_cv.yview_scroll(int(-1*(e.delta/120)), 'units')
+        _kick_cv.bind('<MouseWheel>', _kick_scroll)
+
+        # Status label
+        self._kick_status_lbl = tk.Label(
+            self._kick_list_frame,
+            text='\n  Enter a Kick username and hit Browse VODs\n',
+            font=FONT_SMALL, fg=FG2, bg=BG)
+        self._kick_status_lbl.pack(expand=True, pady=20)
+
+        # ── Bottom bar ────────────────────────────────────────────────────────
+        bot = tk.Frame(p, bg=BG2); bot.pack(fill='x', side='bottom')
+        tk.Frame(bot, bg=BORDER, height=1).pack(fill='x')
+        self._kick_bot_lbl = tk.Label(bot, text='', font=('Segoe UI', 8),
+                                       fg=FG2, bg=BG2, anchor='w')
+        self._kick_bot_lbl.pack(side='left', padx=10, pady=4)
+
+    def _kick_fetch_vods(self):
+        """Fetch VOD list from Kick API for a given username."""
+        import threading as _th_k
+        slug = self._kick_slug_var.get().strip().lower()
+        if not slug: return
+        self._kick_browse_btn.config(state='disabled', text='⏳ Loading...')
+        self._kick_bot_lbl.config(text=f'Fetching VODs for @{slug}...')
+        for w in self._kick_list_frame.winfo_children(): w.destroy()
+        tk.Label(self._kick_list_frame, text='⏳ Loading VODs...',
+                 font=FONT_SMALL, fg=FG2, bg=BG).pack(pady=20)
+
+        cookies = (getattr(self, 'v_cookies', None) and self.v_cookies.get().strip()) or self.cfg.get('cookies_file', '').strip()
+        _cookies_ok = cookies and Path(cookies).exists()
+        self._kick_bot_lbl.config(
+            text=f'🍪 Using cookies: {Path(cookies).name}' if _cookies_ok else '⚠ No cookies set — may fail on Kick')
+
+        def _fetch():
+            try:
+                import json as _js
+                _data = None
+
+                # Try curl_cffi with full browser impersonation first
+                try:
+                    from curl_cffi import requests as _cffi
+                    _hdrs = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                        'Accept': 'application/json, text/plain, */*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Referer': 'https://kick.com/',
+                        'Origin': 'https://kick.com',
+                        'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124"',
+                        'sec-ch-ua-mobile': '?0',
+                        'sec-ch-ua-platform': '"Windows"',
+                        'sec-fetch-dest': 'empty',
+                        'sec-fetch-mode': 'cors',
+                        'sec-fetch-site': 'same-origin',
+                    }
+                    _kw = {'headers': _hdrs, 'impersonate': 'chrome124', 'timeout': 15}
+                    if cookies and Path(cookies).exists():
+                        _kw['cookies'] = cookies
+                    # First get channel info to confirm slug exists
+                    _ch_url = f'https://kick.com/api/v2/channels/{slug}'
+                    _ch = _cffi.get(_ch_url, **_kw)
+                    if _ch.status_code == 200:
+                        _vod_url = f'https://kick.com/api/v2/channels/{slug}/videos?page=1&limit=20'
+                        _resp = _cffi.get(_vod_url, **_kw)
+                        if _resp.status_code == 200:
+                            _data = _resp.json()
+                except Exception as _cffi_err:
+                    print(f'[Kick] curl_cffi failed: {_cffi_err}')
+
+                # Fallback: parse cookies.txt and use requests with full session
+                if _data is None:
+                    try:
+                        import urllib.request as _ur, json as _js, ssl as _ssl, http.cookiejar as _cj
+                        _url = f'https://kick.com/api/v2/channels/{slug}/videos?page=1&limit=20'
+                        _hdrs2 = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                            'Accept': 'application/json, text/plain, */*',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Referer': 'https://kick.com/',
+                            'Origin': 'https://kick.com',
+                        }
+                        _req2 = _ur.Request(_url, headers=_hdrs2)
+                        # Load cookies if available
+                        if cookies and Path(cookies).exists():
+                            _jar = _cj.MozillaCookieJar(cookies)
+                            try:
+                                _jar.load(ignore_discard=True, ignore_expires=True)
+                                _opener = _ur.build_opener(_ur.HTTPCookieProcessor(_jar))
+                                with _opener.open(_req2, timeout=15) as _r:
+                                    _data = _js.loads(_r.read().decode())
+                            except Exception as _cj_err:
+                                print(f'[Kick] Cookie jar failed: {_cj_err}')
+                        if _data is None:
+                            _ctx2 = _ssl.create_default_context()
+                            with _ur.urlopen(_req2, timeout=15, context=_ctx2) as _r:
+                                _data = _js.loads(_r.read().decode())
+                    except Exception as _fb_err:
+                        raise Exception(
+                            f'Kick API blocked — try adding cookies.txt in Settings → Downloader.\n'
+                            f'Export cookies from kick.com using a browser extension like "Get cookies.txt LOCALLY".\n'
+                            f'(Error: {str(_fb_err)[:80]})'
+                        )
+
+                vods = _data if isinstance(_data, list) else _data.get('data', _data.get('videos', []))
+                self.after(0, lambda v=vods: self._kick_render_vods(v, slug))
+            except Exception as e:
+                self.after(0, lambda err=e: self._kick_render_error(str(err)))
+
+        _th_k.Thread(target=_fetch, daemon=True).start()
+
+    def _kick_render_error(self, err):
+        """Show error in VOD list."""
+        self._kick_browse_btn.config(state='normal', text='🔍  Browse VODs')
+        for w in self._kick_list_frame.winfo_children(): w.destroy()
+        msg = str(err)
+        tk.Label(self._kick_list_frame,
+                 text=f'⚠  Could not load VODs',
+                 font=('Segoe UI', 10, 'bold'), fg=RED, bg=BG).pack(pady=(20,4))
+        tk.Label(self._kick_list_frame,
+                 text=msg, font=FONT_SMALL, fg=RED, bg=BG, wraplength=600,
+                 justify='center').pack()
+        tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=40, pady=12)
+        tk.Label(self._kick_list_frame,
+                 text='💡  Fix: Add a Kick cookies.txt in Settings → Downloader',
+                 font=('Segoe UI', 9, 'bold'), fg=ACCENT, bg=BG).pack()
+        tk.Label(self._kick_list_frame,
+                 text='1. Install "Get cookies.txt LOCALLY" browser extension\n'
+                      '2. Go to kick.com and log in\n'
+                      '3. Export cookies.txt\n'
+                      '4. Add the file path in ClipFinder Settings → Downloader → Cookies',
+                 font=FONT_SMALL, fg=FG2, bg=BG, justify='left').pack(pady=(4,0))
+        self._kick_bot_lbl.config(text='Error loading VODs')
+
+    def _kick_render_vods(self, vods, slug):
+        """Render VOD cards in the list frame."""
+        self._kick_browse_btn.config(state='normal', text='🔍  Browse VODs')
+        for w in self._kick_list_frame.winfo_children(): w.destroy()
+
+        if not vods:
+            tk.Label(self._kick_list_frame,
+                     text=f'\n  No VODs found for @{slug}\n  (Channel may be VOD-only members or private)\n',
+                     font=FONT_SMALL, fg=FG2, bg=BG).pack(pady=20)
+            self._kick_bot_lbl.config(text='No VODs found')
+            return
+
+        self._kick_bot_lbl.config(text=f'{len(vods)} VODs found for @{slug}')
+
+        for vod in vods:
+            # Parse fields — Kick API varies slightly
+            vid_id    = vod.get('id', '')
+            title     = vod.get('session_title') or vod.get('title') or 'Untitled VOD'
+            duration  = vod.get('duration', 0)  # seconds
+            created   = (vod.get('created_at') or vod.get('start_time') or '')[:10]
+            views     = vod.get('views', 0)
+            thumb_url = vod.get('thumbnail', {})
+            if isinstance(thumb_url, dict):
+                thumb_url = thumb_url.get('src', '')
+            vod_url   = vod.get('video_url') or f'https://kick.com/video/{vid_id}'
+            # Duration string
+            dur_h, dur_rem = divmod(int(duration), 3600)
+            dur_m, dur_s   = divmod(dur_rem, 60)
+            dur_str = f'{dur_h}h {dur_m}m' if dur_h else f'{dur_m}m {dur_s}s'
+
+            # Card
+            card = tk.Frame(self._kick_list_frame, bg=BG2, cursor='hand2')
+            card.pack(fill='x', padx=8, pady=(4,0))
+
+            # Left info
+            info = tk.Frame(card, bg=BG2); info.pack(side='left', fill='both', expand=True, padx=10, pady=8)
+            tk.Label(info, text=title, font=('Segoe UI', 9, 'bold'),
+                     fg=FG, bg=BG2, anchor='w', wraplength=500).pack(anchor='w')
+            meta_txt = f'🕒 {dur_str}   📅 {created}   👁 {views:,} views' if views else f'🕒 {dur_str}   📅 {created}'
+            tk.Label(info, text=meta_txt, font=('Segoe UI', 8),
+                     fg=FG2, bg=BG2, anchor='w').pack(anchor='w', pady=(2,0))
+
+            # Right buttons
+            btn_col = tk.Frame(card, bg=BG2); btn_col.pack(side='right', padx=8, pady=8)
+
+            def _load_vod(url=vod_url, t=title):
+                """Load VOD URL into Clip Finder video field."""
+                self.v_video.set(url)
+                self._video_entry.config(fg=FG)
+                # Switch to AI Clips sub-tab
+                for k, f in self._clips_sub_frames.items():
+                    f.pack_forget()
+                self._clips_sub_frames['ai_clips'].pack(fill='both', expand=True)
+                for k, b in self._clips_sub_btns.items():
+                    b.config(bg=ACCENT if k=='ai_clips' else BG3,
+                             fg='#000' if k=='ai_clips' else FG2,
+                             font=('Segoe UI',8,'bold') if k=='ai_clips' else ('Segoe UI',8))
+                self.log(f'🎮 Loaded Kick VOD: {t}', ACCENT)
+                self._kick_bot_lbl.config(text=f'Loaded: {t}')
+
+            def _direct_clip_vod(url=vod_url, t=title, dur=duration):
+                """Load VOD and enable direct clip mode."""
+                _load_vod(url, t)
+                self._kick_direct_clip.set(True)
+                self.log(f'🎮 Direct clip mode: will stream zones from Kick CDN', ACCENT2)
+
+            tk.Button(btn_col, text='▶ Load', font=FONT_SMALL,
+                      bg=ACCENT, fg='#000', relief='flat', bd=0,
+                      cursor='hand2', padx=10, pady=4,
+                      command=_load_vod).pack(fill='x', pady=(0,3))
+            tk.Button(btn_col, text='🎬 Edit', font=FONT_SMALL,
+                      bg=BG3, fg=ACCENT, relief='flat', bd=0,
+                      cursor='hand2', padx=10, pady=4,
+                      command=lambda u=vod_url, t=title: self._ed_load_from_kick(u, t)).pack(fill='x', pady=(0,3))
+            tk.Button(btn_col, text='⚡ Direct Clip', font=FONT_SMALL,
+                      bg=BG3, fg=FG2, relief='flat', bd=0,
+                      cursor='hand2', padx=10, pady=4,
+                      command=_direct_clip_vod).pack(fill='x')
+
+            # Hover highlight
+            def _on_enter(e, c=card): c.config(bg=BG3)
+            def _on_leave(e, c=card): c.config(bg=BG2)
+            card.bind('<Enter>', _on_enter)
+            card.bind('<Leave>', _on_leave)
+            for child in card.winfo_children():
+                child.bind('<Enter>', _on_enter)
+                child.bind('<Leave>', _on_leave)
+
+            tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=8)
 
     def _build_auto_edit_sub(self, p):
         """Auto Edit sub-tab — removes silence from video using ffmpeg."""
@@ -4391,7 +4864,10 @@ class App(tk.Tk):
         # Show/hide note labels based on whether they have content
         def _update_notes(note_txt, url_txt):
             try:
-                _update_notes(note_txt, url_txt)
+                # Set the label text (this used to recurse into itself — a no-op
+                # swallowed by the except, so provider notes/URL never showed)
+                self.lbl_note.config(text=note_txt)
+                self.lbl_url.config(text=url_txt)
                 # Pack inline in r3 only if there's text
                 if note_txt:
                     self.lbl_note.pack(side='left', padx=(8,0))
@@ -4750,8 +5226,13 @@ class App(tk.Tk):
 
         def _run_update():
             try:
-                # Find clipfinder.py asset in release
+                # Resolve the release tag up-front — it's used in status text and in
+                # every raw-URL fallback below. Previously it was only assigned inside
+                # the `if not py_url` branch, so updating to a release that DID attach
+                # clipfinder.py as an asset crashed with UnboundLocalError on `tag`.
                 assets = release_data.get('assets', [])
+                tag = release_data.get('tag_name', f'v{new_version}')
+                # Find clipfinder.py asset in release
                 py_url = None
                 for a in assets:
                     if a.get('name','').lower() == 'clipfinder.py':
@@ -4759,7 +5240,6 @@ class App(tk.Tk):
                         break
                 # Fallback: raw from main branch tag
                 if not py_url:
-                    tag = release_data.get('tag_name', f'v{new_version}')
                     py_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{tag}/clipfinder.py'
 
                 _pw.after(0, lambda: _status_var.set(f'Downloading clipfinder.py from {tag}...'))
@@ -4827,10 +5307,13 @@ class App(tk.Tk):
                 # Replace current file
                 _pw.after(0, lambda: _status_var.set('Installing update...'))
                 _current = Path(_sys3.argv[0])
-                # Handle both .py and .exe launcher scenarios
+                # Handle both .py and .exe launcher scenarios. Import shutil once,
+                # before the branch — the else path previously referenced _sh3
+                # without importing it (NameError for users whose clipfinder.py is
+                # not at USER_DIR).
+                import shutil as _sh3
                 _py_target = USER_DIR / 'clipfinder.py'
                 if _py_target.exists():
-                    import shutil as _sh3
                     _sh3.copy2(_tmp, _py_target)
                 else:
                     _sh3.copy2(_tmp, _current)
@@ -4985,6 +5468,212 @@ class App(tk.Tk):
 
     def _toggle_interview_frame(self):
         self._toggle_mode_frames()
+
+    # ── Drama Heatmap methods ─────────────────────────────────────────────────
+
+    def _toggle_heatmap_mode(self):
+        """Toggle heatmap mode on/off."""
+        on = not self._heatmap_mode_on.get()
+        self._heatmap_mode_on.set(on)
+        if on:
+            self._heatmap_toggle_btn.config(text='ON', bg=ACCENT, fg='#000')
+            # Show transcribe button next to Find Clips
+            self._hm_transcribe_btn.pack(side='right', padx=(0,4), before=self.go_btn)
+            # If transcript already exists, build and show everything
+            if hasattr(self, '_whisper_segments') and self._whisper_segments:
+                self._heatmap_build(self._whisper_segments)
+            else:
+                self._hm_token_lbl.config(text='transcribe first', fg=FG2)
+        else:
+            self._heatmap_toggle_btn.config(text='OFF', bg=BG3, fg=FG2)
+            # Hide transcribe button
+            self._hm_transcribe_btn.pack_forget()
+            # Hide all expanded elements
+            self._heatmap_canvas.pack_forget()
+            self._hm_hover_lbl.pack_forget()
+            self._hm_select_hot_btn.pack_forget()
+            self._hm_clear_btn.pack_forget()
+            self._hm_slider_lbl.pack_forget()
+            self._hm_slider.pack_forget()
+            self._hm_token_lbl.config(text='')
+            for z in self._hm_zones:
+                z['selected'] = False
+
+    def _heatmap_build(self, segments):
+        """Score each ~60s chunk of the transcript and render the heatmap."""
+        if not segments: return
+
+        # Drama keywords weighted heavily
+        _DRAMA_KEYWORDS = {
+            'high': ['banned', 'exposed', 'leaked', 'cheating', 'drama', 'fight', 'arrested',
+                     'sued', 'fired', 'lied', 'scam', 'racist', 'abuse', 'assault', 'criminal',
+                     'grooming', 'underage', 'controversy', 'cancel', 'beef', 'diss', 'called out'],
+            'med':  ['angry', 'mad', 'upset', 'crying', 'screaming', 'yelling', 'threatening',
+                     'insane', 'crazy', 'wtf', 'hate', 'disgusting', 'pathetic', 'trash', 'clown',
+                     'lying', 'fake', 'stupid', 'idiot', 'broke', 'homeless', 'embarrassing'],
+            'low':  ['!', 'what', 'no way', 'bro', 'literally', 'actually', 'seriously', 'wait']
+        }
+
+        total_dur = segments[-1]['end'] if segments else 1
+        chunk_size = 60  # seconds per zone
+
+        zones = []
+        t = 0.0
+        while t < total_dur:
+            t_end = min(t + chunk_size, total_dur)
+            # Gather text for this window
+            chunk_text = ' '.join(
+                s['text'].lower() for s in segments
+                if s['start'] < t_end and s['end'] > t
+            )
+            # Score it
+            score = 1
+            for kw in _DRAMA_KEYWORDS['high']:
+                if kw in chunk_text: score += 2.5
+            for kw in _DRAMA_KEYWORDS['med']:
+                if kw in chunk_text: score += 1.2
+            # Caps/exclamation ratio as excitement signal
+            exclaim = chunk_text.count('!') + chunk_text.count('?!')
+            score += min(exclaim * 0.4, 2.0)
+            # Clamp to 1-10
+            score = max(1, min(10, round(score)))
+            zones.append({'start': t, 'end': t_end, 'score': score,
+                          'selected': False, 'rect_id': None, 'score_id': None})
+            t = t_end
+
+        self._hm_zones = zones
+        self._hm_built = True
+        self._hm_total_segs = len(segments)
+
+        # Auto-select hot zones by default
+        self._heatmap_select_by_score(threshold=self._hm_threshold.get())
+
+        # Now show all controls inline in header
+        self._hm_select_hot_btn.pack(side='left', padx=(6,0))
+        self._hm_clear_btn.pack(side='left', padx=(3,0))
+        self._hm_slider_lbl.pack(side='left', padx=(8,2))
+        self._hm_slider.pack(side='left')
+
+        # Show canvas and hover label below header
+        self._heatmap_canvas.pack(fill='x', pady=(2,0))
+        self._hm_hover_lbl.pack(fill='x')
+        self._heatmap_redraw()
+        self._hm_update_token_estimate()
+
+    def _heatmap_redraw(self):
+        """Redraw all zone rectangles on the canvas."""
+        if not self._hm_zones: return
+        cv = self._heatmap_canvas
+        cv.delete('all')
+        w = cv.winfo_width() or 400
+        h = 38
+        total_dur = self._hm_zones[-1]['end']
+        if total_dur <= 0: return
+
+        for z in self._hm_zones:
+            x1 = int((z['start'] / total_dur) * w)
+            x2 = int((z['end']   / total_dur) * w)
+            s  = z['score']  # 1-10
+
+            # Color: cold=dark teal → warm=yellow → hot=red
+            if s <= 3:
+                r, g, b = 30, 80, 100
+            elif s <= 5:
+                r = int(30  + (s-3)/2 * 180)
+                g = int(80  + (s-3)/2 * 140)
+                b = int(100 - (s-3)/2 * 80)
+            elif s <= 7:
+                r = int(210 + (s-5)/2 * 30)
+                g = int(220 - (s-5)/2 * 100)
+                b = 20
+            else:
+                r = min(255, int(240 + (s-7)/3 * 15))
+                g = max(0,   int(120 - (s-7)/3 * 120))
+                b = 0
+            fill_col = f'#{r:02x}{g:02x}{b:02x}'
+
+            # Selected zones get a bright orange border + lighter fill
+            if z['selected']:
+                cv.create_rectangle(x1, 2, x2-1, h-2, fill=fill_col, outline=ACCENT, width=2)
+                # Bright tick at bottom
+                cv.create_rectangle(x1, h-5, x2-1, h-1, fill=ACCENT, outline='')
+            else:
+                # Dimmed
+                dimmed = f'#{r//3:02x}{g//3:02x}{b//3:02x}'
+                cv.create_rectangle(x1, 4, x2-1, h-4, fill=dimmed, outline='')
+
+            # Score label inside zone if wide enough
+            if (x2 - x1) > 24:
+                cv.create_text((x1+x2)//2, h//2, text=str(s),
+                               fill='#fff' if z['selected'] else '#555',
+                               font=('Segoe UI', 7, 'bold'))
+
+    def _heatmap_select_by_score(self, threshold=6):
+        """Auto-select all zones at or above threshold score."""
+        threshold = int(threshold)
+        for z in self._hm_zones:
+            z['selected'] = (z['score'] >= threshold)
+        self._heatmap_redraw()
+        self._hm_update_token_estimate()
+
+    def _heatmap_clear_selection(self):
+        """Deselect all zones."""
+        for z in self._hm_zones:
+            z['selected'] = False
+        self._heatmap_redraw()
+        self._hm_update_token_estimate()
+
+    def _hm_update_token_estimate(self):
+        """Show how much of the VOD is selected vs total."""
+        if not self._hm_zones:
+            self._hm_token_lbl.config(text='')
+            return
+        total = sum(z['end'] - z['start'] for z in self._hm_zones)
+        selected = sum(z['end'] - z['start'] for z in self._hm_zones if z['selected'])
+        if total <= 0:
+            self._hm_token_lbl.config(text='')
+            return
+        pct = int(selected / total * 100)
+        n_sel = sum(1 for z in self._hm_zones if z['selected'])
+        n_tot = len(self._hm_zones)
+        self._hm_token_lbl.config(
+            text=f'{n_sel}/{n_tot} zones  ·  {pct}% of VOD selected')
+
+    def _heatmap_preview_zone(self, zone):
+        """Preview a heatmap zone using the same mechanism as clip card previews."""
+        vid = self.v_video.get().strip()
+        placeholder = getattr(self, '_video_placeholder', '')
+        if not vid or vid == placeholder or not Path(vid).exists():
+            messagebox.showwarning('No video', 'Load a local video file to preview zones.')
+            return
+        def _fmt(s):
+            s = int(s)
+            return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+        clip = {
+            'start': _fmt(zone['start']),
+            'end':   _fmt(zone['end']),
+            'title': f'heatmap_zone_{_fmt(zone["start"])}'
+        }
+        self.log(f'🌡 Previewing zone {clip["start"]} → {clip["end"]} (score {zone["score"]}/10)', ACCENT)
+        self._open_clip_preview(vid, clip)
+        """Return transcript lines filtered to only selected heatmap zones.
+        Called by _start() when heatmap mode is on and zones are selected."""
+        if not self._hm_zones or not any(z['selected'] for z in self._hm_zones):
+            return None  # No selection — use full transcript
+        if not hasattr(self, '_whisper_segments') or not self._whisper_segments:
+            return None
+        selected_lines = []
+        for seg in self._whisper_segments:
+            seg_mid = (seg['start'] + seg['end']) / 2
+            for z in self._hm_zones:
+                if z['selected'] and z['start'] <= seg_mid <= z['end']:
+                    def _ts(s):
+                        h2, rem = divmod(int(s), 3600)
+                        m2, s2  = divmod(rem, 60)
+                        return f'{h2:02d}:{m2:02d}:{s2:02d}'
+                    selected_lines.append(f'[{_ts(seg["start"])}] {seg["text"].strip()}')
+                    break
+        return '\n'.join(selected_lines) if selected_lines else None
 
 
     def _transcribe_standalone(self):
@@ -5279,6 +5968,10 @@ class App(tk.Tk):
 
             self.log(f'Transcription done: {segs} segments, {words:,} words', GREEN)
             self._last_transcribed_vid = str(vid)  # save for thumbnail rendering
+
+            # Build heatmap if mode is on
+            if getattr(self, '_heatmap_mode_on', None) and self._heatmap_mode_on.get():
+                self.after(0, lambda s=segs_raw: self._heatmap_build(s))
 
             if then_ai:
                 if not getattr(self, '_cancel_requested', False):
@@ -6136,6 +6829,145 @@ Return ONLY the JSON array, no other text."""
 
         return {'include': _include_hits, 'exclude': _exclude_hits}
 
+    def _refine_clips(self, clips, min_sec=60, max_sec=160, ideal_sec=110):
+        """Post-process raw AI clip suggestions into cleaner, better clips:
+          • snap start/end to real transcript segment boundaries (no mid-word cuts)
+          • enforce the 60–160s length rule in code, not just in the prompt
+          • merge heavily-overlapping near-duplicates, keeping the higher-scored one
+          • rank by score, then by hook/engagement/value/shareability sub-scores
+
+        Safe by construction: if the transcript can't be parsed into segments,
+        clips pass through with only length clamping + dedup (no snapping).
+        """
+        import re as _re_rf
+        if not clips:
+            return clips
+
+        def _to_secs(t):
+            try:
+                p = str(t).split(':')
+                if len(p) == 3: return int(p[0]) * 3600 + int(p[1]) * 60 + float(p[2])
+                if len(p) == 2: return int(p[0]) * 60 + float(p[1])
+                return float(t)
+            except Exception:
+                return None
+
+        def _to_hms(s):
+            s = max(0, int(round(s)))
+            return f'{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}'
+
+        # ── Parse transcript into ordered (start, end, text) segments ───────────
+        # Main clip-finder transcript is "[HH:MM:SS] text" (single stamp); the
+        # Auto-Edit path is "[HH:MM:SS -> HH:MM:SS] text". Support both. When a
+        # segment has no explicit end, the next segment's start IS the boundary.
+        raw = []
+        for line in (self.transcript or '').splitlines():
+            m2 = _re_rf.match(r'\[([\d:]+)\s*(?:->|[-→])\s*([\d:]+)\]\s*(.*)', line)
+            if m2:
+                s, e = _to_secs(m2.group(1)), _to_secs(m2.group(2))
+                if s is not None:
+                    raw.append((s, e, m2.group(3).strip()))
+                continue
+            m1 = _re_rf.match(r'\[([\d:]+)\]\s*(.*)', line)
+            if m1:
+                s = _to_secs(m1.group(1))
+                if s is not None:
+                    raw.append((s, None, m1.group(2).strip()))
+        raw.sort(key=lambda x: x[0])
+        segs = []
+        for i, (s, e, t) in enumerate(raw):
+            if e is None or e <= s:
+                e = raw[i + 1][0] if i + 1 < len(raw) else s + 5.0
+            segs.append((s, e, t))
+        starts    = [s for s, _, _ in segs]
+        total_end = segs[-1][1] if segs else 0
+
+        def _snap_start(sec):
+            best = starts[0]
+            for s in starts:
+                if s <= sec + 0.5:
+                    best = s
+                else:
+                    break
+            return best
+
+        def _snap_end(start_sec, target):
+            """Nearest segment boundary to `target`, preferring one right after a
+            sentence-ending line so clips don't cut mid-thought."""
+            nearest, nearest_gap = target, 1e9
+            sentence, sentence_gap = None, 1e9
+            for s, e, txt in segs:
+                if e <= start_sec + 1:
+                    continue
+                gap = abs(e - target)
+                if gap < nearest_gap:
+                    nearest, nearest_gap = e, gap
+                if txt.rstrip().endswith(('.', '!', '?', '…', '"')) and gap < sentence_gap:
+                    sentence, sentence_gap = e, gap
+            if sentence is not None and sentence_gap <= 8:
+                return sentence
+            return nearest
+
+        def _subscore(c):
+            tot = 0
+            for k in ('hook', 'engagement', 'value', 'shareability'):
+                try: tot += int(c.get(k, 0) or 0)
+                except Exception: pass
+            return tot
+
+        # ── Snap + length-enforce each clip ────────────────────────────────────
+        refined = []
+        for c in clips:
+            s = _to_secs(c.get('start'))
+            e = _to_secs(c.get('end'))
+            if s is None or e is None or e <= s:
+                continue
+            if segs:
+                s = _snap_start(s)
+                dur = e - s
+                if dur < min_sec:
+                    e = min(total_end, s + ideal_sec)   # grow a too-short clip toward ideal
+                elif dur > max_sec:
+                    e = s + max_sec
+                e = _snap_end(s, e)
+                if e - s < min_sec:                      # snapping undershot — try again toward ideal
+                    e = _snap_end(s, min(total_end, s + ideal_sec))
+            if e - s < 45:                               # genuinely can't form a real clip
+                continue
+            if e - s > max_sec:                          # hard cap
+                e = s + max_sec
+            c = dict(c)
+            c['start'], c['end'] = _to_hms(s), _to_hms(e)
+            c['_dur'] = int(e - s)
+            refined.append(c)
+
+        # ── Merge heavy overlaps (keep higher score), then rank ────────────────
+        refined.sort(key=lambda c: _to_secs(c['start']) or 0)
+        kept = []
+        for c in refined:
+            cs, ce = _to_secs(c['start']), _to_secs(c['end'])
+            merged = False
+            for i, k in enumerate(kept):
+                ks, ke = _to_secs(k['start']), _to_secs(k['end'])
+                overlap = max(0, min(ce, ke) - max(cs, ks))
+                shorter = min(ce - cs, ke - ks) or 1
+                if overlap / shorter > 0.4:
+                    better = (int(c.get('score', 5) or 5), _subscore(c)) > \
+                             (int(k.get('score', 5) or 5), _subscore(k))
+                    if better:
+                        kept[i] = c
+                    merged = True
+                    break
+            if not merged:
+                kept.append(c)
+
+        def _rank(c):
+            try: sc = int(c.get('score', 5) or 5)
+            except Exception: sc = 5
+            return (-sc, -_subscore(c))
+        kept.sort(key=_rank)
+        return kept
+
     def _run_ai(self):
         if getattr(self, '_cancel_requested', False):
             self.log('⛔ AI cancelled before start', YELLOW)
@@ -6238,6 +7070,16 @@ Return ONLY the JSON array, no other text."""
             else:
                 CHARS_PER_CHUNK = 7500
             full_text = self.transcript  # use self.transcript — may have been filtered above
+
+            # Heatmap mode: if zones are selected, restrict AI to selected transcript only
+            _hm_filtered = None
+            if (getattr(self, '_heatmap_mode_on', None) and self._heatmap_mode_on.get()
+                    and any(z['selected'] for z in getattr(self, '_hm_zones', []))):
+                _hm_filtered = self._hm_get_selected_transcript()
+                if _hm_filtered:
+                    full_text = _hm_filtered
+                    n_sel = sum(1 for z in self._hm_zones if z['selected'])
+                    self.log(f'🌡 Heatmap: analyzing {n_sel} selected zones only', ACCENT)
 
             # Split into chunks by character count, respecting line boundaries
             chunks = []
@@ -6521,7 +7363,11 @@ Return ONLY the JSON array, no other text."""
                         return
                     _time.sleep(2)
 
-                clips, last_err = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+                # _try_chunk returns (clips, provider_name) when a provider answered,
+                # or (clips, exception) when every provider failed. Only an Exception
+                # is a real error — a provider name means it answered (maybe empty).
+                clips, _res = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+                last_err = _res if isinstance(_res, Exception) else None
 
                 # Determine if the failure is fatal (no point retrying)
                 def _is_fatal(err):
@@ -6535,34 +7381,29 @@ Return ONLY the JSON array, no other text."""
                         'daily token limit exhausted',  # Groq TPD — fatal for session
                     ])
 
-                # Retry loop — immediately try other providers, no waiting
+                # ── Retry policy ──────────────────────────────────────────────
+                # Real ERROR (last_err is an Exception): retry on other providers.
+                # Clean EMPTY (clips == [] with no Exception): that provider simply
+                # found no clip in this section — cross-check with ONE other provider,
+                # then accept it. No wasted retries, and an empty section is never
+                # reported as an error.
                 _retry = 0
-                _excluded = set()
+                _excluded = {prov}
+                _clean_empty = (not clips and last_err is None)
                 while not clips and _retry < 3:
                     if getattr(self, '_cancel_requested', False):
                         return
                     if _is_fatal(last_err):
                         self.log(f'[{label}] Fatal error — not retrying: {str(last_err)[:100]}', RED)
                         break
+                    # Empty section already cross-checked by a 2nd provider → accept
+                    if _clean_empty and _retry >= 1:
+                        break
                     _retry += 1
-                    # Add current failed provider to exclude list so we try a different one
-                    if last_err or True:  # always rotate to next provider
-                        _excluded.add(prov)
-                    # Try immediately with a different provider — no sleep
-                    clips, last_err = _try_chunk(chunk, label, exclude=_excluded, start_prov=None)
-                    if not clips and not last_err:
-                        # Got empty result — try one more provider before giving up
-                        _excluded = set()  # reset exclusion for final attempt
-                        _wait = min(10, 5 * _retry)  # tiny wait only if truly no providers left
-                        self.log(f'[{label}] No clips found — trying again ({_retry}/3)...', YELLOW)
-                        for _ in range(_wait):
-                            if getattr(self, '_cancel_requested', False):
-                                return
-                            _time.sleep(1)
-                        with self._rl_provs_lock:
-                            self._rl_provs.clear()
-                            self._rl_since.clear()
-                        clips, last_err = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
+                    clips, _res = _try_chunk(chunk, label, exclude=_excluded, start_prov=None)
+                    last_err = _res if isinstance(_res, Exception) else None
+                    _clean_empty = (not clips and last_err is None)
+                    _excluded.add(prov)
 
                 if not clips:
                     if last_err:
@@ -6572,12 +7413,13 @@ Return ONLY the JSON array, no other text."""
                                      'Try adding an OpenRouter API key with credits, or use Gemini/Groq.', RED)
                         elif '401' in _err_msg or 'invalid api key' in _err_msg.lower():
                             self.log(f'[{label}] Invalid API key — open Settings and re-enter your key', RED)
-                        elif _retry >= 3:
-                            self.log(f'[{label}] Gave up after 3 retries. Last error: {_err_msg[:100]}', RED)
+                        elif _is_fatal(last_err):
+                            self.log(f'[{label}] Skipped — {_err_msg[:120]}', RED)
                         else:
-                            self.log(f'[{label}] Skipped. Reason: {_err_msg[:120]}', RED)
+                            self.log(f'[{label}] Skipped after {_retry} retr{"y" if _retry == 1 else "ies"}: {_err_msg[:100]}', RED)
                     else:
-                        self.log(f'[{label}] Skipped — no providers available', YELLOW)
+                        # Clean empty result — NOT an error, the section just had no clip
+                        self.log(f'[{label}] No clip-worthy moment in this section', FG2)
 
                 task_results[idx] = clips or []
                 completed[0] += 1
@@ -6651,11 +7493,11 @@ Return ONLY the JSON array, no other text."""
                     '• If all dots are red/dead, the free model may be unavailable — try again later\n'
                     '• Verify your API key is correct in Settings')
 
-            # Sort by score desc
-            def _score_key(c):
-                try: return -int(c.get('score', 5))
-                except: return -5
-            all_clips.sort(key=_score_key)
+            # ── Refine: snap cuts to sentence boundaries, enforce 60–160s length,
+            #    merge overlapping near-duplicates, rank by score + sub-scores ──
+            _pre = len(all_clips)
+            all_clips = self._refine_clips(all_clips)
+            self.log(f'Refined {_pre} → {len(all_clips)} clean, de-duplicated clips', FG2)
 
             # ── Verification pass: rewrite titles/descriptions from segment text ──
             # Extract only the transcript lines that fall within each clip's timestamps
@@ -6674,19 +7516,20 @@ Return ONLY the JSON array, no other text."""
                     except: return 0.0
 
                 def _extract_segment_text(start_t, end_t, transcript):
-                    """Extract transcript lines that fall within clip timestamps."""
+                    """Collect transcript text spoken within a clip's window.
+                    Handles both '[HH:MM:SS] text' and '[HH:MM:SS -> HH:MM:SS] text'."""
                     s = _ts_to_secs(start_t)
                     e = _ts_to_secs(end_t)
                     lines_out = []
                     for line in transcript.splitlines():
-                        # Match [HH:MM:SS -> HH:MM:SS] format
-                        m = _re_v.match(r'\[([\d:]+)\s*[-\u2192]\s*([\d:]+)\](.+)', line)
-                        if m:
-                            ls = _ts_to_secs(m.group(1))
-                            le = _ts_to_secs(m.group(2))
-                            # Include if overlaps with clip window
-                            if ls < e and le > s:
-                                lines_out.append(m.group(3).strip())
+                        m = _re_v.match(r'\[([\d:]+)(?:\s*(?:->|[-\u2192])\s*([\d:]+))?\]\s*(.*)', line)
+                        if not m:
+                            continue
+                        ls = _ts_to_secs(m.group(1))
+                        le = _ts_to_secs(m.group(2)) if m.group(2) else ls
+                        # Include if the segment falls within / overlaps the clip window
+                        if ls < e and (le > s or ls >= s):
+                            lines_out.append(m.group(3).strip())
                     return ' '.join(lines_out)
 
                 for clip in all_clips:
@@ -6696,9 +7539,11 @@ Return ONLY the JSON array, no other text."""
                         self.transcript
                     )
                     if seg_text and len(seg_text) > 20:
+                        # store the true transcript for accuracy checks, but KEEP the
+                        # AI's summary/reason \u2014 only fill one in if it's missing
                         clip['_verified_text'] = seg_text
-                        # Rewrite description from actual segment text
-                        clip['reason'] = seg_text[:200]
+                        if not str(clip.get('reason', '')).strip():
+                            clip['reason'] = seg_text[:200]
 
             self.clips = all_clips
             merged = all_clips  # for logging below
@@ -8761,10 +9606,11 @@ Return ONLY the JSON array, no other text."""
             _tr = _re2.sub(r'\[\d+:\d+:\d+\]\s*', '', _tr_raw).strip()
             _who   = _name or 'the person in the video'
             _angle = _ctx or 'find the most viral moment'
-            _tc = f"""TRANSCRIPT (use ONLY these exact words):
+            _angle_block2 = f"CONTENT ANGLE (MANDATORY): {_angle}\n" if _ctx else ""
+            _tc = f"""PERSON: {_who}
+{_angle_block2}TRANSCRIPT (use ONLY these exact words — no invention):
 {_tr if _tr else '(no transcript)'}
-PERSON: {_who} | CONTEXT: {_angle}
-CRITICAL: Do NOT invent topics not in the transcript."""
+CRITICAL: Post MUST reflect the angle above. Do NOT invent topics not in transcript."""
             # Build one prompt for this platform
             _prompts_map = {
                 'x':         (f"Complete X/Twitter post under 280 chars. Handle in sentence. 1 hashtag. End with question. NEVER cut off.", f"{_tc}\nX: {_h_x or _who}\n\nWrite complete post:\n[{_h_x or _who} + statement]\n[quote from transcript]\n[question?]\n#{(_name1 or 'clips').lower()}"),
@@ -9146,12 +9992,12 @@ save this for when the conversation comes up 📌
 #{(_name1 or 'clips').lower().replace(' ','')} #[exact topic] #drama #clips #[5th]"""
                 ),
                 'yt_shorts': (
-                    "Write a YouTube Shorts title and 3 hashtags. Title punchy under 60 chars using exact topic from transcript. Then exactly 3 hashtags. Nothing else.",
+                    "Write a YouTube Shorts title under 60 chars + 1-2 sentence description under 150 chars + 3 hashtags. Use exact topic from transcript. No generic filler.",
                     f"""{_tc}
 
-Write the Shorts entry:
-TITLE: [punchy title under 60 chars using exact topic from transcript]
-
+Write the complete Shorts entry:
+TITLE: [punchy, keyword-first, under 60 chars — use exact topic from transcript]
+DESCRIPTION: [1-2 sentences, what actually happened, under 150 chars]
 #[person] #[exact topic from transcript] #[niche]"""
                 ),
                 'youtube': (
@@ -10894,6 +11740,540 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
     # ═══════════════════════════════════════════════════════════════════════════
     # IMAGE STUDIO TAB — Duplicate Finder + AI Upscaler
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _build_editor_tab(self, p):
+        """🎬 Editor — load any video or URL, mark clips, grab from CDN or local."""
+        import threading as _eth
+
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = tk.Frame(p, bg=BG2); hdr.pack(fill='x')
+        tk.Label(hdr, text='🎬  CLIP EDITOR', font=('Segoe UI', 10, 'bold'),
+                 fg=ACCENT, bg=BG2).pack(side='left', padx=12, pady=8)
+        tk.Label(hdr, text='Load any video or URL · Mark In/Out · Grab clips without full download',
+                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(side='left')
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+
+        # ── Source row ────────────────────────────────────────────────────────
+        src_row = tk.Frame(p, bg=BG2); src_row.pack(fill='x', padx=12, pady=(8,4))
+        tk.Label(src_row, text='Source:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
+        _ed_sf = tk.Frame(src_row, bg=BG3); _ed_sf.pack(side='left', fill='x', expand=True, padx=6)
+        self._ed_src = tk.StringVar()
+        self._ed_entry = tk.Entry(_ed_sf, textvariable=self._ed_src, font=FONT_SMALL,
+                                  bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4)
+        self._ed_entry.pack(side='left', fill='x', expand=True)
+        self._ed_entry.insert(0, 'Paste Kick/Twitch/YouTube URL or browse local file...')
+        self._ed_entry.config(fg=FG3)
+        def _ed_focus_in(e):
+            if self._ed_src.get() == 'Paste Kick/Twitch/YouTube URL or browse local file...':
+                self._ed_entry.delete(0, 'end'); self._ed_entry.config(fg=FG)
+        def _ed_focus_out(e):
+            if not self._ed_src.get().strip():
+                self._ed_entry.insert(0, 'Paste Kick/Twitch/YouTube URL or browse local file...')
+                self._ed_entry.config(fg=FG3)
+        self._ed_entry.bind('<FocusIn>', _ed_focus_in)
+        self._ed_entry.bind('<FocusOut>', _ed_focus_out)
+
+        tk.Button(src_row, text='📁 Browse', font=FONT_SMALL,
+                  bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  command=self._ed_browse_file).pack(side='left', padx=(0,4))
+        tk.Button(src_row, text='▶ Load', font=('Segoe UI', 9, 'bold'),
+                  bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=12, pady=4,
+                  activebackground=ACCENT2, command=self._ed_load_source).pack(side='left')
+
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+
+        # ── Main area: player left, queue right ───────────────────────────────
+        main = tk.Frame(p, bg=BG); main.pack(fill='both', expand=True)
+
+        # Left — player + controls
+        left = tk.Frame(main, bg=BG); left.pack(side='left', fill='both', expand=True)
+
+        # Player area
+        player_outer = tk.Frame(left, bg='#000', height=320)
+        player_outer.pack(fill='x', padx=8, pady=(8,0))
+        player_outer.pack_propagate(False)
+
+        self._ed_player_frame = tk.Frame(player_outer, bg='#000')
+        self._ed_player_frame.pack(fill='both', expand=True)
+
+        # VLC check — show player or fallback message
+        self._ed_vlc = None
+        self._ed_vlc_media = None
+        self._ed_vlc_player = None
+        self._ed_has_vlc = False
+        try:
+            import vlc as _vlc_test
+            self._ed_has_vlc = True
+            self._ed_vlc_instance = _vlc_test.Instance('--no-xlib', '--quiet')
+            self._ed_vlc_player = self._ed_vlc_instance.media_player_new()
+            self._ed_player_canvas = tk.Canvas(self._ed_player_frame, bg='#000000',
+                                               highlightthickness=0)
+            self._ed_player_canvas.pack(fill='both', expand=True)
+            # Reattach VLC hwnd on resize — keeps video filling the canvas
+            def _ed_canvas_resize(e):
+                if self._ed_has_vlc and self._ed_vlc_player and self._ed_playing:
+                    try:
+                        self._ed_vlc_player.set_hwnd(self._ed_player_canvas.winfo_id())
+                    except: pass
+            self._ed_player_canvas.bind('<Configure>', _ed_canvas_resize)
+            tk.Label(self._ed_player_frame, text='VLC ready — load a source above',
+                     font=('Segoe UI', 10), fg=FG2, bg='#000000').place(relx=0.5, rely=0.5, anchor='center')
+        except ImportError:
+            self._ed_no_vlc_lbl = tk.Label(
+                self._ed_player_frame,
+                text='📺  No inline player available\n\n'
+                     'Install python-vlc for embedded playback:\n'
+                     'pip install python-vlc\n\n'
+                     'Clips can still be marked by timecode\nand grabbed without the player',
+                font=('Segoe UI', 10), fg=FG2, bg='#000', justify='center')
+            self._ed_no_vlc_lbl.pack(expand=True)
+
+        # Scrubber / position bar
+        self._ed_pos_var = tk.DoubleVar(value=0)
+        self._ed_scrubber = tk.Scale(
+            left, from_=0, to=100, orient='horizontal',
+            variable=self._ed_pos_var, bg=BG, fg=FG, troughcolor=BG3,
+            activebackground=ACCENT, highlightthickness=0, bd=0,
+            sliderrelief='flat', showvalue=False,
+            command=self._ed_scrub)
+        self._ed_scrubber.pack(fill='x', padx=8, pady=(2,0))
+
+        # Time display
+        time_row = tk.Frame(left, bg=BG); time_row.pack(fill='x', padx=12)
+        self._ed_time_lbl = tk.Label(time_row, text='00:00:00', font=('Segoe UI', 9),
+                                      fg=ACCENT, bg=BG)
+        self._ed_time_lbl.pack(side='left')
+        self._ed_dur_lbl = tk.Label(time_row, text='/ 00:00:00', font=('Segoe UI', 9),
+                                     fg=FG2, bg=BG)
+        self._ed_dur_lbl.pack(side='left', padx=(4,0))
+
+        # Playback controls
+        pb_row = tk.Frame(left, bg=BG); pb_row.pack(pady=(4,0))
+        for txt, cmd in [
+            ('⏮', lambda: self._ed_seek_rel(-30)),
+            ('⏪', lambda: self._ed_seek_rel(-5)),
+            ('▶/⏸', self._ed_play_pause),
+            ('⏩', lambda: self._ed_seek_rel(5)),
+            ('⏭', lambda: self._ed_seek_rel(30)),
+        ]:
+            tk.Button(pb_row, text=txt, font=('Segoe UI', 12), bg=BG2, fg=FG,
+                      relief='flat', bd=0, cursor='hand2', padx=12, pady=4,
+                      activebackground=BG3, command=cmd).pack(side='left', padx=2)
+
+        tk.Frame(left, bg=BORDER, height=1).pack(fill='x', padx=8, pady=6)
+
+        # Mark In / Mark Out controls
+        mark_row = tk.Frame(left, bg=BG); mark_row.pack(fill='x', padx=8, pady=(0,4))
+        tk.Label(mark_row, text='IN:', font=('Segoe UI', 9, 'bold'),
+                 fg=ACCENT, bg=BG).pack(side='left')
+        self._ed_in_var = tk.StringVar(value='00:00:00')
+        _in_e = tk.Entry(mark_row, textvariable=self._ed_in_var, font=('Segoe UI', 9),
+                         bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=3, width=9)
+        _in_e.pack(side='left', padx=(4,8))
+        tk.Button(mark_row, text='◀ Mark In', font=FONT_SMALL,
+                  bg=BG3, fg=ACCENT, relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  command=self._ed_mark_in).pack(side='left')
+
+        tk.Label(mark_row, text='OUT:', font=('Segoe UI', 9, 'bold'),
+                 fg='#ff4444', bg=BG).pack(side='left', padx=(16,0))
+        self._ed_out_var = tk.StringVar(value='00:00:00')
+        _out_e = tk.Entry(mark_row, textvariable=self._ed_out_var, font=('Segoe UI', 9),
+                          bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=3, width=9)
+        _out_e.pack(side='left', padx=(4,8))
+        tk.Button(mark_row, text='Mark Out ▶', font=FONT_SMALL,
+                  bg=BG3, fg='#ff4444', relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  command=self._ed_mark_out).pack(side='left')
+
+        tk.Button(mark_row, text='+ Add to Queue', font=('Segoe UI', 9, 'bold'),
+                  bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=12, pady=4,
+                  activebackground=ACCENT2, command=self._ed_add_to_queue).pack(side='right')
+
+        # Status
+        self._ed_status_lbl = tk.Label(left, text='Load a source to begin',
+                                        font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
+        self._ed_status_lbl.pack(fill='x', padx=12)
+
+        tk.Frame(left, bg=BORDER, height=1).pack(fill='x', padx=8, pady=(6,0))
+
+        # ── Image Overlay section ──────────────────────────────────────────────
+        ov_hdr = tk.Frame(left, bg=BG); ov_hdr.pack(fill='x', padx=8, pady=(4,2))
+        tk.Label(ov_hdr, text='🖼  IMAGE OVERLAY', font=('Segoe UI', 8, 'bold'),
+                 fg=ACCENT, bg=BG).pack(side='left')
+        tk.Label(ov_hdr, text='add PNG/JPG/GIF burned into exported clips',
+                 font=('Segoe UI', 7), fg=FG2, bg=BG).pack(side='left', padx=(8,0))
+
+        ov_row = tk.Frame(left, bg=BG); ov_row.pack(fill='x', padx=8, pady=(0,4))
+        self._ed_overlay_path = tk.StringVar()
+        _ov_e = tk.Entry(ov_row, textvariable=self._ed_overlay_path, font=FONT_SMALL,
+                         bg=BG3, fg=FG3, insertbackground=ACCENT, relief='flat', bd=3)
+        _ov_e.pack(side='left', fill='x', expand=True)
+        _ov_e.insert(0, 'No overlay image')
+        def _ov_focus_in(e):
+            if self._ed_overlay_path.get() == 'No overlay image':
+                _ov_e.delete(0, 'end'); _ov_e.config(fg=FG)
+        def _ov_focus_out(e):
+            if not self._ed_overlay_path.get().strip():
+                _ov_e.insert(0, 'No overlay image'); _ov_e.config(fg=FG3)
+        _ov_e.bind('<FocusIn>',  _ov_focus_in)
+        _ov_e.bind('<FocusOut>', _ov_focus_out)
+
+        tk.Button(ov_row, text='📁', font=FONT_SMALL, bg=BG3, fg=FG,
+                  relief='flat', bd=0, cursor='hand2', padx=6, pady=3,
+                  command=self._ed_browse_overlay).pack(side='left', padx=(4,0))
+        tk.Button(ov_row, text='✕', font=FONT_SMALL, bg=BG3, fg=RED,
+                  relief='flat', bd=0, cursor='hand2', padx=6, pady=3,
+                  command=self._ed_clear_overlay).pack(side='left', padx=(2,0))
+
+        # Position controls
+        ov_pos = tk.Frame(left, bg=BG); ov_pos.pack(fill='x', padx=8, pady=(0,4))
+        tk.Label(ov_pos, text='Position:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left')
+        self._ed_ov_pos = tk.StringVar(value='bottom-right')
+        for _pos_val, _pos_lbl in [('top-left','↖'), ('top-right','↗'),
+                                    ('bottom-left','↙'), ('bottom-right','↘'),
+                                    ('center','⊕')]:
+            tk.Radiobutton(ov_pos, text=_pos_lbl, variable=self._ed_ov_pos,
+                           value=_pos_val, font=('Segoe UI', 10),
+                           bg=BG, fg=FG, selectcolor=BG3, activebackground=BG,
+                           cursor='hand2').pack(side='left', padx=4)
+
+        tk.Label(ov_pos, text='Scale:', font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left', padx=(12,0))
+        self._ed_ov_scale = tk.IntVar(value=20)
+        tk.Scale(ov_pos, from_=5, to=80, orient='horizontal',
+                 variable=self._ed_ov_scale, font=('Segoe UI', 7),
+                 bg=BG, fg=FG, troughcolor=BG3, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, sliderrelief='flat',
+                 width=8, length=80, showvalue=True,
+                 label='%').pack(side='left')
+
+        # ── Right — clip queue ────────────────────────────────────────────────
+        right = tk.Frame(main, bg=BG2, width=300); right.pack(side='right', fill='y')
+        right.pack_propagate(False)
+        tk.Frame(main, bg=BORDER, width=1).pack(side='right', fill='y')
+
+        tk.Label(right, text='CLIP QUEUE', font=('Segoe UI', 9, 'bold'),
+                 fg=ACCENT, bg=BG2).pack(anchor='w', padx=10, pady=(8,4))
+
+        # Queue list
+        self._ed_queue_frame = tk.Frame(right, bg=BG2)
+        self._ed_queue_frame.pack(fill='both', expand=True, padx=4)
+
+        self._ed_queue_empty_lbl = tk.Label(
+            self._ed_queue_frame,
+            text='\n  No clips queued yet\n\n  Mark In/Out then\n  click + Add to Queue',
+            font=FONT_SMALL, fg=FG2, bg=BG2, justify='left')
+        self._ed_queue_empty_lbl.pack(pady=10)
+
+        # Bottom action bar
+        tk.Frame(right, bg=BORDER, height=1).pack(fill='x')
+        bot_r = tk.Frame(right, bg=BG2); bot_r.pack(fill='x', padx=8, pady=6)
+        tk.Button(bot_r, text='🗑 Clear All', font=FONT_SMALL,
+                  bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
+                  command=self._ed_clear_queue).pack(side='left')
+        self._ed_grab_btn = tk.Button(
+            bot_r, text='⚡ Grab Clips', font=('Segoe UI', 9, 'bold'),
+            bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=12, pady=4,
+            activebackground=ACCENT2, command=self._ed_grab_clips)
+        self._ed_grab_btn.pack(side='right')
+
+        # Internal state
+        self._ed_queue        = []
+        self._ed_source_url   = ''
+        self._ed_is_url       = False
+        self._ed_duration     = 0
+        self._ed_playing      = False
+        self._ed_poll_job     = None
+        self._ed_overlay_img  = ''   # path to overlay image
+
+    # ── Editor helper methods ─────────────────────────────────────────────────
+
+    def _ed_browse_overlay(self):
+        path = filedialog.askopenfilename(
+            title='Select overlay image',
+            filetypes=[('Images', '*.png *.jpg *.jpeg *.gif *.bmp *.webp'), ('All files', '*.*')])
+        if path:
+            self._ed_overlay_path.set(path)
+            self._ed_overlay_img = path
+            self._ed_status_lbl.config(text=f'Overlay set: {Path(path).name}')
+
+    def _ed_clear_overlay(self):
+        self._ed_overlay_path.set('No overlay image')
+        self._ed_overlay_img = ''
+        self._ed_status_lbl.config(text='Overlay cleared')
+        path = filedialog.askopenfilename(
+            title='Select video file',
+            filetypes=[('Video files', '*.mp4 *.mkv *.mov *.avi *.webm *.ts *.flv'), ('All files', '*.*')])
+        if path:
+            self._ed_entry.delete(0, 'end')
+            self._ed_entry.insert(0, path)
+            self._ed_entry.config(fg=FG)
+            self._ed_load_source()
+
+    def _ed_load_source(self):
+        src = self._ed_src.get().strip()
+        if not src or src == 'Paste Kick/Twitch/YouTube URL or browse local file...': return
+        self._ed_source_url = src
+        self._ed_is_url = src.startswith('http')
+        self._ed_status_lbl.config(text=f'Loading: {Path(src).name if not self._ed_is_url else src[:60]}...')
+
+        if self._ed_has_vlc:
+            try:
+                import vlc as _vlc2
+                _media = self._ed_vlc_instance.media_new(src)
+                self._ed_vlc_player.set_media(_media)
+                # Clear placeholder label first
+                for w in self._ed_player_frame.winfo_children():
+                    if isinstance(w, tk.Label): w.destroy()
+                # Force canvas to render and get real HWND — must update before winfo_id
+                self._ed_player_canvas.update_idletasks()
+                self.update_idletasks()
+                _hwnd = self._ed_player_canvas.winfo_id()
+                self._ed_vlc_player.set_hwnd(_hwnd)
+                # Small delay then play — gives Windows time to associate HWND
+                def _start_play():
+                    self._ed_vlc_player.play()
+                    self._ed_playing = True
+                    self._ed_status_lbl.config(text='▶ Playing — use Mark In/Out to set clip boundaries')
+                    self._ed_start_poll()
+                self.after(200, _start_play)
+            except Exception as e:
+                self._ed_status_lbl.config(text=f'Player error: {e}')
+        else:
+            self._ed_status_lbl.config(
+                text=f'Source set: {Path(src).name if not self._ed_is_url else src[:50]} — set timecodes manually')
+
+    def _ed_start_poll(self):
+        """Poll VLC player position to update scrubber and time label."""
+        if self._ed_poll_job:
+            self.after_cancel(self._ed_poll_job)
+        def _poll():
+            if not self._ed_has_vlc or not self._ed_vlc_player: return
+            try:
+                _dur = self._ed_vlc_player.get_length() // 1000  # ms → s
+                _pos = self._ed_vlc_player.get_time()  // 1000
+                if _dur > 0:
+                    self._ed_duration = _dur
+                    self._ed_scrubber.config(to=_dur)
+                    self._ed_pos_var.set(_pos)
+                    self._ed_time_lbl.config(text=self._ed_fmt(_pos))
+                    self._ed_dur_lbl.config(text=f'/ {self._ed_fmt(_dur)}')
+            except: pass
+            self._ed_poll_job = self.after(500, _poll)
+        _poll()
+
+    def _ed_fmt(self, s):
+        s = int(s)
+        return f'{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}'
+
+    def _ed_parse_tc(self, tc):
+        """Parse HH:MM:SS or MM:SS into seconds."""
+        try:
+            parts = [int(x) for x in str(tc).strip().split(':')]
+            if len(parts) == 3: return parts[0]*3600 + parts[1]*60 + parts[2]
+            if len(parts) == 2: return parts[0]*60 + parts[1]
+            return int(parts[0])
+        except: return 0
+
+    def _ed_play_pause(self):
+        if not self._ed_has_vlc or not self._ed_vlc_player: return
+        if self._ed_playing:
+            self._ed_vlc_player.pause()
+            self._ed_playing = False
+        else:
+            self._ed_vlc_player.play()
+            self._ed_playing = True
+            self._ed_start_poll()
+
+    def _ed_scrub(self, val):
+        if not self._ed_has_vlc or not self._ed_vlc_player: return
+        try: self._ed_vlc_player.set_time(int(float(val)) * 1000)
+        except: pass
+
+    def _ed_seek_rel(self, secs):
+        if not self._ed_has_vlc or not self._ed_vlc_player: return
+        try:
+            cur = self._ed_vlc_player.get_time() // 1000
+            self._ed_vlc_player.set_time(max(0, cur + secs) * 1000)
+        except: pass
+
+    def _ed_mark_in(self):
+        if self._ed_has_vlc and self._ed_vlc_player:
+            t = self._ed_vlc_player.get_time() // 1000
+        else:
+            t = self._ed_parse_tc(self._ed_in_var.get())
+        self._ed_in_var.set(self._ed_fmt(t))
+        self._ed_status_lbl.config(text=f'In point set: {self._ed_fmt(t)}')
+
+    def _ed_mark_out(self):
+        if self._ed_has_vlc and self._ed_vlc_player:
+            t = self._ed_vlc_player.get_time() // 1000
+        else:
+            t = self._ed_parse_tc(self._ed_out_var.get())
+        self._ed_out_var.set(self._ed_fmt(t))
+        self._ed_status_lbl.config(text=f'Out point set: {self._ed_fmt(t)}')
+
+    def _ed_add_to_queue(self):
+        src = self._ed_source_url
+        if not src or src == 'Paste Kick/Twitch/YouTube URL or browse local file...':
+            messagebox.showwarning('No source', 'Load a video source first.'); return
+        t_in  = self._ed_in_var.get().strip()
+        t_out = self._ed_out_var.get().strip()
+        s_in  = self._ed_parse_tc(t_in)
+        s_out = self._ed_parse_tc(t_out)
+        if s_out <= s_in:
+            messagebox.showwarning('Invalid range', 'Out point must be after In point.'); return
+        dur = s_out - s_in
+        if dur > 360:  # 6 min max
+            messagebox.showwarning('Too long', f'Max clip length is 6 minutes. This clip is {dur//60}m {dur%60}s.'); return
+        if len(self._ed_queue) >= 10:
+            messagebox.showwarning('Queue full', 'Max 10 clips in queue.'); return
+
+        n = len(self._ed_queue) + 1
+        clip = {'in': t_in, 'out': t_out, 'src': src, 'label': f'Clip {n}',
+                'dur': f'{dur//60}m {dur%60}s'}
+        self._ed_queue.append(clip)
+        self._ed_render_queue()
+        self._ed_status_lbl.config(text=f'Added Clip {n}: {t_in} → {t_out} ({clip["dur"]})')
+
+    def _ed_render_queue(self):
+        for w in self._ed_queue_frame.winfo_children(): w.destroy()
+        if not self._ed_queue:
+            tk.Label(self._ed_queue_frame,
+                     text='\n  No clips queued yet\n\n  Mark In/Out then\n  click + Add to Queue',
+                     font=FONT_SMALL, fg=FG2, bg=BG2, justify='left').pack(pady=10)
+            return
+        for i, clip in enumerate(self._ed_queue):
+            card = tk.Frame(self._ed_queue_frame, bg=BG3)
+            card.pack(fill='x', pady=(0,3), padx=2)
+            top = tk.Frame(card, bg=BG3); top.pack(fill='x', padx=6, pady=(4,0))
+            tk.Label(top, text=clip['label'], font=('Segoe UI', 8, 'bold'),
+                     fg=ACCENT, bg=BG3).pack(side='left')
+            tk.Label(top, text=clip['dur'], font=FONT_SMALL,
+                     fg=FG2, bg=BG3).pack(side='right')
+            bot = tk.Frame(card, bg=BG3); bot.pack(fill='x', padx=6, pady=(0,4))
+            tk.Label(bot, text=f'{clip["in"]} → {clip["out"]}',
+                     font=FONT_SMALL, fg=FG, bg=BG3).pack(side='left')
+            tk.Button(bot, text='✕', font=FONT_SMALL, bg=BG3, fg=RED,
+                      relief='flat', bd=0, cursor='hand2',
+                      command=lambda idx=i: self._ed_remove_clip(idx)).pack(side='right')
+
+    def _ed_remove_clip(self, idx):
+        self._ed_queue.pop(idx)
+        # Renumber
+        for i, c in enumerate(self._ed_queue): c['label'] = f'Clip {i+1}'
+        self._ed_render_queue()
+
+    def _ed_clear_queue(self):
+        self._ed_queue.clear()
+        self._ed_render_queue()
+
+    def _ed_grab_clips(self):
+        """Grab all queued clips via ffmpeg — streams from URL or cuts local file."""
+        if not self._ed_queue:
+            messagebox.showwarning('Empty queue', 'Add clips to the queue first.'); return
+        out_dir = self.cfg.get('output_folder', str(Path.home() / 'Videos'))
+        if not Path(out_dir).exists():
+            out_dir = str(Path.home() / 'Videos')
+
+        self._ed_grab_btn.config(state='disabled', text='⏳ Grabbing...')
+        self._ed_status_lbl.config(text=f'Grabbing {len(self._ed_queue)} clip(s)...')
+
+        import threading as _eth2
+        queue_copy = list(self._ed_queue)
+
+        def _grab():
+            import subprocess as _sp2
+            ffmpeg = self.cfg.get('ffmpeg_path', 'ffmpeg')
+            overlay_img = getattr(self, '_ed_overlay_img', '').strip()
+            ov_pos_val  = self._ed_ov_pos.get()
+            ov_scale    = self._ed_ov_scale.get()
+            results = []
+            for i, clip in enumerate(queue_copy):
+                out_name = f'clip_{i+1}_{clip["in"].replace(":","")}-{clip["out"].replace(":","")}.mp4'
+                out_path = str(Path(out_dir) / out_name)
+                self.after(0, lambda i=i, t=len(queue_copy):
+                    self._ed_status_lbl.config(text=f'Grabbing clip {i+1}/{t}...'))
+
+                # Build ffmpeg command
+                if overlay_img and Path(overlay_img).exists():
+                    # With overlay — need re-encode so filter can be applied
+                    # Position map
+                    _pos_map = {
+                        'top-left':     'overlay=10:10',
+                        'top-right':    'overlay=main_w-overlay_w-10:10',
+                        'bottom-left':  'overlay=10:main_h-overlay_h-10',
+                        'bottom-right': 'overlay=main_w-overlay_w-10:main_h-overlay_h-10',
+                        'center':       'overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2',
+                    }
+                    _ov_filter = _pos_map.get(ov_pos_val, 'overlay=main_w-overlay_w-10:main_h-overlay_h-10')
+                    _scale_filter = f'scale=iw*{ov_scale}/100:-1'
+                    cmd = [ffmpeg, '-y',
+                           '-ss', clip['in'], '-to', clip['out'],
+                           '-i', clip['src'],
+                           '-i', overlay_img,
+                           '-filter_complex',
+                           f'[1:v]{_scale_filter}[ov];[0:v][ov]{_ov_filter}',
+                           '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
+                           '-c:a', 'aac',
+                           '-avoid_negative_ts', 'make_zero',
+                           out_path]
+                else:
+                    # No overlay — stream copy (fastest)
+                    cmd = [ffmpeg, '-y',
+                           '-ss', clip['in'], '-to', clip['out'],
+                           '-i', clip['src'],
+                           '-c', 'copy',
+                           '-avoid_negative_ts', 'make_zero',
+                           out_path]
+                try:
+                    _sp2.run(cmd, capture_output=True, timeout=300)
+                    results.append((clip['label'], out_path, True))
+                except Exception as e:
+                    results.append((clip['label'], str(e), False))
+
+            self.after(0, lambda: self._ed_grab_done(results, out_dir))
+
+        _eth2.Thread(target=_grab, daemon=True).start()
+
+    def _ed_grab_done(self, results, out_dir):
+        self._ed_grab_btn.config(state='normal', text='⚡ Grab Clips')
+        ok = [r for r in results if r[2]]
+        fail = [r for r in results if not r[2]]
+        self._ed_status_lbl.config(
+            text=f'✅ {len(ok)} clip(s) saved to {out_dir}' +
+                 (f' | ⚠ {len(fail)} failed' if fail else ''))
+        if len(ok) == 1:
+            # Auto-switch to Auto Edit with the clip loaded
+            _path = ok[0][1]
+            self.log(f'🎬 Editor: 1 clip grabbed — loading into Auto Edit', ACCENT)
+            self._switch_nb('clips')
+            self.after(100, lambda: self._switch_sub_clips('auto_edit'))
+            self.after(200, lambda: self.v_video.set(_path))
+        elif ok:
+            messagebox.showinfo('Clips grabbed',
+                f'{len(ok)} clips saved to:\n{out_dir}' +
+                (f'\n\n⚠ {len(fail)} clip(s) failed.' if fail else ''))
+
+    def _switch_sub_clips(self, key):
+        """Switch to a sub-tab inside the Clip Finder tab."""
+        for k, f in self._clips_sub_frames.items():
+            f.pack_forget()
+        if key in self._clips_sub_frames:
+            self._clips_sub_frames[key].pack(fill='both', expand=True)
+        for k, b in self._clips_sub_btns.items():
+            b.config(bg=ACCENT if k==key else BG3,
+                     fg='#000' if k==key else FG2,
+                     font=('Segoe UI',8,'bold') if k==key else ('Segoe UI',8))
+
+    def _ed_load_from_kick(self, url, title=''):
+        """Called from Kick VOD browser — loads URL into Editor tab."""
+        self._switch_nb('editor')
+        self.after(100, lambda: self._ed_entry.delete(0, 'end'))
+        self.after(100, lambda: self._ed_entry.insert(0, url))
+        self.after(100, lambda: self._ed_entry.config(fg=FG))
+        self.after(150, self._ed_load_source)
+        if title:
+            self.after(200, lambda: self._ed_status_lbl.config(
+                text=f'Loaded from Kick: {title}'))
 
     def _build_studio_tab(self, p):
         # ── Top half: two panels side by side ────────────────────────────────
@@ -12653,6 +14033,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             ('fonttools',      'fonttools',                 'Font enumeration — required for Burn Subtitles'),
             ('ddgs',           'ddgs',                      'DuckDuckGo image search — required for Thumbnail Finder'),
             ('bgutil-ytdlp-pot-provider', 'bgutil-ytdlp-pot-provider', 'YouTube PO token plugin — required for 1080p downloads'),
+            # ── Editor tab ──────────────────────────────────────────────────
+            ('vlc',            'python-vlc',                'VLC Python bindings — enables inline video player in Editor tab (requires VLC media player installed on system)'),
         ]
 
         # Packages that need --no-deps to avoid DLL permission conflicts
@@ -12710,8 +14092,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
 
             # Heavy packages — skip import attempt, go straight to dist-info check
             # These fail to import in isolation (need full dependency chain loaded)
-            _skip_import = {'demucs', 'openai-whisper', 'torch', 'torchaudio',
-                            'mediapipe', 'faster-whisper'}
+            _skip_import = {'demucs', 'openai-whisper', 'torch', 'torchaudio', 'python-vlc', 'mediapipe', 'faster-whisper'}
             if pkg_name not in _skip_import:
                 # Primary: try importing
                 try:
@@ -12738,6 +14119,13 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             _name_lbl = tk.Label(mr, text=pkg, font=('Consolas', 8, 'bold'),
                     fg=FG2, bg=BG3, width=18, anchor='w')
             _name_lbl.pack(side='left', padx=(0,8))
+            # VLC download link — shown inline after the python-vlc row
+            if pkg == 'vlc':
+                import webbrowser as _wb_vlc
+                _vlc_link = tk.Label(mr, text='⬇ Download VLC', font=('Segoe UI', 8, 'underline'),
+                                     fg=ACCENT, bg=BG3, cursor='hand2')
+                _vlc_link.bind('<Button-1>', lambda e: _wb_vlc.open('https://www.videolan.org/vlc/'))
+                _vlc_link.pack(side='right', padx=(0,8))
             def _update_dot(p=pkg, dl=_dot_lbl, nl=_name_lbl):
                 ok = _pkg_installed_check(p)
                 dl.config(text='✅' if ok else '○', fg=GREEN if ok else FG3)
@@ -14521,7 +15909,8 @@ if __name__ == '__main__':
         _CNW = 0x08000000
         _flag  = USER_DIR / 'pending_update.flag'
         _stamp = USER_DIR / 'install_done.stamp'
-        _ALL = [('setuptools', 'setuptools'), ('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi==0.7.4'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider')]
+        # curl-cffi pinned to 0.7.4 (remote stability fix); python-vlc kept from local work
+        _ALL = [('setuptools', 'setuptools'), ('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi==0.7.4'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider'), ('vlc', 'python-vlc')]
         _force = _flag.exists() or not _stamp.exists()
         if not _force:
             _miss = []

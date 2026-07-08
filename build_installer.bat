@@ -45,6 +45,21 @@ copy "clipfinder_core.py"  "ClipFinder_dist\clipfinder_core.py"  >nul
 if exist "clipfinder.ico"  copy "clipfinder.ico"  "ClipFinder_dist\clipfinder.ico"  >nul
 if exist "preview.webp"    copy "preview.webp"    "ClipFinder_dist\preview.webp"    >nul
 if exist "assets\clipfinder_logo_512.png"  copy "assets\clipfinder_logo_512.png"  "ClipFinder_dist\clipfinder_logo_512.png"  >nul
+
+:: Bundle VLC DLLs so users don't need VLC installed separately
+echo Bundling VLC DLLs...
+set VLC_SRC=
+if exist "C:\Program Files\VideoLAN\VLC" set VLC_SRC=C:\Program Files\VideoLAN\VLC
+if exist "C:\Program Files (x86)\VideoLAN\VLC" set VLC_SRC=C:\Program Files (x86)\VideoLAN\VLC
+if not "%VLC_SRC%"=="" (
+    mkdir "ClipFinder_dist\vlc" 2>nul
+    copy "%VLC_SRC%\libvlc.dll"     "ClipFinder_dist\vlc\" >nul 2>&1
+    copy "%VLC_SRC%\libvlccore.dll" "ClipFinder_dist\vlc\" >nul 2>&1
+    xcopy /s /q "%VLC_SRC%\plugins" "ClipFinder_dist\vlc\plugins\" >nul 2>&1
+    echo     VLC bundled from %VLC_SRC%
+) else (
+    echo     WARNING: VLC not found - Editor tab player will require VLC installed by user
+)
 copy "README.md"    "ClipFinder_dist\README.md"    >nul 2>&1
 copy "CHANGELOG.md" "ClipFinder_dist\CHANGELOG.md" >nul 2>&1
 

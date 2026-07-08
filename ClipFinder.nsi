@@ -60,6 +60,10 @@ Section "ClipFinder" SecMain
     File /nonfatal "ClipFinder_dist\vision_refs\roobet_casino.png"
     File /nonfatal "ClipFinder_dist\vision_refs\rainbet_casino.png"
 
+    ; Bundled VLC DLLs — enables Editor tab player without separate VLC install
+    SetOutPath "$INSTDIR\vlc"
+    File /nonfatal /r "ClipFinder_dist\vlc\*.*"
+
     SetOutPath "$INSTDIR"
     Delete "$INSTDIR\install_done.stamp"
     Delete "$INSTDIR\pending_update.flag"
@@ -91,6 +95,7 @@ Section "Uninstall"
     Delete "$INSTDIR\install_done.stamp"
     Delete "$INSTDIR\pending_update.flag"
     RMDir /r "$INSTDIR\python"
+    RMDir /r "$INSTDIR\vlc"
     Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
     RMDir  "$SMPROGRAMS\${APP_NAME}"
     Delete "$DESKTOP\${APP_NAME}.lnk"
