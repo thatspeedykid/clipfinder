@@ -1,5 +1,36 @@
 # ClipFinder Changelog
 
+## v1.3.9.0 — July 2026
+
+### 🤖 AI Providers — Refreshed & Verified
+- Removed decommissioned Groq models: `llama-3.1-70b-versatile` (dead since Jan 2025) and `llama3-8b-8192` (dead since Aug 2025) — these were returning 400 errors
+- Added `openai/gpt-oss-120b` and `openai/gpt-oss-20b` as future-proof successors (`llama-3.x` versatile/instant deprecate Aug 16 2026)
+- OpenRouter: removed dead/nonexistent IDs (`qwen3.6-plus`, `gemma-3-12b-it`, `mistral-small-3.1`); added verified `qwen3-next-80b`, `gemma-4-31b`, `nemotron-nano-9b`
+- Every model ID verified against the live Groq + OpenRouter catalogs
+- Synced `clipfinder_core.py` model list to match (it was even further out of date)
+
+### ✂️ Better Clips — Selection Overhaul
+- Clip cuts now **snap to real sentence boundaries** — no more mid-word or mid-thought starts/ends
+- The 60–160s length rule is now **enforced in code**, not just requested in the prompt: too-short clips are extended toward the ideal length, over-long clips are trimmed, and clips that can't form a real moment are dropped
+- **Overlapping near-duplicate clips** (from different providers/chunks) are merged, keeping the higher-scored one
+- Clips are ranked by score, then by the hook/engagement/value/shareability sub-scores
+- Fixed a broken "verify descriptions" pass that silently did nothing and could overwrite the AI's summary with a raw transcript fragment
+
+### 🐛 Bug Fixes
+- **Auto-updater:** fixed a crash (`UnboundLocalError` on `tag`) that broke updates for anyone updating to a release with `clipfinder.py` attached as an asset
+- **Auto-updater:** fixed a crash (`NameError` on `shutil`) when `clipfinder.py` isn't in the default folder
+- **Transcription:** fixed whisper "Go. Go. Go." hallucination loops — added logprob threshold + no-fallback (whisper.cpp) and `no_speech` / `compression_ratio` / `condition_on_previous_text` (faster-whisper)
+- **AI provider UI:** fixed the provider note and "Get free key" URL never displaying (an infinite recursion swallowed by a bare `except`)
+- **AI analysis:** an empty transcript section is no longer logged as an error with 3 wasted retries — it's recognized as "no clip here" after one cross-check
+
+### ⚡ Performance
+- Fixed the **~5-second freeze on every launch** — startup no longer imports the entire ML stack (torch, OpenCV, whisper) just to check packages exist; it uses `importlib.find_spec` instead
+
+### 🎨 UI
+- Fixed unreadable secondary text — the muted label color was darker than the tertiary one (inverted contrast); it's now properly legible on the dark background
+
+> **Note:** the auto-updater fixes only take effect from v1.3.9.0 onward. If your current version's auto-update fails, download this release manually once — future updates will work automatically.
+
 ## v1.3.6 — May 2026
 
 ### 🎯 Vision Mode (NEW)

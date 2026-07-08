@@ -16,35 +16,38 @@ from pathlib import Path
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
-        # NOTE: gemini-1.5-* ALL DEAD (404). gemini-2.0-flash shuts down June 1 2026.
+        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
     'Groq (Free)': {
         'lib':    'groq',
+        # Verified current on Groq (Jul 2026). Removed decommissioned models:
+        # mixtral-8x7b-32768, llama3-8b-8192, llama-3.1-70b-versatile. gpt-oss
+        # added as successors (llama-3.x versatile/instant deprecate Aug 16 2026).
         'models': [
-            'llama-3.3-70b-versatile', # 32k context, smarter
-            'mixtral-8x7b-32768',      # 32k context window
-            'llama-3.1-8b-instant',    # 8k context — fast but small
-            'llama3-8b-8192',          # 8k context fallback
+            'llama-3.3-70b-versatile',   # 32k context — smartest working today
+            'openai/gpt-oss-120b',       # future-proof large (post Aug 2026)
+            'llama-3.1-8b-instant',      # fast, low latency
+            'openai/gpt-oss-20b',        # fast future-proof fallback
         ],
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
     },
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
+        # Verified against OpenRouter free catalog (Jul 2026). Removed dead ids:
+        # qwen3.6-plus (never existed), gemma-3-12b (now Gemma 4), mistral-small-3.1.
         'models': [
-            'openrouter/auto',                              # OR's own free router — auto-picks best available
-            'meta-llama/llama-3.3-70b-instruct:free',      # Llama 3.3 70B — top free model
-            'nvidia/nemotron-3-super-120b-a12b:free',       # NVIDIA 120B — large context
-            'google/gemma-3-12b-it:free',                   # Gemma 3 12B
-            'meta-llama/llama-3.1-8b-instruct:free',        # Llama 3.1 8B — fast fallback
-            'mistralai/mistral-small-3.1:free',              # Mistral Small 3.1
-            'qwen/qwen3.6-plus:free',                        # Qwen — last resort
+            'openrouter/auto',                          # OR free router — auto-picks best available
+            'nvidia/nemotron-3-super-120b-a12b:free',   # NVIDIA 120B MoE — 1M context, top free
+            'meta-llama/llama-3.3-70b-instruct:free',   # Llama 3.3 70B — reliable
+            'qwen/qwen3-next-80b-a3b-instruct:free',    # Qwen3-Next 80B
+            'google/gemma-4-31b-it:free',               # Gemma 4 31B
+            'nvidia/nemotron-nano-9b-v2:free',          # fast small fallback
         ],
         'url':    'https://openrouter.ai/keys',
-        'note':   '50+ free models — no credit card needed',
+        'note':   'Free — no credit card needed',
     },
 }
 

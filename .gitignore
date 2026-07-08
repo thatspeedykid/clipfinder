@@ -3,6 +3,8 @@ dist/
 build/
 ClipFinder_dist/
 _launcher_build/
+ClipFinder_Setup.exe
+*_Setup.exe
 *.spec
 __pycache__/
 *.pyc
@@ -27,9 +29,3 @@ whisper_models/
 .DS_Store
 Thumbs.db
 desktop.ini
-"ClipFinder_Setup.exe" 
-"ClipFinder_dist/" 
-ClipFinder_Setup.exe 
-ClipFinder_dist/ 
-ClipFinder_Setup.exe 
-ClipFinder_dist/ 
