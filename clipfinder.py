@@ -5284,12 +5284,12 @@ class App(tk.Tk):
                     # Core download failure is non-fatal — old core still works
                     print(f'[CF] Core module update skipped: {_core_err}')
 
-                # 1.3.8.2: Download new logo PNG so existing installs get the updated icon
-                # This block can be removed in 1.3.9+ once all users have updated
+                # Download new logo PNG so existing installs get the updated icon
+                # (kept until all users have moved past the icon-change release)
                 try:
                     _pw.after(0, lambda: _status_var.set('Downloading updated logo...'))
                     _logo_dst = Path(_sys3.argv[0]).parent / 'clipfinder_logo_512.png'
-                    _tag = release_data.get('tag_name', 'v1.3.8.2')
+                    _tag = release_data.get('tag_name', f'v{new_version}')
                     _logo_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{_tag}/assets/clipfinder_logo_512.png'
                     _ur3.urlretrieve(_logo_url, str(_logo_dst))
                     print(f'[CF] Logo updated at {_logo_dst}')
