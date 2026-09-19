@@ -1664,78 +1664,84 @@ def ensure_ffmpeg():
     return 'ffmpeg'
 
 
-def ensure_nodejs():
-    """Auto-download portable Node.js if not found. Returns path to node.exe."""
-    import shutil as _sh, zipfile as _zf, tempfile as _tf, urllib.request as _ur
-    # Check if already on PATH
-    node = _sh.which('node')
-    if node:
-        return node
-    # Check our own install location
-    node_dir = USER_DIR / 'node'
-    node_exe = node_dir / 'node.exe'
-    if node_exe.exists():
-        return str(node_exe)
-    import platform as _pl
-    if _pl.system() != 'Windows':
-        print('Please install Node.js: https://nodejs.org')
-        return None
-    print('Node.js not found — downloading portable version...')
-    node_dir.mkdir(parents=True, exist_ok=True)
-    # Node.js portable zip for Windows x64
-    url = 'https://nodejs.org/dist/v20.19.0/node-v20.19.0-win-x64.zip'
-    zip_path = Path(_tf.gettempdir()) / 'node_dl.zip'
-    print('Downloading Node.js (~30MB)...')
-    _ur.urlretrieve(url, zip_path)
-    with _zf.ZipFile(zip_path, 'r') as z:
-        for name in z.namelist():
-            # Extract just node.exe from the zip root folder
-            if name.endswith('/node.exe') and name.count('/') == 1:
-                with z.open(name) as s, open(node_exe, 'wb') as d:
-                    d.write(s.read())
-                break
-    zip_path.unlink(missing_ok=True)
-    if node_exe.exists():
-        print(f'Node.js downloaded to {node_exe}')
-        return str(node_exe)
+_NODE_MIN_MAJOR = 22
+_NODE_URL = 'https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip'   # Node 24 LTS "Krypton"
+_NODE_MAJOR_CACHE = {}
+
+def _node_major(exe):
+    """Major version of a node executable (0 if it does not run). Cached per path."""
+    if exe in _NODE_MAJOR_CACHE:
+        return _NODE_MAJOR_CACHE[exe]
+    import subprocess as _sp
+    major = 0
+    try:
+        r = _sp.run([exe, '--version'], capture_output=True, text=True, timeout=15, creationflags=_UM_CNW)
+        m = _um_re.match(r'v(\d+)\.', (r.stdout or '').strip())
+        major = int(m.group(1)) if m else 0
+    except Exception:
+        major = 0
+    _NODE_MAJOR_CACHE[exe] = major
+    return major
+
+def find_nodejs():
+    """A Node.js >= 22 that yt-dlp can use as its YouTube JS runtime, or None (no download here)."""
+    import shutil as _sh
+    own = USER_DIR / 'node' / 'node.exe'
+    for c in (str(own) if own.exists() else None, _sh.which('node')):
+        if c and _node_major(c) >= _NODE_MIN_MAJOR:
+            return c
     return None
 
-
-def ensure_bgutil(status_cb=None):
-    """Install bgutil-ytdlp-pot-provider plugin + portable Node.js for YouTube 1080p."""
-    import sys as _sys, subprocess as _sp
-    import shutil as _sh
-
-    def _log(msg):
+def ensure_nodejs(status_cb=None):
+    """Path to Node.js >= 22, downloading the portable Windows build (~35MB) if none is usable.
+    yt-dlp needs a JavaScript runtime to solve YouTube's player challenges; an older Node
+    (the 20.x that earlier versions installed) is too old for its solver. Returns None on failure."""
+    import zipfile as _zf, platform as _pl
+    def _say(msg):
         print(msg)
-        if status_cb: status_cb(msg)
-
-    # 1. Ensure Node.js is available
-    node_path = ensure_nodejs()
-    if node_path:
-        _log(f'✅ Node.js: {node_path}')
-        # Add node dir to PATH for this session so bgutil can find it
-        import os as _os
-        node_dir = str(Path(node_path).parent)
-        if node_dir not in _os.environ.get('PATH', ''):
-            _os.environ['PATH'] = node_dir + _os.pathsep + _os.environ.get('PATH', '')
-    else:
-        _log('⚠ Node.js unavailable — YouTube may be limited to 720p')
-
-    # 2. Install the pip plugin
+        if status_cb:
+            try: status_cb(msg)
+            except Exception: pass
+    found = find_nodejs()
+    if found:
+        return found
+    if _pl.system() != 'Windows':
+        _say('Please install Node.js 22 or newer: https://nodejs.org')
+        return None
+    node_dir = USER_DIR / 'node'
+    node_exe = node_dir / 'node.exe'
     try:
-        _r = _sp.run(
-            [_sys.executable, '-m', 'pip', 'install', 'bgutil-ytdlp-pot-provider',
-             '--target', str(PKGS_DIR), '-q', '--upgrade'],
-            capture_output=True, text=True)
-        if _r.returncode == 0:
-            _log('✅ bgutil-ytdlp-pot-provider installed')
-        else:
-            _log(f'⚠ bgutil install warning: {_r.stderr[-200:]}')
+        node_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = node_dir / 'node_dl.zip'
+        _say('Downloading Node.js 24 (one time, ~35MB) for YouTube...')
+        _um_download(_NODE_URL, zip_path, timeout=60)
+        new_exe = node_dir / 'node.exe.new'
+        with _zf.ZipFile(zip_path, 'r') as z:
+            for name in z.namelist():
+                if name.endswith('/node.exe') and name.count('/') == 1:
+                    with z.open(name) as s, open(new_exe, 'wb') as d:
+                        _um_sh.copyfileobj(s, d)
+                    break
+        try: zip_path.unlink()
+        except OSError: pass
+        if not new_exe.exists() or new_exe.stat().st_size < 10_000_000:
+            raise RuntimeError('node.exe missing from the downloaded archive')
+        _um_os.replace(new_exe, node_exe)
+        _NODE_MAJOR_CACHE.pop(str(node_exe), None)
+        if _node_major(str(node_exe)) >= _NODE_MIN_MAJOR:
+            _say(f'Node.js ready: {node_exe}')
+            return str(node_exe)
+        _say('The downloaded Node.js did not start')
     except Exception as e:
-        _log(f'⚠ bgutil install error: {e}')
+        _say(f'Node.js download failed: {str(e)[:120]}')
+    return None
 
-    _ensure_pkgs_on_path()
+def yt_js_runtime_opts(status_cb=None, download=True):
+    """yt-dlp options that give it a JS runtime for YouTube ({} if none can be found)."""
+    exe = ensure_nodejs(status_cb) if download else find_nodejs()
+    if not exe:
+        return {}
+    return {'js_runtimes': {'node': {'path': exe}}}
 
 
 # ── Now safe to import everything ─────────────────────────────────────────────
@@ -12488,6 +12494,7 @@ Return ONLY the JSON array, no other text."""
             return
         self._dl_queue_btn.config(state='disabled', text='⬇ Downloading...')
         self._dl_queue_cancel = False  # queue-level cancel flag
+        _q_ok = [0]
         def _run_queue():
             for i, url in enumerate(urls):
                 if self._dl_queue_cancel:
@@ -12499,13 +12506,15 @@ Return ONLY the JSON array, no other text."""
                 ))
                 self._dl_cancel_requested = False
                 self._in_queue = True  # flag: suppress per-item done popup
-                folder = self.v_dl_folder.get().strip()
-                Path(folder).mkdir(parents=True, exist_ok=True)
-                self._dl_log_write(f'\n[Queue {i+1}/{len(urls)}] {url}', ACCENT2)
-                self._dl_log_write(f'Starting download...', FG2)
-                self._dl_log_write(f'URL: {url}', FG2)
                 try:
+                    folder = self.v_dl_folder.get().strip()
+                    Path(folder).mkdir(parents=True, exist_ok=True)
+                    self._dl_log_write(f'\n[Queue {i+1}/{len(urls)}] {url}', ACCENT2)
+                    self._dl_log_write(f'Starting download...', FG2)
+                    self._dl_log_write(f'URL: {url}', FG2)
                     self._dl_run(url, folder)
+                    if getattr(self, '_dl_last_ok', False):
+                        _q_ok[0] += 1
                 except Exception as _qe:
                     self._dl_log_write(f'❌ Queue item {i+1} failed: {_qe}', RED)
                 self._in_queue = True  # keep flag set until loop ends
@@ -12514,7 +12523,8 @@ Return ONLY the JSON array, no other text."""
             self.after(0, lambda: (
                 self._dl_queue_btn.config(state='normal', text='⬇  Download Queue'),
                 self._dl_queue_status.config(
-                    text=f'✅ {len(urls)} done' if not self._dl_queue_cancel else '⛔ Cancelled'),
+                    text=(f'✅ {_q_ok[0]}/{len(urls)} done' if _q_ok[0] == len(urls) else f'⚠ {_q_ok[0]}/{len(urls)} downloaded')
+                         if not self._dl_queue_cancel else '⛔ Cancelled'),
                 self.set_progress('', pct=0),
                 self._dl_run_pending_transcribe(),   # auto-transcribe waits until the whole queue is done
             ))
@@ -12542,6 +12552,8 @@ Return ONLY the JSON array, no other text."""
         threading.Thread(target=self._dl_run, args=(url, folder), daemon=True).start()
 
     def _dl_run(self, url, folder):
+        self._dl_last_ok = False
+        _out_folder = _dl_tmp_id = None       # set once known; used by the cleanup in `finally`
         try:
             try:
                 import yt_dlp, shutil as _sh, re as _re, urllib.request as _ur, json as _json
@@ -12611,7 +12623,6 @@ Return ONLY the JSON array, no other text."""
                 'outtmpl': str(Path(_out_folder) / f'_cftmp_{_dl_tmp_id}_%(uploader)s - %(title)s.%(ext)s'),
                 'postprocessors': pp,
                 'merge_output_format': 'mp4',
-                'postprocessor_args': {'ffmpeg': ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k']},
                 'quiet': False,
                 'no_warnings': False,
                 'noplaylist': True,
@@ -12619,19 +12630,16 @@ Return ONLY the JSON array, no other text."""
                 'verbose': False,
                 'progress_hooks': [self._dl_progress_hook],
                 'concurrent_fragment_downloads': 8,  # parallel fragments = much faster for VODs
-                # YouTube n-challenge workarounds
-                # Use ios client — doesn't need JS runtime for n-challenge
-                # ios works with cookies and doesn't require po_token
-                'extractor_args': {'youtube': {
-                    'player_client': ['ios', 'web'],
-                    'skip': ['translated_subs', 'hls', 'dash'],
-                }},
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
                 },
             }
             if ffmpeg_loc:
                 ydl_opts['ffmpeg_location'] = ffmpeg_loc
+            if quality != 'audio':
+                # keep the video stream, AAC audio (audio-only downloads must NOT get these: they would
+                # override the mp3 encoder of FFmpegExtractAudio)
+                ydl_opts['postprocessor_args'] = {'ffmpeg': ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k']}
 
             # Kick.com — resolve the VOD/clip to its public stream URL ourselves. yt-dlp's
             # Kick extractor still calls an API that 404s for the new UUIDv7 VOD ids.
@@ -12664,9 +12672,16 @@ Return ONLY the JSON array, no other text."""
             cookies = self.v_cookies.get().strip()
             browser = getattr(self, 'v_cookies_browser', None)
             browser = browser.get().strip() if browser else ''
-            is_youtube = any(x in url.lower() for x in ['youtube.com', 'youtu.be'])
-            is_twitter = any(x in url.lower() for x in ['twitter.com', 'x.com', 't.co'])
-            is_instagram = 'instagram.com' in url.lower()
+            try:
+                from urllib.parse import urlparse as _urlparse
+                _host = (_urlparse(url).hostname or '').lower()
+            except Exception:
+                _host = ''
+            def _host_is(*names):
+                return any(_host == n or _host.endswith('.' + n) for n in names)
+            is_youtube = _host_is('youtube.com', 'youtu.be', 'youtube-nocookie.com')
+            is_twitter = _host_is('twitter.com', 'x.com', 't.co')
+            is_instagram = _host_is('instagram.com')
             # Convert Rumble embed URLs to regular URLs
             if 'rumble.com/embed/' in url.lower():
                 import re as _re_rum
@@ -12688,28 +12703,11 @@ Return ONLY the JSON array, no other text."""
             has_browser = bool(browser)
 
             if (is_youtube or is_instagram) and has_browser:
-                # Browser cookies unlock YouTube 1080p and Instagram private/story content
-                # Try to pre-copy the cookie database to avoid lock issues when browser is open
-                try:
-                    import tempfile as _tf_ck, shutil as _sh_ck, sqlite3 as _sq_ck
-                    _browser_lower = browser.lower()
-                    _cookie_paths = {
-                        'brave':   Path.home() / 'AppData/Local/BraveSoftware/Brave-Browser/User Data/Default/Network/Cookies',
-                        'chrome':  Path.home() / 'AppData/Local/Google/Chrome/User Data/Default/Network/Cookies',
-                        'edge':    Path.home() / 'AppData/Local/Microsoft/Edge/User Data/Default/Network/Cookies',
-                        'firefox': None,  # Firefox uses different format, let yt-dlp handle it
-                    }
-                    _ck_src = _cookie_paths.get(_browser_lower)
-                    if _ck_src and _ck_src.exists():
-                        _ck_tmp = Path(_tf_ck.gettempdir()) / f'cf_{_browser_lower}_cookies_tmp'
-                        _sh_ck.copy2(str(_ck_src), str(_ck_tmp))
-                        self._dl_log_write(f'🍪  Using {browser} browser cookies', FG2)
-                    else:
-                        ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
-                        self._dl_log_write(f'🍪  Using {browser} browser cookies', FG2)
-                except Exception:
-                    ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
-                    self._dl_log_write(f'🍪  Using {browser} browser cookies', FG2)
+                # Browser cookies unlock YouTube HD / age-gated videos and Instagram private content.
+                # yt-dlp reads the browser's cookie database itself; if the browser has it locked the
+                # error handler below tells the user to close the browser.
+                ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
+                self._dl_log_write(f'🍪  Using {browser} browser cookies', FG2)
             elif has_cookies:
                 ydl_opts['cookiefile'] = cookies
                 self._dl_log_write('🍪  Using cookies.txt', FG2)
@@ -12730,15 +12728,22 @@ Return ONLY the JSON array, no other text."""
             is_tiktok  = any(x in url.lower() for x in ['tiktok.com', 'vm.tiktok.com'])
             client_attempts = []  # defined here so fallback loop never errors
 
-            if is_youtube and quality != 'audio':
-                # PO token plugin (bgutil-ytdlp-pot-provider) is installed at first launch
-                # It hooks into yt-dlp automatically — no extra config needed
-                client_attempts = [
-                    (None, fmt),
-                    (None, 'bestvideo+bestaudio/best[ext=mp4]/best'),
-                    (None, 'best'),
-                ]
-
+            if is_youtube:
+                # yt-dlp solves YouTube's player challenges with a JavaScript runtime (Node >= 22 or Deno)
+                # plus the yt-dlp-ejs package. Without one YouTube only offers storyboards/low quality.
+                _js = yt_js_runtime_opts(status_cb=lambda m: self._dl_log_write(f'🟢 {m}', FG2))
+                if _js:
+                    ydl_opts.update(_js)
+                else:
+                    self._dl_log_write('⚠️  No JavaScript runtime found (Node.js 22+ or Deno) - YouTube may only give low quality', YELLOW)
+                if quality == 'audio':
+                    client_attempts = [(None, fmt), (None, 'bestaudio/best')]
+                else:
+                    client_attempts = [
+                        (None, fmt),
+                        (None, 'bestvideo+bestaudio/best[ext=mp4]/best'),
+                        (None, 'best'),
+                    ]
 
             elif is_twitch:
                 # Twitch VODs: chunked format is highest quality
@@ -12773,9 +12778,8 @@ Return ONLY the JSON array, no other text."""
                     (None, 'best'),
                 ]
             else:
-                # Generic — web client + fmt
                 client_attempts = [
-                    (['web'],              fmt),
+                    (None,                 fmt),
                     (None,                 'best[ext=mp4]/best'),
                 ]
 
@@ -12808,13 +12812,6 @@ Return ONLY the JSON array, no other text."""
                     if is_twitch and _ci == 0:
                         _opts.pop('cookiefile', None)
                         _opts.pop('cookiesfrombrowser', None)
-                    if _clients and is_youtube:
-                        _opts['extractor_args'] = {'youtube': {
-                            'player_client': _clients,
-                            'skip': ['translated_subs'],
-                        }}
-                    elif not _clients:
-                        _opts.pop('extractor_args', None)
                     client_str = '+'.join(_clients) if _clients else 'default'
                     self._dl_log_write(f'Trying {client_str} [{_fmt[:40]}]...', FG2)
                     info = _try_dl(_opts)
@@ -12827,8 +12824,12 @@ Return ONLY the JSON array, no other text."""
                 except Exception as _ex:
                     _ex_str = str(_ex)
                     last_err = _ex
+                    if 'cancelled by user' in _ex_str.lower() or getattr(self, '_dl_cancel_requested', False):
+                        raise                      # do not retry the next format after a Cancel
                     self._dl_log_write(f'  ↳ Failed: {_ex_str[:80]}', YELLOW)
-                    if is_twitter and ('authenticate' in _ex_str.lower() or '403' in _ex_str or 'auth' in _ex_str.lower()):
+                    _ex_low = _ex_str.lower()
+                    if is_twitter and ('authenticat' in _ex_low or 'login' in _ex_low or 'log in' in _ex_low
+                                       or _re.search(r'\b(?:401|403)\b', _ex_str)):
                         raise Exception(
                             'X/Twitter download failed — authentication required.\n\n'
                             'Fix: add a cookies.txt file from your logged-in X account.\n'
@@ -12836,11 +12837,11 @@ Return ONLY the JSON array, no other text."""
                             '2. Log into x.com in your browser\n'
                             '3. Click the extension → Export cookies for x.com\n'
                             '4. In ClipFinder Downloader tab → set the cookies.txt path')
-                    if 'instagram' in url.lower() and ('log in' in _ex_str.lower() or 'login' in _ex_str.lower() or 'authenticate' in _ex_str.lower()):
+                    if is_instagram and ('log in' in _ex_low or 'login' in _ex_low or 'authenticat' in _ex_low):
                         # yt-dlp can't handle Instagram Stories — try gallery-dl instead
                         self._dl_log_write('⚠ yt-dlp failed for Instagram — trying gallery-dl...', YELLOW)
                         try:
-                            _gdl_result = self._dl_instagram_gallery_dl(url, outdir, cookies)
+                            _gdl_result = self._dl_instagram_gallery_dl(url, _out_folder, cookies)
                             if _gdl_result:
                                 info = {'title': Path(_gdl_result).stem, '_gallery_dl_path': _gdl_result}
                                 break
@@ -12883,7 +12884,7 @@ Return ONLY the JSON array, no other text."""
             # Fix NA uploader — extract from URL path
             if not uploader or uploader.strip().upper() == 'NA':
                 import re as _re_url
-                _url_match = _re_url.search(r'(?:twitch\\.tv|kick\\.com|youtube\\.com/c?|x\\.com)/([^/?&#]+)', url)
+                _url_match = _re_url.search(r'(?:twitch\.tv|kick\.com|youtube\.com/c?|x\.com)/([^/?&#]+)', url)
                 uploader = _url_match.group(1) if _url_match else ''
             # Fix generic titles like "master", "index", "playlist"
             if title.lower() in ('master', 'index', 'playlist', 'na', 'video', ''):
@@ -12910,10 +12911,11 @@ Return ONLY the JSON array, no other text."""
                 import re as _re_fn
                 _safe_up = _re_fn.sub(r'[\\/:*?"<>|]', '', uploader or '').strip()
                 _safe_ti = _re_fn.sub(r'[\\/:*?"<>|]', '', title or '').strip()[:60]
-                if _safe_up and _safe_ti:   _new_name = f'{_safe_up} - {_safe_ti} - ClipFinder.mp4'
-                elif _safe_ti:              _new_name = f'{_safe_ti} - ClipFinder.mp4'
-                elif _safe_up:             _new_name = f'{_safe_up} - ClipFinder.mp4'
-                else:                      _new_name = f'ClipFinder_{_dl_tmp_id}.mp4'
+                _ext = Path(downloaded).suffix or '.mp4'      # keep .mp3 / .mkv / .jpg etc.
+                if _safe_up and _safe_ti:   _new_name = f'{_safe_up} - {_safe_ti} - ClipFinder{_ext}'
+                elif _safe_ti:              _new_name = f'{_safe_ti} - ClipFinder{_ext}'
+                elif _safe_up:             _new_name = f'{_safe_up} - ClipFinder{_ext}'
+                else:                      _new_name = f'ClipFinder_{_dl_tmp_id}{_ext}'
                 try:
                     _new_path = Path(downloaded).parent / _new_name
                     # Always add (1)(2) if same name exists — never overwrite or skip
@@ -12933,18 +12935,19 @@ Return ONLY the JSON array, no other text."""
             self._dl_log_write(f'✅  Done: {title}', GREEN)
             self._dl_log_write(f'📁  Saved to: {folder}', FG2)
 
-            # Find downloaded file\n            # Fallback: scan folder for most recent video file
+            # Fallback: newest media file THIS download produced (never an older file from a previous run)
             try:
                 if not downloaded:
-                    video_exts = {'.mp4','.mkv','.webm','.mov','.avi','.mp3'}
-                    for f in sorted(Path(folder).glob('*'),
+                    video_exts = {'.mp4','.mkv','.webm','.mov','.avi','.mp3','.m4a'}
+                    for f in sorted(Path(_out_folder).glob('*'),
                                     key=lambda x: x.stat().st_mtime, reverse=True):
-                        if f.suffix.lower() in video_exts:
+                        if f.suffix.lower() in video_exts and f.stat().st_mtime >= _dl_tmp_id - 5:
                             downloaded = str(f); break
             except Exception:
                 pass
 
             if downloaded:
+                self._dl_last_ok = True
                 self._last_dl_path = downloaded
                 # Auto-load if triggered from clip finder URL field
                 _load_clip = getattr(self, '_load_after_dl', False)
@@ -12981,6 +12984,15 @@ Return ONLY the JSON array, no other text."""
                 import traceback as _tb
                 self._dl_log_write(_tb.format_exc(), RED)
         finally:
+            self._load_after_dl = False       # a failed / cancelled download must not arm the next one
+            if not self._dl_last_ok and _out_folder and _dl_tmp_id:
+                # partial files of a failed or cancelled download (_cftmp_<id>_*.part / .ytdl / .f137.mp4 ...)
+                try:
+                    for _f in Path(_out_folder).glob(f'_cftmp_{_dl_tmp_id}_*'):
+                        try: _f.unlink()
+                        except OSError: pass
+                except Exception:
+                    pass
             self.after(0, lambda: self._dl_set_busy(False))
 
     def _dl_progress_hook(self, d):
