@@ -1650,7 +1650,7 @@ def ensure_ffmpeg():
            'ffmpeg-master-latest-win64-gpl.zip')
     zip_path = Path(_tf.gettempdir()) / 'ffmpeg_dl.zip'
     print('Downloading ffmpeg (~90MB)...')
-    _ur.urlretrieve(url, zip_path)
+    _um_download(url, zip_path, timeout=60)   # urlretrieve has no timeout - a stalled link hung forever
     with _zf.ZipFile(zip_path, 'r') as z:
         for name in z.namelist():
             if name.endswith('/ffmpeg.exe'):
@@ -2146,14 +2146,14 @@ CRITICAL RULES — you MUST follow these:
 
 Return ONLY a raw JSON array sorted by {order}:
 [
-  {{
+  {
     "start": "HH:MM:SS",
     "end":   "HH:MM:SS",
     "title": "Short label for this segment",
     "reason": "Why this is good content",
     "score": 9,
     "order": 1
-  }}
+  }
 ]
 
 TRANSCRIPT:
@@ -2249,14 +2249,14 @@ Score each clip 1-10 for viral/drama potential.
 
 Return ONLY a raw JSON array sorted by score DESCENDING:
 [
-  {{
+  {
     "start": "HH:MM:SS",
     "end": "HH:MM:SS",
     "speaker": "Sophie",
     "title": "Punchy title max 8 words",
     "reason": "One sentence why this goes viral",
     "score": 9
-  }}
+  }
 ]
 
 TRANSCRIPT:
@@ -2408,17 +2408,40 @@ def _make_scrollbar(parent, canvas, orient='vertical'):
     canvas.configure(yscrollcommand=_set) if orient == 'vertical' else canvas.configure(xscrollcommand=_set)
     return _set
 
+_LIVE_CFG = None   # the App's own cfg dict (set in App.__init__) - see save_cfg
+_CFG_SHARED_KEYS = ('dead_models', 'dead_models_ts', 'groq_tpd_until')   # written by workers via load_cfg/save_cfg
+
 def load_cfg():
     try:
         return json.loads(CONFIG_FILE.read_text())
     except Exception:
+        # Missing file = first run. A file that exists but does not parse is corrupt: fall back to the
+        # last good copy (.bak) so API keys are not silently lost on the next save.
+        try:
+            if CONFIG_FILE.exists():
+                return json.loads(Path(str(CONFIG_FILE) + '.bak').read_text())
+        except Exception:
+            pass
         return {}
 
 def save_cfg(d):
     try:
-        CONFIG_FILE.write_text(json.dumps(d, indent=2))
-    except Exception:
-        pass
+        # Keys that background workers persist through their own load_cfg()/save_cfg() round trip
+        # would be overwritten by the next save of the App's long-lived cfg dict, so mirror them.
+        if _LIVE_CFG is not None and d is not _LIVE_CFG:
+            for _k in _CFG_SHARED_KEYS:
+                if _k in d:
+                    _LIVE_CFG[_k] = d[_k]
+        # Atomic write (temp file + replace) so a crash mid-write can never leave a truncated config
+        _tmp = Path(f'{CONFIG_FILE}.{os.getpid()}.{threading.get_ident()}.tmp')
+        _tmp.write_text(json.dumps(d, indent=2))
+        os.replace(_tmp, CONFIG_FILE)
+        try:
+            _um_sh.copyfile(CONFIG_FILE, str(CONFIG_FILE) + '.bak')
+        except Exception:
+            pass
+    except Exception as _se:
+        print(f'[CF] save_cfg failed: {_se}')
 
 def attach_rightclick(widget, root):
     """Attach a right-click context menu to any widget based on its type."""
@@ -2484,9 +2507,11 @@ def ts_srt(s):
 def detect_gpu_encoder(ff):
     """Detect best available GPU encoder. Returns (vcodec, acodec, extra_args).
     Priority: NVIDIA NVENC > AMD AMF > Intel QSV > CPU fallback."""
+    global _GPU_DETECT_FAILED
+    _GPU_DETECT_FAILED = False
     try:
         r = subprocess.run([ff, '-encoders'],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         enc_list = (r.stdout or b'').decode(errors='replace') + (r.stderr or b'').decode(errors='replace')
 
         # NVIDIA NVENC
@@ -2495,7 +2520,7 @@ def detect_gpu_encoder(ff):
             test = subprocess.run(
                 [ff, '-f', 'lavfi', '-i', 'nullsrc=s=128x128:d=0.1',
                  '-c:v', 'h264_nvenc', '-f', 'null', '-'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
             if test.returncode == 0:
                 print('[CF] GPU: NVIDIA NVENC detected')
                 return 'h264_nvenc', 'aac', ['-preset', 'p5', '-rc', 'vbr', '-cq', '18', '-b:v', '0', '-maxrate', '20M', '-profile:v', 'high', '-b:a', '192k']
@@ -2505,7 +2530,7 @@ def detect_gpu_encoder(ff):
             test = subprocess.run(
                 [ff, '-f', 'lavfi', '-i', 'nullsrc=s=128x128:d=0.1',
                  '-c:v', 'h264_amf', '-f', 'null', '-'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
             if test.returncode == 0:
                 print('[CF] GPU: AMD AMF detected (RX 6600 XT)')
                 # usage=transcoding for quality, quality=speed for fast encode
@@ -2517,12 +2542,13 @@ def detect_gpu_encoder(ff):
             test = subprocess.run(
                 [ff, '-f', 'lavfi', '-i', 'nullsrc=s=128x128:d=0.1',
                  '-c:v', 'h264_qsv', '-f', 'null', '-'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
             if test.returncode == 0:
                 print('[CF] GPU: Intel QSV detected')
                 return 'h264_qsv', 'aac', ['-preset', 'medium', '-global_quality', '18', '-look_ahead', '1', '-b:a', '192k']
 
     except Exception as ex:
+        _GPU_DETECT_FAILED = True   # probe timed out / ffmpeg missing: get_encoder must not cache this
         print(f'[CF] GPU detection failed: {ex}')
 
     print('[CF] CPU: libx264 — high quality')
@@ -2533,6 +2559,8 @@ def detect_gpu_encoder(ff):
 
 # Cache result so we only probe once per session
 _GPU_ENCODER_CACHE = None
+_GPU_DETECT_FAILED = False   # last detect_gpu_encoder() hit an exception (transient), not a clean "no GPU"
+_GPU_DETECT_TRIES = 0
 
 # Models permanently decommissioned — auto-populated when 400 decommissioned error hit
 # Persisted to config so dead models are never retried across sessions
@@ -2605,9 +2633,13 @@ def detect_encoder_name():
     except: return "cpu"
 
 def get_encoder(ff):
-    global _GPU_ENCODER_CACHE
+    global _GPU_ENCODER_CACHE, _GPU_DETECT_TRIES
     if _GPU_ENCODER_CACHE is None:
-        _GPU_ENCODER_CACHE = detect_gpu_encoder(ff)
+        res = detect_gpu_encoder(ff)
+        _GPU_DETECT_TRIES += 1
+        if _GPU_DETECT_FAILED and _GPU_DETECT_TRIES < 3:
+            return res   # transient probe failure (timeout / AV scan): do not cache, retry next call
+        _GPU_ENCODER_CACHE = res
     return _GPU_ENCODER_CACHE
 
 def find_ffmpeg():
@@ -2707,15 +2739,19 @@ def _detect_whisper_device(use_gpu=True):
 
 
 
-_WCPP_INSTALL_LOCK = None  # module-level flag to prevent duplicate installs
+_WCPP_INSTALL_MUTEX = threading.Lock()  # held only WHILE an install runs, so a failed one can be retried
 
 def auto_install_whispercpp(model_size='base', status_cb=None):
-    """Auto-download whisper-whisper-cli.exe (Vulkan) + ggml model for AMD/Intel GPU."""
-    global _WCPP_INSTALL_LOCK
-    import threading as _thr_lock
-    if _WCPP_INSTALL_LOCK is not None:
-        return  # already running or done
-    _WCPP_INSTALL_LOCK = True
+    """Auto-download whisper-whisper-cli.exe (Vulkan) + ggml model for AMD/Intel GPU.
+    Raises RuntimeError if the install did not complete (or one is already running)."""
+    if not _WCPP_INSTALL_MUTEX.acquire(blocking=False):
+        raise RuntimeError('whisper.cpp install already running')
+    try:
+        return _auto_install_whispercpp_impl(model_size, status_cb)
+    finally:
+        _WCPP_INSTALL_MUTEX.release()
+
+def _auto_install_whispercpp_impl(model_size='base', status_cb=None):
     global _WHISPER_DEVICE_CACHE
     import urllib.request as _ur, zipfile as _zf, tempfile as _tf
     import platform as _pl, shutil as _sh, json as _j
@@ -2737,67 +2773,28 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
 
     # ── Step 1: Download binary if needed ────────────────────────────────────
     if real_exe.exists():
-        _size_mb = real_exe.stat().st_size // 1024 // 1024
-        if _size_mb < 10:
-            _log(f'Binary exists but only {_size_mb}MB — too small, deleting and re-downloading...')
+        _size_b = real_exe.stat().st_size
+        if _size_b < 50_000:   # whisper-cli.exe itself is only ~0.5MB (the GPU code lives in the DLLs)
+            _log(f'Binary exists but only {_size_b//1024}KB — too small, deleting and re-downloading...')
             real_exe.unlink()
         else:
-            _log(f'Binary already exists: {real_exe.name} ({_size_mb}MB)')
+            _log(f'Binary already exists: {real_exe.name} ({_size_b//1024}KB)')
     if not real_exe.exists():
         _log('Downloading whisper-whisper-cli.exe (Vulkan)...')
         tmp_zip = Path(_tf.gettempdir()) / 'whispercpp.zip'
         asset_url = None
 
-        # Fetch latest release and find the right asset URL directly
-        try:
-            req = _ur.Request(
-                'https://api.github.com/repos/ggerganov/whisper.cpp/releases/latest',
-                headers={'User-Agent': 'ClipFinder/1.0'})
-            with _ur.urlopen(req, timeout=20) as resp:
-                release = _j.loads(resp.read())
-
-            tag = release.get('tag_name', '')
-            _log(f'Latest release: {tag}')
-            all_assets = [(a['name'], a['browser_download_url'])
-                          for a in release.get('assets', [])]
-            _log(f'Available assets: {[n for n,_ in all_assets]}')
-
-            # Priority order — explicitly prefer vulkan-tagged builds
-            # v1.8.4 does NOT have a vulkan zip — go straight to fallbacks
-            PREFER = ['vulkan', 'bin-x64', 'win']
-            AVOID  = ['win32', 'blas', 'cublas', 'xcframework', '.jar', 'openvino']
-            scored = []
-            for name, url in all_assets:
-                nl = name.lower()
-                if not nl.endswith('.zip'): continue
-                if any(a in nl for a in AVOID): continue
-                score = sum(1 for p in PREFER if p in nl)
-                if score > 0:
-                    scored.append((score, name, url))
-            scored.sort(reverse=True)
-            # Only use GitHub API result if it's explicitly a Vulkan build
-            if scored and 'vulkan' in scored[0][1].lower():
-                _, best_name, asset_url = scored[0]
-                _log(f'Selected: {best_name} (score={scored[0][0]})')
-            else:
-                _log(f'No Vulkan asset in GitHub release — using known-good fallback URLs')
-        except Exception as e:
-            _log(f'GitHub API failed: {e}')
-
-        # Hardcoded fallbacks using known-good direct asset URLs
+        # Known-good direct asset URL. (The official ggml-org releases/latest API now lists no assets and
+        # the old v1.7.x vulkan zips / SourceForge mirror all return 404, so discovery was dead code.)
         if not asset_url:
             fallbacks = [
                 # jerryshell dedicated Vulkan Windows build — has ggml-vulkan.dll
                 'https://github.com/jerryshell/whisper.cpp-windows-vulkan-bin/releases/latest/download/whisper.cpp-windows-vulkan.zip',
-                # Official older vulkan-specific zips
-                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.5/whisper-1.7.5-bin-x64-release-vulkan.zip',
-                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.4/whisper-1.7.4-bin-x64-release-vulkan.zip',
-                'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.3/whisper-1.7.3-bin-x64-release-vulkan.zip',
             ]
             for fb in fallbacks:
                 try:
                     _log(f'Trying: {fb.split("/")[-1]}')
-                    _ur.urlretrieve(fb, str(tmp_zip))
+                    _um_download(fb, tmp_zip, timeout=60)
                     if tmp_zip.exists() and tmp_zip.stat().st_size > 100000:
                         asset_url = fb
                         _log('Fallback download succeeded')
@@ -2810,20 +2807,23 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
 
         if not asset_url:
             _log('ERROR: Could not find a download URL. Check https://github.com/ggerganov/whisper.cpp/releases')
-            return
+            raise RuntimeError('Could not find a whisper.cpp download (check your internet connection)')
 
         # Download if not already got from fallback loop
         if not tmp_zip.exists() or tmp_zip.stat().st_size < 100000:
             _log('Downloading zip...')
             try:
-                def _dlprogress(count, block, total):
-                    if total > 0 and count % 500 == 0:
-                        pct = min(100, int(count * block / total * 100))
-                        _log(f'Downloading... {pct}%')
-                _ur.urlretrieve(asset_url, str(tmp_zip), reporthook=_dlprogress)
+                _last_pct = [-10]
+                def _dlprogress(got, total):
+                    if total > 0:
+                        pct = min(100, int(got / total * 100))
+                        if pct >= _last_pct[0] + 10:
+                            _last_pct[0] = pct
+                            _log(f'Downloading... {pct}%')
+                _um_download(asset_url, tmp_zip, timeout=60, on_bytes=_dlprogress)
             except Exception as e:
                 _log(f'Download failed: {e}')
-                return
+                raise RuntimeError(f'whisper.cpp download failed: {e}')
 
         # Extract
         _log('Extracting...')
@@ -2852,23 +2852,24 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
             if not _has_vulkan_dll:
                 _log('⚠ This build does not include ggml-vulkan.dll — NOT a Vulkan build!')
                 _log('  Trying known-good Vulkan fallback URLs...')
-                import shutil as _sh_vk
-                _sh_vk.rmtree(str(install_dir), ignore_errors=True)
-                install_dir.mkdir(parents=True, exist_ok=True)
+                def _wipe_install_files():
+                    # Remove only the extracted files - never models/ (already-downloaded ggml models)
+                    for _f in install_dir.iterdir():
+                        try:
+                            if _f.is_file():
+                                _f.unlink()
+                        except OSError:
+                            pass
+                    models_dir.mkdir(parents=True, exist_ok=True)
+                _wipe_install_files()
                 _vulkan_fallbacks = [
                     # jerryshell/whisper.cpp-windows-vulkan-bin — dedicated Vulkan Windows builds
                     'https://github.com/jerryshell/whisper.cpp-windows-vulkan-bin/releases/latest/download/whisper.cpp-windows-vulkan.zip',
-                    # SourceForge mirror — has vulkan builds for older versions
-                    'https://sourceforge.net/projects/whisper-cpp.mirror/files/v1.7.6/whisper-bin-x64.zip/download',
-                    # Official older vulkan-specific zips (v1.7.x era)
-                    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.5/whisper-1.7.5-bin-x64-release-vulkan.zip',
-                    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.4/whisper-1.7.4-bin-x64-release-vulkan.zip',
-                    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.3/whisper-1.7.3-bin-x64-release-vulkan.zip',
                 ]
                 for _vfb in _vulkan_fallbacks:
                     try:
                         _log(f'Trying Vulkan build: {_vfb.split("/")[-1]}')
-                        _ur.urlretrieve(_vfb, str(tmp_zip))
+                        _um_download(_vfb, tmp_zip, timeout=60)
                         if tmp_zip.exists() and tmp_zip.stat().st_size > 100000:
                             import zipfile as _vzf
                             with _vzf.ZipFile(str(tmp_zip), 'r') as _vz:
@@ -2883,15 +2884,14 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
                                 _log('✅ Vulkan build installed successfully!')
                                 break
                             else:
-                                _sh_vk.rmtree(str(install_dir), ignore_errors=True)
-                                install_dir.mkdir(parents=True, exist_ok=True)
+                                _wipe_install_files()
                     except Exception as _vfe:
                         _log(f'Vulkan fallback failed: {_vfe}')
                         continue
 
         except Exception as e:
             _log(f'Extraction failed: {e}')
-            return
+            raise RuntimeError(f'whisper.cpp extraction failed: {e}')
 
         # Find the real CLI binary — prefer whisper-cli.exe or main.exe
         # Explicitly avoid server, talk-llama, stream, command (wrong tools)
@@ -2919,7 +2919,7 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
 
         if not real_exe.exists():
             _log('ERROR: Binary not found after extraction')
-            return
+            raise RuntimeError('whisper.cpp binary not found after extraction')
 
     _bsz = real_exe.stat().st_size
     _bsz_s = f'{_bsz//1024//1024}MB' if _bsz >= 1024*1024 else f'{_bsz//1024}KB'
@@ -2982,16 +2982,29 @@ def auto_install_whispercpp(model_size='base', status_cb=None):
                      f'ggml-{model_size}.bin')
         _sizes = {'tiny': 75, 'base': 142, 'small': 466, 'medium': 1500}
         _log(f'Downloading ggml-{model_size}.bin (~{_sizes.get(model_size, 142)}MB)...')
+        _dl_tmp = model_path.with_name(model_path.name + '.dl')   # only renamed to .bin once complete
         try:
-            def _reporthook(count, block, total):
-                if total > 0 and count % 300 == 0:
-                    pct = min(100, int(count * block / total * 100))
-                    _log(f'Model: {pct}%')
-            _ur.urlretrieve(model_url, str(model_path), reporthook=_reporthook)
+            _mstat = [0, 0, -5]   # got, total, last logged pct
+            def _reporthook(got, total):
+                _mstat[0], _mstat[1] = got, total
+                if total > 0:
+                    pct = min(100, int(got / total * 100))
+                    if pct >= _mstat[2] + 5:
+                        _mstat[2] = pct
+                        _log(f'Model: {pct}%')
+            _um_download(model_url, _dl_tmp, timeout=60, on_bytes=_reporthook)
+            if _mstat[1] > 0 and _mstat[0] < _mstat[1]:
+                raise OSError(f'incomplete download ({_mstat[0]} of {_mstat[1]} bytes)')
+            if _dl_tmp.stat().st_size < 1_000_000:
+                raise OSError('downloaded model file is too small')
+            os.replace(_dl_tmp, model_path)
             _log(f'Model ready: {model_path.name}')
         except Exception as e:
+            for _junk in (_dl_tmp, Path(str(_dl_tmp) + '.part')):
+                try: _junk.unlink()
+                except OSError: pass
             _log(f'Model download failed: {e}')
-            return
+            raise RuntimeError(f'whisper.cpp model download failed: {e}')
 
     _log('whisper.cpp GPU transcription ready! Restart or start a new transcription.')
     _WHISPER_DEVICE_CACHE = None
@@ -4028,6 +4041,8 @@ class App(tk.Tk):
         self.configure(bg=BG)
 
         self.cfg = load_cfg()
+        global _LIVE_CFG
+        _LIVE_CFG = self.cfg
 
         self.v_video    = tk.StringVar()
         self.v_outdir   = tk.StringVar(value=self.cfg.get('outdir', ''))
@@ -16019,7 +16034,21 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                             pct = min(95, int(count * block / total * 100))
                             self.after(0, lambda p=pct: self.set_progress(
                                 f'⬇ Downloading ggml-{size}.bin...', pct=p))
-                    _ur.urlretrieve(model_url, str(model_path), reporthook=_reporthook)
+                    # Download to a side file and only rename to .bin once complete: an interrupted
+                    # transfer used to leave a truncated ggml-*.bin that later counted as "already downloaded"
+                    _dl_tmp = model_path.with_name(model_path.name + '.dl')
+                    _dl_seen = [0, 0]
+                    try:
+                        _um_download(model_url, _dl_tmp, timeout=60,
+                                     on_bytes=lambda got, total: (_dl_seen.__setitem__(0, got), _dl_seen.__setitem__(1, total),
+                                                                  _reporthook(got // 8192, 8192, total) if total > 0 else None))
+                        if _dl_seen[1] > 0 and _dl_seen[0] < _dl_seen[1]:
+                            raise OSError(f'incomplete download ({_dl_seen[0]} of {_dl_seen[1]} bytes)')
+                        os.replace(_dl_tmp, model_path)
+                    finally:
+                        for _junk in (_dl_tmp, Path(str(_dl_tmp) + '.part')):
+                            try: _junk.unlink()
+                            except OSError: pass
                     if model_path.exists() and model_path.stat().st_size > 1000:
                         self.after(0, lambda: (
                             self.log(f'✅ ggml-{size}.bin ready ({model_path.stat().st_size//1024//1024}MB)', GREEN),
