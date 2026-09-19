@@ -1876,7 +1876,9 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                        '-lpt', '-0.7',  # logprob threshold — drops low-confidence segments
                        '-wt', '0.01',   # word threshold — avoids near-silence transcription
                        '--no-fallback', # skip temperature fallback that causes hallucinations
-                       '-vth', '0.6',   # VAD threshold — more aggressive silence detection
+                       # NOTE: a '-vth' flag used to be passed here. whisper-cli has no such option
+                       # (only -vt/--vad-threshold, which needs --vad and a VAD model), so it exited
+                       # with "unknown argument" and every GPU transcription fell back to slow CPU.
                 ]
                 if initial_prompt:
                     clean_prompt = initial_prompt[:200].replace('"', "'").strip()
