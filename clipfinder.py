@@ -3023,11 +3023,12 @@ def _analyze_audio_energy(video_path, ffmpeg_path, num_peaks=15):
     import subprocess as _sp, re as _re, json as _js
     try:
         # Get audio stats per 1-second window using silencedetect + volumedetect
-        cmd = [ffmpeg_path, '-i', video_path,
-               '-af', 'astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-',
+        # -vn: skip video decode (audio-only is ~5x faster); 1 s windows; long VODs need a long timeout
+        cmd = [ffmpeg_path, '-nostdin', '-i', video_path, '-vn',
+               '-af', 'aresample=16000,asetnsamples=n=16000:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-',
                '-f', 'null', '-']
-        r = _sp.run(cmd, capture_output=True, text=True, timeout=300)
-        output = r.stderr + r.stdout
+        r = _sp.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3600)
+        output = (r.stderr or '') + (r.stdout or '')
 
         # Parse RMS levels per frame
         rms_vals = []
@@ -3041,12 +3042,12 @@ def _analyze_audio_energy(video_path, ffmpeg_path, num_peaks=15):
 
         if not rms_vals:
             # Fallback: use silencedetect to find non-silent periods
-            cmd2 = [ffmpeg_path, '-i', video_path,
+            cmd2 = [ffmpeg_path, '-nostdin', '-i', video_path, '-vn',
                    '-af', 'silencedetect=noise=-30dB:d=0.5',
                    '-f', 'null', '-']
-            r2 = _sp.run(cmd2, capture_output=True, text=True, timeout=300)
+            r2 = _sp.run(cmd2, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3600)
             loud_times = []
-            for m in _re.finditer(r'silence_end: ([\d.]+)', r2.stderr):
+            for m in _re.finditer(r'silence_end: ([\d.]+)', r2.stderr or ''):
                 loud_times.append(float(m.group(1)))
             return sorted(loud_times[:num_peaks])
 
@@ -3076,8 +3077,8 @@ def _analyze_scene_changes(video_path, ffmpeg_path, threshold=0.4):
         cmd = [ffmpeg_path, '-i', video_path,
                '-vf', f'select=gt(scene\\,{threshold}),metadata=print:key=lavfi.scene_score',
                '-f', 'null', '-']
-        r = _sp.run(cmd, capture_output=True, text=True, timeout=300)
-        output = r.stderr + r.stdout
+        r = _sp.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
+        output = (r.stderr or '') + (r.stdout or '')
         times = []
         for m in _re.finditer(r'pts_time:([\d.]+)', output):
             try: times.append(float(m.group(1)))
@@ -3166,6 +3167,17 @@ def _find_whispercpp_model(model_size, model_dir=None):
             if p.exists(): return str(p)
     return None
 
+def _smart_cutoff_secs(initial_prompt, duration):
+    """Smart Transcribe: parse 'ignore/skip last N hour(s)/minute(s)' from the instructions.
+    Returns the second at which to stop transcribing, or None."""
+    m = re.search(r'(?:ignore|skip|don.t.process|dont.process)\s+(?:the\s+)?last\s+(\d+(?:\.\d+)?)\s*(hour|hr|minute|min)',
+                  (initial_prompt or '').lower())
+    if not m or not duration:
+        return None
+    cut = duration - int(float(m.group(1)) * (3600 if 'h' in m.group(2) else 60))
+    return cut if cut > 0 else None
+
+
 def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progress_cb=None, use_word_timestamps=False, use_gpu=True, log_cb=None):
     """Transcribe with best available backend:
     1. whisper.cpp + Vulkan (AMD/Intel/NVIDIA GPU on Windows — fastest)
@@ -3175,6 +3187,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
     use_gpu=False skips all GPU paths and forces CPU-only.
     """
     _ensure_pkgs_on_path()  # always check PKGS_DIR before importing whisper
+    _do_transcribe._cancelled = False  # clear any stale cancel flag left by an earlier cancelled task
     # Note: do NOT bust faster_whisper/ctranslate2/torch — busting them
     # breaks CUDA DLL initialization and causes GPU to not be detected
     import os as _os, warnings as _wn
@@ -3207,20 +3220,27 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
         _wmodel = _find_whispercpp_model(model_size, model_dir=_wcpp_cuda_dir / 'models')
         if not _wmodel:
             _wmodel = _find_whispercpp_model(model_size)
+    # whisper.cpp is run with -oj (segment-level JSON only, no per-token data), so callers that
+    # need word timestamps (Censor / Auto Edit) must use faster-whisper.
+    if use_word_timestamps:
+        _wcpp = None
+        _wmodel = None
+    _wc_dir = None  # per-run temp dir for the whisper.cpp wav/json (removed in the finally below)
     if _wcpp and _wmodel:
         try:
-            import subprocess as _sp2, tempfile as _tf2, json as _j2, re as _re2
+            import subprocess as _sp2, tempfile as _tf2, json as _j2, re as _re2, shutil as _sh_wc
             print(f'[CF] whisper.cpp found: {_wcpp}')
             print(f'[CF] Whisper device: Vulkan GPU (whisper.cpp)')
 
-            # Extract audio to wav first
+            # Extract audio to wav first (unique temp dir so concurrent runs / stale files can't clash)
             ff2 = ffmpeg_path or 'ffmpeg'
-            tmp_wav = Path(_tf2.gettempdir()) / 'cf_wcpp_audio.wav'
-            _sp2.run([ff2, '-y', '-i', vid, '-ar', '16000', '-ac', '1',
-                      '-f', 'wav', str(tmp_wav)],
-                     stdout=_sp2.PIPE, stderr=_sp2.PIPE)
+            _wc_dir = Path(_tf2.mkdtemp(prefix='cf_wcpp_'))
+            tmp_wav = _wc_dir / 'audio.wav'
+            _rc_ff = _sp2.run([ff2, '-y', '-i', vid, '-ar', '16000', '-ac', '1',
+                               '-f', 'wav', str(tmp_wav)],
+                              stdout=_sp2.PIPE, stderr=_sp2.PIPE)
 
-            if tmp_wav.exists():
+            if _rc_ff.returncode == 0 and tmp_wav.exists() and tmp_wav.stat().st_size > 1000:
                 # Output goes to same dir as wav file, named <stem>.json
                 out_base = str(tmp_wav.with_suffix(''))  # no extension
                 json_out = Path(out_base + '.json')
@@ -3229,7 +3249,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                 _vid_duration = 0
                 try:
                     import subprocess as _sp_dur, re as _re_dur2
-                    _r_dur = _sp_dur.run([str(ff), '-i', str(vid)], capture_output=True,
+                    _r_dur = _sp_dur.run([str(ff2), '-i', str(vid)], capture_output=True,
                                          text=True, timeout=10, errors='replace')
                     _dm2 = _re_dur2.search(r'Duration: (\d+):(\d+):(\d+)', _r_dur.stderr)
                     if _dm2:
@@ -3262,25 +3282,18 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 
                 # Smart Transcribe — parse instructions for time cutoffs and pass -d to whisper.cpp
                 # This skips transcribing sections entirely — genuinely faster
-                if log_cb:
-                    _smart = getattr(log_cb.__self__, 'v_smart_transcribe', None) if hasattr(log_cb, '__self__') else None
+                # log_cb is only passed by UI callers (Clip Finder / Post Studio), which own the checkbox;
+                # the checkbox state is persisted in the config (log_cb is a lambda, never a bound method).
                 _smart_on = False
                 try:
-                    _smart_on = bool(_smart and _smart.get())
+                    _smart_on = bool(log_cb) and bool(load_cfg().get('smart_transcribe', False))
                 except Exception:
                     pass
                 if _smart_on and initial_prompt:
-                    import re as _re_st
-                    _ip_lower = initial_prompt.lower()
-                    # "ignore/skip last N hour(s)/minute(s)"
-                    _last_m = _re_st.search(r'(?:ignore|skip|don.t.process|dont.process)\s+(?:the\s+)?last\s+(\d+(?:\.\d+)?)\s*(hour|hr|minute|min)', _ip_lower)
-                    if _last_m and _vid_duration:
-                        _amt = float(_last_m.group(1))
-                        _unit = _last_m.group(2)
-                        _cut_secs = _vid_duration - int(_amt * (3600 if 'h' in _unit else 60))
-                        if _cut_secs > 0:
-                            cmd += ['-d', str(int(_cut_secs * 1000))]  # -d takes milliseconds
-                            if log_cb: log_cb(f'⚡ Smart Transcribe: stopping at {int(_cut_secs//60)}:{int(_cut_secs%60):02d} (skipping last {_amt} {_unit})', '#88ccff')
+                    _cut_secs = _smart_cutoff_secs(initial_prompt, _vid_duration)
+                    if _cut_secs:
+                        cmd += ['-d', str(int(_cut_secs * 1000))]  # -d takes milliseconds
+                        if log_cb: log_cb(f'⚡ Smart Transcribe: stopping at {int(_cut_secs//60)}:{int(_cut_secs%60):02d} (skipping the end as instructed)', '#88ccff')
 
                 print(f'[CF] whisper.cpp cmd: {" ".join(cmd)}')
                 # Use Popen to stream output for live progress
@@ -3354,10 +3367,23 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                 _active_procs = getattr(_do_transcribe, '_active_procs', [])
                 _active_procs.append(proc)
                 _do_transcribe._active_procs = _active_procs
-                proc.wait(timeout=3600)
-                _cancelled[0] = True  # stop reader threads
-                _do_transcribe._active_procs = [p for p in _active_procs if p != proc]
-                t1.join(timeout=3); t2.join(timeout=3)
+                try:
+                    proc.wait(timeout=3600)
+                finally:
+                    # On timeout (or any error) never leave the whisper.cpp process running
+                    if proc.poll() is None:
+                        try:
+                            proc.kill(); proc.wait(timeout=10)
+                        except Exception:
+                            pass
+                    _do_transcribe._active_procs = [p for p in getattr(_do_transcribe, '_active_procs', []) if p is not proc]
+                    # Let the readers drain the pipes first, then tell them (and the progress timer) to stop
+                    t1.join(timeout=5); t2.join(timeout=5)
+                    _cancelled[0] = True
+                # Cancelled by the user (_cancel_task killed the process): don't run any retry / fallback
+                if getattr(_do_transcribe, '_cancelled', False):
+                    print('[CF] whisper.cpp cancelled')
+                    return {'segments': [], 'language': 'en', '_cancelled': True}
                 stderr_txt = '\n'.join(stderr_lines)
                 stdout_txt = '\n'.join(stdout_lines)
 
@@ -3375,7 +3401,8 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 
                 # Detect if Vulkan GPU actually ran — must see device detection AND actual transcription
                 _vulkan_device = 'ggml_vulkan: found' in stderr_txt.lower() or 'ggml_vulkan: 0 =' in stderr_txt.lower()
-                _actually_ran = any('[' in l and '-->' in l for l in stderr_lines)
+                # whisper-cli prints its '[t0 --> t1] text' segment lines to stdout (not stderr)
+                _actually_ran = any('[' in l and '-->' in l for l in stderr_lines + stdout_lines)
                 _error_exit = 'error: unknown argument' in stderr_txt or 'usage:' in stderr_txt
                 _vulkan_used = _vulkan_device and _actually_ran and not _error_exit
                 _gpu_fallback = not _vulkan_used
@@ -3421,7 +3448,7 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                     if progress_cb:
                         progress_cb(100, f'whisper.cpp done: {len(segments)} segments')
                     print(f'[CF] whisper.cpp done: {len(segments)} segments')
-                    return {'segments': segments, 'language': 'en'}
+                    return {'segments': segments, 'language': (data.get('result') or {}).get('language') or 'en'}
                 else:
                     rc = r.returncode
                     print(f'[CF] whisper.cpp failed (rc={rc})')
@@ -3480,37 +3507,23 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                         else:
                             print('[CF] vulkan-1.dll not found on system — cannot auto-fix')
 
-                    # Standard retry without --no-prints
-                    # Retry with --output-json fallback (older builds)
-                    if '-oj' in cmd:
-                        print('[CF] Retrying without --no-prints flag...')
-                        cmd_fallback = [c if c != '-oj' else '--output-json' for c in cmd_clean]
-                        r2 = _sp2.run(cmd_fallback, stdout=_sp2.PIPE, stderr=_sp2.PIPE, timeout=3600)
-                        if json_out.exists() and json_out.stat().st_size > 10:
-                            data = _j2.loads(json_out.read_text(encoding='utf-8'))
-                            segments = []
-                            for seg in data.get('transcription', []):
-                                start_ms = seg.get('offsets',{}).get('from',0)
-                                end_ms   = seg.get('offsets',{}).get('to',0)
-                                segments.append({
-                                    'start': start_ms/1000.0,
-                                    'end':   end_ms/1000.0,
-                                    'text':  seg.get('text','').strip()
-                                })
-                            print(f'[CF] whisper.cpp retry succeeded: {len(segments)} segments')
-                            return {'segments': segments, 'language': 'en'}
-                        print(f'[CF] Retry also failed: {(r2.stderr or b"").decode(errors="replace")[-200:]}')
+                    # (The old '-oj' -> '--output-json' retry was removed: they are exact aliases, so it
+                    #  just re-ran the identical hour-long command with no way to cancel it.)
         except Exception as _wcpp_err:
             print(f'[CF] whisper.cpp error: {_wcpp_err}, falling back...')
+        finally:
+            if _wc_dir is not None:
+                _sh_wc.rmtree(_wc_dir, ignore_errors=True)
     elif _wcpp and not _wmodel:
         print(f'[CF] whisper.cpp: no ggml-{model_size}.bin — downloading now...')
         try:
             import urllib.request as _ur2, threading as _thr2
             _models_dir = _app_path('whisper_cpp', 'models')
             _models_dir.mkdir(parents=True, exist_ok=True)
-            _model_dst  = _models_dir / f'ggml-{model_size}.bin'
+            _gname      = {'large': 'large-v3'}.get(model_size, model_size)  # same mapping as _find_whispercpp_model
+            _model_dst  = _models_dir / f'ggml-{_gname}.bin'
             _model_url  = (f'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/'
-                          f'ggml-{model_size}.bin')
+                          f'ggml-{_gname}.bin')
             _sizes = {'tiny':75,'base':142,'small':466,'medium':1500,'large':3100}
             print(f'[CF] Downloading ggml-{model_size}.bin (~{_sizes.get(model_size,"?")}MB)...')
             if progress_cb: progress_cb(0, f'Downloading ggml-{model_size}.bin...')
@@ -3522,7 +3535,27 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
                         _last_model_pct[0] = pct
                         print(f'[CF] Model download: {pct}%')
                         if progress_cb: progress_cb(pct, f'Downloading ggml model: {pct}%')
-            _ur2.urlretrieve(_model_url, str(_model_dst), reporthook=_hook)
+            # Download to a .part file with a socket timeout, then publish atomically so an
+            # interrupted/truncated download can never be picked up as a valid model later.
+            _part = _model_dst.with_name(_model_dst.name + '.part')
+            try:
+                with _ur2.urlopen(_model_url, timeout=60) as _resp, open(_part, 'wb') as _fh:
+                    _total = int(_resp.headers.get('Content-Length') or 0)
+                    _done = 0
+                    while True:
+                        _chunk = _resp.read(1 << 20)
+                        if not _chunk:
+                            break
+                        _fh.write(_chunk)
+                        _done += len(_chunk)
+                        _hook(_done, 1, _total)
+                if _total and _part.stat().st_size != _total:
+                    raise IOError('truncated download')
+                os.replace(_part, _model_dst)
+            except BaseException:
+                try: _part.unlink()
+                except OSError: pass
+                raise
             print(f'[CF] Downloaded: {_model_dst.name}')
             # Re-find model and retry
             _wmodel = str(_model_dst)
@@ -3587,6 +3620,16 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
         except Exception:
             _dur = 0
 
+        # Smart Transcribe: stop at the cutoff parsed from the instructions ("ignore last N hours")
+        _smart_cut = None
+        try:
+            if initial_prompt and log_cb and load_cfg().get('smart_transcribe', False):
+                _smart_cut = _smart_cutoff_secs(initial_prompt, _dur)
+                if _smart_cut is not None:
+                    log_cb(f'⚡ Smart Transcribe: stopping at {int(_smart_cut//60)}:{int(_smart_cut%60):02d} (skipping the end as instructed)', '#88ccff')
+        except Exception:
+            _smart_cut = None
+
         segs_iter, info = fw_model.transcribe(
             vid,
             initial_prompt=initial_prompt or '',
@@ -3613,6 +3656,8 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
             if getattr(_do_transcribe, '_cancelled', False):
                 _do_transcribe._cancelled = False
                 return {'segments': segments, 'language': getattr(info, 'language', 'en'), '_cancelled': True}
+            if _smart_cut is not None and seg.start >= _smart_cut:
+                break  # Smart Transcribe cutoff reached
             sd = {'start': seg.start, 'end': seg.end, 'text': seg.text}
             if use_word_timestamps and seg.words:
                 sd['words'] = [{'word': w.word, 'start': w.start, 'end': w.end} for w in seg.words]
@@ -3629,12 +3674,19 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
 
     except Exception as fw_err:
         print(f'[CF] faster-whisper error: {fw_err}')
+        # Remember a real failure (not "not installed" / the DirectML routing signal) so it can be
+        # shown instead of a misleading "install faster-whisper" message if openai-whisper is missing too.
+        _fw_failure = None if (isinstance(fw_err, ImportError) or str(fw_err).startswith('directml:')) else str(fw_err)
+        if _fw_failure and log_cb:
+            log_cb(f'⚠ faster-whisper failed: {_fw_failure}', YELLOW)
         print('[CF] Falling back to openai-whisper...')
 
     # ── Fallback: openai-whisper, with DirectML if available ────────────────
     try:
         import whisper as _w
     except ImportError:
+        if _fw_failure:
+            raise RuntimeError(f'Transcription failed: {_fw_failure}') from None
         raise RuntimeError(
             'No transcription engine available.\n\n'
             'Go to Settings → Update Modules and install:\n'
@@ -4335,230 +4387,6 @@ class App(tk.Tk):
         tk.Label(bot, text=f'ClipFinder {APP_VERSION}  ·  @MarsScumbags',
                 font=('Segoe UI', 7), fg=FG3, bg=BG2).pack(side='right', padx=8)
 
-    def _build_sidebar(self, p):
-        def section(title):
-            tk.Label(p, text=title, font=('Segoe UI', 8, 'bold'),
-                     fg=ACCENT, bg=BG2, anchor='w', padx=12).pack(fill='x', pady=(10,2))
-
-        def div():
-            tk.Frame(p, bg=BORDER, height=1).pack(fill='x', padx=12, pady=2)
-
-        # Scrollable sidebar with custom scrollbar
-        outer = tk.Frame(p, bg=BG2)
-        outer.pack(fill='both', expand=True)
-        _cv = tk.Canvas(outer, bg=BG2, bd=0, highlightthickness=0)
-        _cv.pack(side='left', fill='both', expand=True)
-        _make_scrollbar(outer, _cv)
-        inner = tk.Frame(_cv, bg=BG2)
-        inner.bind('<Configure>', lambda e: _cv.configure(scrollregion=_cv.bbox('all')))
-        _cv.create_window((0, 0), window=inner, anchor='nw', tags='inner')
-        def _on_cv_resize(e):
-            _cv.itemconfig('inner', width=e.width)
-        _cv.bind('<Configure>', _on_cv_resize)
-        _cv.bind('<MouseWheel>', lambda e: _cv.yview_scroll(int(-1*(e.delta/120)), 'units'))
-        p = inner  # build into scrollable inner frame
-
-        def row(parent):
-            f = tk.Frame(parent, bg=BG2, padx=10)
-            f.pack(fill='x', pady=2)
-            return f
-
-        # Video file
-        section('VIDEO FILE')
-        vr = row(p)
-        e1 = tk.Entry(vr, textvariable=self.v_video, font=FONT_SMALL,
-                      bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4)
-        e1.pack(side='left', fill='x', expand=True)
-        tk.Button(vr, text='...', font=FONT_SMALL, bg=BG3, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=6,
-                  command=self._pick_video).pack(side='right', padx=(4,0))
-
-        div()
-
-        # Output folder
-        section('OUTPUT FOLDER')
-        or_ = row(p)
-        e2 = tk.Entry(or_, textvariable=self.v_outdir, font=FONT_SMALL,
-                      bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4)
-        e2.pack(side='left', fill='x', expand=True)
-        tk.Button(or_, text='...', font=FONT_SMALL, bg=BG3, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=6,
-                  command=self._pick_outdir).pack(side='right', padx=(4,0))
-
-        div()
-
-        # Video context
-        section('CONTEXT & INSTRUCTIONS  (optional)')
-        tk.Label(p, text='Tell the AI what to do — names, skip sections, focus areas, etc.',
-                 font=('Segoe UI', 8), fg=FG2, bg=BG2, padx=12
-                 ).pack(anchor='w')
-        ctx_wrap = tk.Frame(p, bg=BG3, padx=0)
-        ctx_wrap.pack(fill='x', padx=12, pady=(3, 0))
-        self.v_context = tk.Text(ctx_wrap, height=3, font=FONT_SMALL,
-                                 bg=BG3, fg=FG, insertbackground=ACCENT,
-                                 relief='flat', bd=6, wrap='word')
-        self.v_context.pack(fill='x')
-        self.v_context.insert('1.0', self.cfg.get('video_context', ''))
-        self.v_context.bind('<FocusOut>', lambda e: (
-            self.cfg.update({'video_context': self.v_context.get('1.0','end').strip()}),
-            save_cfg(self.cfg)
-        ))
-        tk.Label(p, text='e.g. "ignore the last hour" · "skip gambling content" · "focus on drama between X and Y"',
-                 font=('Segoe UI', 7), fg=FG2, bg=BG2, padx=12
-                 ).pack(anchor='w', pady=(2, 0))
-
-        div()
-
-        # Provider
-        section('AI PROVIDER')
-        prov_frame = tk.Frame(p, bg=BG2, padx=12)
-        prov_frame.pack(fill='x', pady=2)
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure('TCombobox', fieldbackground=BG3, background=BG3,
-                        foreground=FG, selectbackground=ACCENT, selectforeground='#000',
-                        borderwidth=0, arrowcolor=FG2)
-        style.map('TCombobox', fieldbackground=[('readonly', BG3)],
-                  foreground=[('readonly', FG)], background=[('readonly', BG3)])
-        # Dark scrollbars globally
-        style.configure('Vertical.TScrollbar', background=BG3, troughcolor=BG2,
-                        bordercolor=BG2, arrowcolor=FG2, relief='flat', borderwidth=0)
-        style.configure('Horizontal.TScrollbar', background=BG3, troughcolor=BG2,
-                        bordercolor=BG2, arrowcolor=FG2, relief='flat', borderwidth=0)
-        style.map('Vertical.TScrollbar',
-                  background=[('active', BORDER), ('pressed', ACCENT)])
-
-        prov_cb = ttk.Combobox(prov_frame, textvariable=self.v_provider,
-                               values=list(PROVIDERS.keys()), state='readonly', font=FONT_SMALL)
-        prov_cb.pack(fill='x')
-        prov_cb.bind('<<ComboboxSelected>>', lambda e: self._refresh_provider())
-        self.lbl_note = tk.Label(p, text='', font=FONT_SMALL, fg=FG2, bg=BG2,
-                                 anchor='w', padx=12, wraplength=290, justify='left')
-        self.lbl_note.pack(fill='x')
-        self.lbl_url = tk.Label(p, text='', font=FONT_SMALL, fg=ACCENT2, bg=BG2,
-                                anchor='w', padx=12, cursor='hand2', wraplength=290)
-        self.lbl_url.pack(fill='x')
-        self.lbl_url.bind('<Button-1>', self._open_key_url)
-
-        div()
-
-        # API Key
-        section('API KEY')
-        kr = row(p)
-        self.v_key.trace_add('write', self._on_key_changed)
-        self.key_entry = tk.Entry(kr, textvariable=self.v_key, show='*',
-                                   font=FONT_MONO_S, bg=BG3, fg=FG,
-                                   insertbackground=ACCENT, relief='flat', bd=4)
-        self.key_entry.pack(side='left', fill='x', expand=True)
-        tk.Button(kr, text='show', font=FONT_SMALL, bg=BG3, fg=FG2,
-                  relief='flat', bd=0, cursor='hand2', padx=4,
-                  command=lambda: self.key_entry.config(
-                      show='' if self.key_entry.cget('show') == '*' else '*')
-                  ).pack(side='right', padx=(4,0))
-
-        div()
-
-        # AI Model
-        section('AI MODEL')
-        model_frame = tk.Frame(p, bg=BG2, padx=12)
-        model_frame.pack(fill='x', pady=2)
-        self.model_cb = ttk.Combobox(model_frame, textvariable=self.v_model,
-                                      state='readonly', font=FONT_SMALL)
-        self.model_cb.pack(fill='x')
-
-        div()
-
-        # Whisper
-        section('WHISPER MODEL')
-        wr = tk.Frame(p, bg=BG2, padx=12)
-        wr.pack(fill='x', pady=2)
-        for m in ['tiny', 'base', 'small', 'medium']:
-            tk.Radiobutton(wr, text=m, variable=self.v_whisper, value=m,
-                           font=FONT_SMALL, fg=FG, bg=BG2,
-                           selectcolor=BG3, activebackground=BG2,
-                           relief='flat', cursor='hand2').pack(side='left', padx=(0,6))
-        tk.Label(p, text='tiny=fastest  medium=accurate',
-                 font=('Segoe UI', 8), fg=FG2, bg=BG2, padx=12).pack(anchor='w')
-
-        # GPU toggle
-        gpu_row = tk.Frame(p, bg=BG2, padx=12)
-        gpu_row.pack(fill='x', pady=(4, 0))
-        gpu_cb = tk.Checkbutton(
-            gpu_row, text='⚡ Use GPU acceleration (recommended)',
-            variable=self.v_use_gpu_whisper,
-            font=FONT_SMALL, fg=FG, bg=BG2,
-            selectcolor=BG3, activebackground=BG2,
-            relief='flat', cursor='hand2',
-            command=lambda: (
-                self.cfg.update({'use_gpu_whisper': self.v_use_gpu_whisper.get()}),
-                save_cfg(self.cfg),
-                # Reset device cache so next transcription re-probes
-                globals().update({'_WHISPER_DEVICE_CACHE': None})
-            )
-        )
-        gpu_cb.pack(side='left')
-        tk.Label(p, text='Supports NVIDIA (CUDA), AMD/Intel (DirectML/Vulkan)',
-                 font=('Segoe UI', 8), fg=FG2, bg=BG2, padx=12).pack(anchor='w', pady=(1, 0))
-
-        div()
-
-        div()
-
-        # ── Interview Mode toggle ──────────────────────────────────────────────
-        section('MODE')
-        self.app_mode = tk.StringVar(value=self.cfg.get('app_mode', 'normal'))
-        self.interview_mode = tk.BooleanVar(value=False)  # compat
-
-        mode_row = tk.Frame(p, bg=BG2, padx=12)
-        mode_row.pack(fill='x', pady=(0,4))
-        self.mode_normal_btn = tk.Button(mode_row, text='🎬 Normal',
-                                         font=FONT_SMALL, relief='flat', bd=0,
-                                         cursor='hand2', padx=7, pady=5,
-                                         command=lambda: self._set_mode('normal'))
-        self.mode_normal_btn.pack(side='left', padx=(0,3))
-        self.mode_interview_btn = tk.Button(mode_row, text='🎤 Interview',
-                                            font=FONT_SMALL, relief='flat', bd=0,
-                                            cursor='hand2', padx=7, pady=5,
-                                            command=lambda: self._set_mode('interview'))
-        self.mode_interview_btn.pack(side='left', padx=(0,3))
-        self._refresh_mode_btns()
-
-        # Interview frame
-        self.interview_frame = tk.Frame(p, bg=BG2, padx=12)
-        self.interview_frame.pack(fill='x')
-        tk.Label(self.interview_frame, text='Interviewee names (one per line):',
-                 font=FONT_SMALL, fg=FG2, bg=BG2).pack(anchor='w', pady=(4,2))
-        tk.Label(self.interview_frame, text='e.g.  Sophie\nPiper\nAlinity',
-                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(anchor='w')
-        nw = tk.Frame(self.interview_frame, bg=BG3); nw.pack(fill='x', pady=(3,0))
-        self.interview_names_box = tk.Text(nw, height=3, font=FONT_SMALL,
-                                           bg=BG3, fg=FG, insertbackground=ACCENT,
-                                           relief='flat', bd=6, wrap='word')
-        self.interview_names_box.pack(fill='x')
-        saved_names = self.cfg.get('interview_names', '')
-        if saved_names:
-            self.interview_names_box.insert('1.0', saved_names)
-        tk.Label(self.interview_frame, text='AI identifies speakers by name.',
-                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(anchor='w', pady=(2,0))
-
-        # Buttons
-        btn_frame = tk.Frame(p, bg=BG2, padx=12)
-        btn_frame.pack(fill='x', pady=(8,4))
-        self.go_btn = tk.Button(btn_frame, text='▶  FIND CLIPS',
-                                font=('Segoe UI', 10, 'bold'),
-                                bg=ACCENT, fg='#000', relief='flat',
-                                cursor='hand2', pady=8, bd=0,
-                                activebackground=ACCENT2, activeforeground='#000',
-                                command=self._start)
-        self.go_btn.pack(fill='x', pady=(0,4))
-        self.trans_btn = tk.Button(btn_frame, text='📝  TRANSCRIBE ONLY',
-                                   font=FONT_SMALL, bg=BG3, fg=FG,
-                                   relief='flat', cursor='hand2', pady=6, bd=0,
-                                   command=self._transcribe_only)
-        self.trans_btn.pack(fill='x')
-
-        # Log moved to bottom bar
-
     def _build_right(self, p):
         # ── Unified status bar ────────────────────────────────────────────────
         sb = tk.Frame(p, bg=BG2)
@@ -4749,11 +4577,11 @@ class App(tk.Tk):
             _already_set_up = False
             try:
                 import faster_whisper; _already_set_up = True
-            except ImportError:
+            except Exception:  # ImportError, or OSError from a broken ctranslate2 DLL load
                 _ensure_pkgs_on_path()
                 try:
                     import faster_whisper; _already_set_up = True
-                except ImportError:
+                except Exception:
                     pass
             if not _already_set_up:
                 self.after(600, self._show_welcome_overlay)
@@ -7890,7 +7718,7 @@ class App(tk.Tk):
             self.set_progress('Auto Edit: detecting silence...', pct=15)
             _sil_r = _sp_ae.run([ff, '-i', vid, '-af',
                                   'silencedetect=noise=-35dB:d=0.8', '-f', 'null', '-'],
-                                 capture_output=True, text=True, timeout=300)
+                                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
             sil_output = _sil_r.stderr
 
             # Parse silence periods
