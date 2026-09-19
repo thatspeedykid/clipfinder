@@ -3809,42 +3809,14 @@ class App(tk.Tk):
         self.after(400, self._bind_global_mousewheel)
         self.after(800, self._check_first_run)
 
-        # Track launch count — prompt to update packages every 10 launches
-        def _check_auto_update_packages():
-            try:
-                _au_cfg = load_cfg()
-                _launch_n = _au_cfg.get('launch_count', 0) + 1
-                _au_cfg['launch_count'] = _launch_n
-                save_cfg(_au_cfg)
-                if _launch_n % 10 == 0:
-                    from tkinter import messagebox as _au_mb
-                    _do_it = _au_mb.askyesno(
-                        'Keep ClipFinder Updated',
-                        f'Would you like to run a quick package update?\n\n'
-                        'This keeps everything nice and tidy — AI providers,\n'
-                        'downloader, and other modules stay current and fixes\n'
-                        'small issues automatically.\n\n'
-                        'Any problems? Report them at:\n'
-                        'github.com/thatspeedykid/clipfinder/issues',
-                        icon='question'
-                    )
-                    if _do_it:
-                        import threading as _au_thr
-                        def _do_pkg_update():
-                            self.after(0, lambda: self.log('🔄 Running package update...', FG2))
-                            import subprocess as _au_sp, sys as _au_sys
-                            _r = _au_sp.run([_au_sys.executable, '-m', 'pip', 'install',
-                                            'yt-dlp', 'google-genai', 'groq', 'openai',
-                                            '--target', str(PKGS_DIR), '--upgrade', '-q'],
-                                           capture_output=True, text=True)
-                            if _r.returncode == 0:
-                                self.after(0, lambda: self.log('✅ Packages updated successfully!', GREEN))
-                            else:
-                                self.after(0, lambda: self.log('⚠ Update failed — try Settings → Update All Packages', YELLOW))
-                        _au_thr.Thread(target=_do_pkg_update, daemon=True).start()
-            except Exception:
-                pass
-        self.after(3000, _check_auto_update_packages)
+        # Launch counter (the old "update packages every 10 launches" prompt is gone: fast-moving modules are
+        # now kept fresh in the background, see _uc_background)
+        try:
+            self.cfg['launch_count'] = int(self.cfg.get('launch_count', 0)) + 1
+            save_cfg(self.cfg)
+        except Exception:
+            pass
+        self.after(25000, self._uc_background)
 
         def _on_close():
             # Kill any running whisper.cpp subprocess
@@ -3857,59 +3829,8 @@ class App(tk.Tk):
             import os as _osx; _osx._exit(0)
         self.protocol("WM_DELETE_WINDOW", _on_close)
         # Pre-check ffmpeg — FIND ONLY, never download at startup
-        def _check_for_update():
-            """Silently check GitHub for newer version on launch."""
-            try:
-                import urllib.request as _ur, json as _js2
-                _api = 'https://api.github.com/repos/thatspeedykid/clipfinder/releases/latest'
-                _req = _ur.Request(_api, headers={'User-Agent': 'ClipFinder'})
-                with _ur.urlopen(_req, timeout=5) as _resp:
-                    _data = _js2.loads(_resp.read())
-                _latest = _data.get('tag_name','').lstrip('v')
-                # Normalize both versions to comparable tuples
-                # e.g. "1.2-beta" -> (1, 2, 0), "1.1" -> (1, 1, 0)
-                def _ver_tuple(v):
-                    import re as _re
-                    nums = _re.findall(r'\d+', v)
-                    t = tuple(int(n) for n in nums[:4]) + (0,) * (4 - len(nums[:4]))
-                    is_pre = any(x in v.lower() for x in ('beta','rc','alpha','pre'))
-                    return (t, 0 if is_pre else 1)
-                _latest_t  = _ver_tuple(_latest)
-                _current_t = _ver_tuple(APP_VERSION)
-                if _latest and _latest_t > _current_t:
-                    def _show_update(_v=_latest, _d=_data):
-                        # Inline update bar — sits inside the app, no floating window
-                        _uw = tk.Frame(self, bg='#1e3a1e', height=32)
-                        _uw.pack(side='bottom', fill='x')
-                        _uw.pack_propagate(False)
-                        tk.Label(_uw,
-                                text=f'⬆  ClipFinder v{_v} available  —  you have v{APP_VERSION}',
-                                font=('Segoe UI',9,'bold'), fg='#00ff88', bg='#1e3a1e'
-                                ).pack(side='left', padx=14)
-                        def _do_auto_update():
-                            _uw.destroy()
-                            self._apply_auto_update(_v, _d)
-                        tk.Button(_uw, text='⬇ Download Now', font=('Segoe UI',8,'bold'),
-                                 bg=ACCENT, fg='#000', relief='flat', bd=0,
-                                 cursor='hand2', padx=10, pady=4,
-                                 command=_do_auto_update
-                                 ).pack(side='left', padx=6)
-                        tk.Button(_uw, text='Open in Browser', font=('Segoe UI',8),
-                                 bg='#1e3a1e', fg='#00ff88', relief='flat', bd=0,
-                                 cursor='hand2', padx=8, pady=4,
-                                 command=lambda: __import__('webbrowser').open(
-                                     'https://github.com/thatspeedykid/clipfinder/releases/latest')
-                                 ).pack(side='left', padx=2)
-                        tk.Button(_uw, text='✕', font=('Segoe UI',10,'bold'),
-                                 fg='#00ff88', bg='#1e3a1e', relief='flat', bd=0,
-                                 cursor='hand2', padx=12,
-                                 command=_uw.destroy).pack(side='right', padx=8)
-                    self.after(2000, _show_update)
-            except Exception:
-                pass  # Silent fail — no internet or API down
-
-        import threading as _thr2
-        _thr2.Thread(target=_check_for_update, daemon=True).start()
+        # (App update check + banner: see _uc_background / _uc_show_banner - runs ~25s after launch,
+        #  never blocks start-up, and falls back to the un-rate-limited releases redirect.)
 
         def _prefetch_ffmpeg():
             try:
@@ -6563,145 +6484,507 @@ class App(tk.Tk):
         if threading.current_thread() is threading.main_thread(): _do()
         else: self.after(0, _do)
 
-    # ── Validation ────────────────────────────────────────────────────────────
-    def _apply_auto_update(self, new_version, release_data):
-        """Download new clipfinder.py from GitHub and relaunch."""
-        import urllib.request as _ur3, threading as _thr3, sys as _sys3, os as _os3
+    # ══════════════════════════════════════════════════════════════════════════
+    # UPDATE CENTER - app self-update, package versions/updates/repair, engines
+    # (the logic lives in the module-level update manager; this is only the UI)
+    # ══════════════════════════════════════════════════════════════════════════
+    def _uc_app_file(self):
+        return Path(__file__).resolve()
 
-        # Progress popup
-        _pw = tk.Toplevel(self)
-        _pw.title('Updating ClipFinder...')
-        _pw.geometry('420x160')
-        _pw.resizable(False, False)
-        _pw.configure(bg=BG)
-        _pw.grab_set()
-        tk.Label(_pw, text=f'⬇  Updating to ClipFinder v{new_version}',
-                 font=('Segoe UI', 11, 'bold'), fg=ACCENT, bg=BG).pack(pady=(20,8))
-        _status_var = tk.StringVar(value='Finding download URL...')
-        tk.Label(_pw, textvariable=_status_var, font=FONT_SMALL, fg=FG2, bg=BG).pack()
-        from tkinter import ttk as _ttk
-        _pb = _ttk.Progressbar(_pw, mode='indeterminate', length=340)
-        _pb.pack(pady=12); _pb.start(12)
+    def _uc_newer(self, rel):
+        return bool(rel) and app_version_key(rel['version']) > app_version_key(APP_VERSION)
 
-        def _run_update():
-            try:
-                # Resolve the release tag up-front — it's used in status text and in
-                # every raw-URL fallback below. Previously it was only assigned inside
-                # the `if not py_url` branch, so updating to a release that DID attach
-                # clipfinder.py as an asset crashed with UnboundLocalError on `tag`.
-                assets = release_data.get('assets', [])
-                tag = release_data.get('tag_name', f'v{new_version}')
-                # Find clipfinder.py asset in release
-                py_url = None
-                for a in assets:
-                    if a.get('name','').lower() == 'clipfinder.py':
-                        py_url = a.get('browser_download_url')
-                        break
-                # Fallback: raw from main branch tag
-                if not py_url:
-                    py_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{tag}/clipfinder.py'
-
-                _pw.after(0, lambda: _status_var.set(f'Downloading clipfinder.py from {tag}...'))
-
-                # Download to temp file first
-                _tmp = USER_DIR / '_update_pending.py'
-                _ur3.urlretrieve(py_url, _tmp)
-
-                # Verify it's a valid Python file
-                _pw.after(0, lambda: _status_var.set('Verifying download...'))
-                import ast as _ast3
-                with open(_tmp, 'r', encoding='utf-8') as _f:
-                    _src = _f.read()
-                _ast3.parse(_src)  # raises SyntaxError if bad
-
-                # Quick sanity check — must contain APP_VERSION
-                if 'APP_VERSION' not in _src:
-                    raise ValueError('Downloaded file does not look like ClipFinder')
-
-                # Also download clipfinder_core.py if available in this release
-                _pw.after(0, lambda: _status_var.set('Downloading core module...'))
-                try:
-                    _core_url = None
-                    for a in assets:
-                        if a.get('name','').lower() == 'clipfinder_core.py':
-                            _core_url = a.get('browser_download_url')
-                            break
-                    if not _core_url:
-                        tag = release_data.get('tag_name', f'v{new_version}')
-                        _core_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{tag}/clipfinder_core.py'
-                    _core_tmp = USER_DIR / '_core_update_pending.py'
-                    _ur3.urlretrieve(_core_url, _core_tmp)
-                    # Verify it parses
-                    with open(_core_tmp, 'r', encoding='utf-8') as _cf:
-                        _ast3.parse(_cf.read())
-                    # Install core
-                    _core_target = USER_DIR / 'clipfinder_core.py'
-                    import shutil as _sh3c
-                    _sh3c.copy2(_core_tmp, _core_target)
-                    _core_tmp.unlink(missing_ok=True)
-                except Exception as _core_err:
-                    # Core download failure is non-fatal — old core still works
-                    print(f'[CF] Core module update skipped: {_core_err}')
-
-                # Download new logo PNG so existing installs get the updated icon
-                # (kept until all users have moved past the icon-change release)
-                try:
-                    _pw.after(0, lambda: _status_var.set('Downloading updated logo...'))
-                    _logo_dst = Path(_sys3.argv[0]).parent / 'clipfinder_logo_512.png'
-                    _tag = release_data.get('tag_name', f'v{new_version}')
-                    _logo_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{_tag}/assets/clipfinder_logo_512.png'
-                    _ur3.urlretrieve(_logo_url, str(_logo_dst))
-                    print(f'[CF] Logo updated at {_logo_dst}')
-                    _ico_dst = Path(_sys3.argv[0]).parent / 'clipfinder.ico'
-                    _ico_url = f'https://raw.githubusercontent.com/thatspeedykid/clipfinder/{_tag}/clipfinder.ico'
-                    _ur3.urlretrieve(_ico_url, str(_ico_dst))
-                    print(f'[CF] ICO updated at {_ico_dst}')
-                except Exception as _logo_err:
-                    print(f'[CF] Logo update skipped: {_logo_err}')
-
-                # Write a relaunch flag so the launcher knows to show splash
-                _flag = USER_DIR / '.force_install'
-                _flag.touch()
-
-                # Replace current file
-                _pw.after(0, lambda: _status_var.set('Installing update...'))
-                _current = Path(_sys3.argv[0])
-                # Handle both .py and .exe launcher scenarios. Import shutil once,
-                # before the branch — the else path previously referenced _sh3
-                # without importing it (NameError for users whose clipfinder.py is
-                # not at USER_DIR).
-                import shutil as _sh3
-                _py_target = USER_DIR / 'clipfinder.py'
-                if _py_target.exists():
-                    _sh3.copy2(_tmp, _py_target)
-                else:
-                    _sh3.copy2(_tmp, _current)
-                _tmp.unlink(missing_ok=True)
-
-                _pw.after(0, lambda: _status_var.set('✅ Done! Relaunching...'))
-                _pw.after(1200, lambda: self._relaunch_app())
-
-            except Exception as _ue:
-                _pw.after(0, lambda: [
-                    _status_var.set(f'❌ Update failed: {_ue}'),
-                    _pb.stop(),
-                ])
-
-        _thr3.Thread(target=_run_update, daemon=True).start()
-
-    def _relaunch_app(self):
-        """Restart ClipFinder cleanly."""
-        import subprocess as _sp4, sys as _sys4, os as _os4
+    def _relaunch_app(self, script=None):
+        """Start a fresh ClipFinder and close this one - but only close once the new one is really up."""
+        import subprocess as _sp, os as _os, time as _t
+        script = script or self._uc_app_file()
+        n = int(_os.environ.get('CF_RESTARTS', '0'))
+        if n >= 3:
+            messagebox.showinfo('Restart', 'Please start ClipFinder again manually.')
+            return False
         try:
-            _sp4.Popen([_sys4.executable, str(USER_DIR / 'clipfinder.py')],
-                       creationflags=0x00000008)  # DETACHED_PROCESS on Windows
-        except Exception:
+            um_release_instance_lock()                           # the new process takes it
+            env = dict(_os.environ, CF_RESTARTS=str(n + 1))
+            child = _sp.Popen(app_relaunch_cmd(script), env=env, close_fds=True,
+                              creationflags=0x00000008 | 0x00000200)
+            _t.sleep(1.6)
+            if child.poll() is not None:
+                raise RuntimeError(f'the new process exited immediately (code {child.returncode})')
+        except Exception as e:
+            um_acquire_instance_lock()
+            um_log(f'relaunch failed: {e}')
+            messagebox.showerror('Restart failed', f'ClipFinder could not restart itself:\n{e}\n\nPlease start it manually.')
+            return False
+        try:
+            self.destroy()
+        finally:
+            _os._exit(0)
+
+    def _apply_auto_update(self, new_version, release_data):
+        """Download, validate and install a new ClipFinder release, then restart into it."""
+        import threading as _thr
+        win = tk.Toplevel(self)
+        win.title('Updating ClipFinder')
+        win.geometry('460x190')
+        win.resizable(False, False)
+        win.configure(bg=BG)
+        win.transient(self)
+        win.grab_set()
+        tk.Label(win, text=f'⬇  Updating to ClipFinder v{new_version}', font=('Segoe UI', 11, 'bold'),
+                 fg=ACCENT, bg=BG).pack(pady=(18, 6))
+        st = tk.StringVar(value='Starting...')
+        tk.Label(win, textvariable=st, font=FONT_SMALL, fg=FG2, bg=BG, wraplength=420, justify='center').pack()
+        bar = self._uc_make_bar(win, 380)
+        bar.pack(pady=12)
+        bar.start()
+        btn = tk.Button(win, text='Close', font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0, padx=14, pady=4,
+                        command=win.destroy)
+
+        def _say(msg):
+            self.after(0, lambda: st.set(msg))
+
+        def _work():
             try:
-                _sp4.Popen([_sys4.executable, _sys4.argv[0]])
+                target = self._uc_app_file()
+                work = USER_DIR / '_update_work'
+                newfile = app_download(release_data, work, _say)
+                _say('Installing...')
+                app_install(newfile, target)
+                for name, rel in (('clipfinder_logo_512.png', 'assets/clipfinder_logo_512.png'), ('clipfinder.ico', 'clipfinder.ico')):
+                    try:                                         # icons are best effort
+                        _um_download(f'https://raw.githubusercontent.com/{APP_REPO}/{release_data["tag"]}/{rel}',
+                                     target.parent / name, timeout=15)
+                    except Exception:
+                        pass
+                app_set_registry_version(app_source_version(target.read_text(encoding='utf-8')) or new_version)
+                _um_sh.rmtree(work, ignore_errors=True)
+                _say('Done - restarting ClipFinder...')
+                um_log(f'app updated to {new_version}')
+                self.after(900, lambda: (win.destroy(), self._relaunch_app(target)))
+            except Exception as e:
+                um_log(f'app update failed: {e}')
+                _why = str(e)                                   # `e` no longer exists once this block ends
+                self.after(0, lambda: (bar.stop(), st.set(f'Update failed: {_why}\n\nNothing was changed - ClipFinder keeps running as it is.'),
+                                       btn.pack(pady=4)))
+        _thr.Thread(target=_work, daemon=True).start()
+
+    # ── small canvas progress bar (indeterminate) ─────────────────────────────
+    def _uc_make_bar(self, parent, width=400):
+        cv = tk.Canvas(parent, width=width, height=6, bg=BG4, bd=0, highlightthickness=0)
+        state = {'on': False, 'x': 0}
+
+        def _tick():
+            if not state['on']:
+                return
+            try:
+                cv.delete('all')
+                x = state['x'] % (width + 90)
+                cv.create_rectangle(max(0, x - 90), 0, min(width, x), 6, fill=ACCENT, outline='')
+                state['x'] += 9
+                cv.after(28, _tick)
+            except Exception:
+                state['on'] = False
+
+        cv.start = lambda: (state.update(on=True), _tick())
+        cv.stop = lambda: (state.update(on=False), cv.delete('all'))
+        return cv
+
+    # ── launch-time + background checks ───────────────────────────────────────
+    def _uc_show_banner(self, rel):
+        """Inline 'update available' bar at the bottom of the window."""
+        if getattr(self, '_uc_banner', None) is not None:
+            try:
+                if self._uc_banner.winfo_exists():
+                    return
             except Exception:
                 pass
-        self.destroy()
-        _sys4.exit(0)
+        bar = tk.Frame(self, bg='#1e3a1e', height=32)
+        bar.pack(side='bottom', fill='x')
+        bar.pack_propagate(False)
+        self._uc_banner = bar
+        tk.Label(bar, text=f'⬆  ClipFinder v{rel["version"]} is available  -  you have v{APP_VERSION}',
+                 font=('Segoe UI', 9, 'bold'), fg='#00ff88', bg='#1e3a1e').pack(side='left', padx=14)
+        tk.Button(bar, text='⬇ Update now', font=('Segoe UI', 8, 'bold'), bg=ACCENT, fg='#000', relief='flat', bd=0,
+                  cursor='hand2', padx=10, pady=4,
+                  command=lambda: (bar.destroy(), self._apply_auto_update(rel['version'], rel))).pack(side='left', padx=6)
+        tk.Button(bar, text="What's new", font=('Segoe UI', 8), bg='#1e3a1e', fg='#00ff88', relief='flat', bd=0,
+                  cursor='hand2', padx=8, pady=4, command=lambda: (self._switch_nb('settings'))).pack(side='left', padx=2)
+        tk.Button(bar, text='✕', font=('Segoe UI', 10, 'bold'), fg='#00ff88', bg='#1e3a1e', relief='flat', bd=0,
+                  cursor='hand2', padx=12, command=bar.destroy).pack(side='right', padx=8)
+        self._uc_latest = rel
+
+    def _uc_background(self):
+        """Runs ~25s after launch: look for an app update, and keep yt-dlp & friends fresh (staged, applied
+        at the next start - never while the app is using them)."""
+        import threading as _thr
+
+        def _work():
+            try:
+                if self.cfg.get('auto_check_updates', True):
+                    rel = app_latest_release()
+                    if self._uc_newer(rel):
+                        self.after(0, lambda: self._uc_show_banner(rel))
+                if self.cfg.get('auto_update_pkgs', True) and _um_time.time() - self.cfg.get('pkg_auto_ts', 0) > 12 * 3600:
+                    self.cfg['pkg_auto_ts'] = _um_time.time()
+                    save_cfg(self.cfg)
+                    plan = pm_plan([e for e in PKG_REGISTRY if e['policy'] == 'latest'], online=True)
+                    todo = [r for r in plan if r['state'] in ('outdated', 'below')]
+                    if todo:
+                        res = pm_stage(todo)
+                        got = [f'{n} {v}' for r in res if r['ok'] for n, v in r['versions'].items()]
+                        if got:
+                            self.after(0, lambda g=got: self.log('⬆ Downloaded ' + ', '.join(g) + ' - applied next time you start ClipFinder', GREEN))
+                            self.after(0, self._uc_refresh_pending)
+            except Exception as e:
+                um_log(f'background update check failed: {e}')
+        _thr.Thread(target=_work, daemon=True).start()
+        self.after(20000, app_mark_healthy)                       # a stable 45s = the update is confirmed good
+
+    # ── Settings: Update Center ───────────────────────────────────────────────
+    def _build_update_center(self, section):
+        """Builds the ClipFinder Update + Update Modules + Music Removal engine sections."""
+        import threading as _thr
+        self._uc_busy = False
+        self._uc_cancel = _thr.Event()
+        self._uc_rows = []
+
+        # ------------------------------------------------------------ ClipFinder update
+        sa = section('⬆  ClipFinder Update', f'You are running v{APP_VERSION}')
+        top = tk.Frame(sa, bg=BG3); top.pack(fill='x')
+        self._uc_app_lbl = tk.Label(top, text='Click "Check for updates" to see if a newer version is available.',
+                                    font=FONT_SMALL, fg=FG2, bg=BG3, anchor='w')
+        self._uc_app_lbl.pack(side='left', fill='x', expand=True)
+        btns = tk.Frame(sa, bg=BG3); btns.pack(fill='x', pady=(6, 0))
+        self._uc_app_check = tk.Button(btns, text='🔍  Check for updates', font=('Segoe UI', 9, 'bold'), bg=ACCENT, fg='#000',
+                                       relief='flat', bd=0, cursor='hand2', padx=12, pady=5, command=self._uc_check_app)
+        self._uc_app_check.pack(side='left')
+        self._uc_app_go = tk.Button(btns, text='⬇  Update now', font=('Segoe UI', 9, 'bold'), bg=BG4, fg=FG3,
+                                    relief='flat', bd=0, padx=12, pady=5, state='disabled', command=self._uc_apply_latest)
+        self._uc_app_go.pack(side='left', padx=6)
+        tk.Button(btns, text='↶  Restore previous version', font=FONT_SMALL, bg=BG4, fg=FG2, relief='flat', bd=0,
+                  cursor='hand2', padx=10, pady=5, command=self._uc_rollback_app).pack(side='left', padx=(0, 6))
+        tk.Button(btns, text='🌐  Releases page', font=FONT_SMALL, bg=BG4, fg=FG2, relief='flat', bd=0, cursor='hand2',
+                  padx=10, pady=5, command=lambda: __import__('webbrowser').open(f'https://github.com/{APP_REPO}/releases')
+                  ).pack(side='left')
+        self._uc_notes_holder = tk.Frame(sa, bg=BG3); self._uc_notes_holder.pack(fill='x')
+        self._uc_notes = tk.Text(self._uc_notes_holder, height=7, font=('Consolas', 8), bg=BG4, fg=FG2, relief='flat', bd=6,
+                                 wrap='word', state='disabled')
+        self._uc_v_auto_app = tk.BooleanVar(value=self.cfg.get('auto_check_updates', True))
+        self._uc_v_auto_pkg = tk.BooleanVar(value=self.cfg.get('auto_update_pkgs', True))
+
+        def _save_toggles(*_):
+            self.cfg['auto_check_updates'] = self._uc_v_auto_app.get()
+            self.cfg['auto_update_pkgs'] = self._uc_v_auto_pkg.get()
+            save_cfg(self.cfg)
+        for txt, var in (('Check for ClipFinder updates when it starts', self._uc_v_auto_app),
+                         ('Keep yt-dlp and other fast-moving modules up to date automatically (applied on next start)', self._uc_v_auto_pkg)):
+            tk.Checkbutton(sa, text=txt, variable=var, command=_save_toggles, font=FONT_SMALL, fg=FG2, bg=BG3,
+                           selectcolor=BG4, activebackground=BG3, cursor='hand2').pack(anchor='w', pady=(4, 0))
+
+        # ------------------------------------------------------------ packages
+        sp = section('🔄  Update Modules', 'Versions of everything ClipFinder is built on - update, install or repair')
+        bar = tk.Frame(sp, bg=BG3); bar.pack(fill='x')
+        self._uc_btn_check = tk.Button(bar, text='🔍  Check for updates', font=('Segoe UI', 9, 'bold'), bg=ACCENT, fg='#000',
+                                       relief='flat', bd=0, cursor='hand2', padx=12, pady=5,
+                                       command=lambda: self._uc_refresh(online=True, force=True))
+        self._uc_btn_check.pack(side='left')
+        self._uc_btn_all = tk.Button(bar, text='⬆  Update all', font=('Segoe UI', 9, 'bold'), bg=BG4, fg=FG, relief='flat',
+                                     bd=0, cursor='hand2', padx=12, pady=5, command=self._uc_update_all)
+        self._uc_btn_all.pack(side='left', padx=6)
+        tk.Button(bar, text='🩹  Repair', font=FONT_SMALL, bg=BG4, fg=FG, relief='flat', bd=0, cursor='hand2', padx=10,
+                  pady=5, command=self._uc_repair).pack(side='left')
+        tk.Button(bar, text='📜  Update log', font=FONT_SMALL, bg=BG4, fg=FG2, relief='flat', bd=0, cursor='hand2',
+                  padx=10, pady=5, command=lambda: os.startfile(str(UPDATE_LOG)) if UPDATE_LOG.exists() else
+                  messagebox.showinfo('Update log', 'Nothing has been logged yet.')).pack(side='left', padx=6)
+        self._uc_cancel_btn = tk.Button(bar, text='✕ Cancel', font=FONT_SMALL, bg=RED, fg='#fff', relief='flat', bd=0,
+                                        cursor='hand2', padx=10, pady=5, command=self._uc_cancel.set)
+        self._uc_status = tk.Label(sp, text='', font=FONT_SMALL, fg=FG2, bg=BG3, anchor='w')
+        self._uc_status.pack(fill='x', pady=(6, 0))
+        self._uc_pbar = self._uc_make_bar(sp, 700)
+        self._uc_pbar.pack(anchor='w', pady=(2, 0))
+        self._uc_restart = tk.Frame(sp, bg='#1a3a1a')
+        tk.Label(self._uc_restart, text='✅  Updates are ready - restart ClipFinder to finish', font=('Segoe UI', 9, 'bold'),
+                 fg=GREEN, bg='#1a3a1a').pack(side='left', padx=10, pady=6)
+        tk.Button(self._uc_restart, text='Restart now', font=('Segoe UI', 9, 'bold'), bg=ACCENT, fg='#000', relief='flat',
+                  bd=0, cursor='hand2', padx=12, pady=3, command=lambda: self._relaunch_app()).pack(side='left')
+        self._uc_table = tk.Frame(sp, bg=BG3); self._uc_table.pack(fill='x', pady=(8, 0))
+        self._uc_log_box = tk.Text(sp, height=5, font=('Consolas', 7), bg=BG4, fg=FG3, relief='flat', bd=6, wrap='none', state='disabled')
+
+        # first paint is instant and offline (reads the folder); Check for updates asks PyPI
+        self._uc_refresh(online=False)
+        self._uc_refresh_pending()
+        self._install_all_fn = self._uc_install_required             # used by the first-run prompt
+        self._dep_refresh_fn_uc = lambda: self._uc_refresh(online=False)
+
+        # ------------------------------------------------------------ Music Removal engine
+        se = section('🎵  Music Removal engine (Demucs)',
+                     'Runs in its own environment, so updating it can never break anything else (and vice versa)')
+        self._eng_lbl = tk.Label(se, text='', font=FONT_SMALL, fg=FG2, bg=BG3, anchor='w', justify='left')
+        self._eng_lbl.pack(fill='x')
+        er = tk.Frame(se, bg=BG3); er.pack(fill='x', pady=(6, 0))
+        self._eng_btn = tk.Button(er, text='⬇  Install', font=('Segoe UI', 9, 'bold'), bg=ACCENT, fg='#000', relief='flat',
+                                  bd=0, cursor='hand2', padx=12, pady=5, command=lambda: self._uc_engine_install('demucs'))
+        self._eng_btn.pack(side='left')
+        tk.Button(er, text='🗑  Remove', font=FONT_SMALL, bg=BG4, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=10,
+                  pady=5, command=self._uc_engine_remove).pack(side='left', padx=6)
+        self._uc_engine_refresh()
+
+    # ── shared progress plumbing ──────────────────────────────────────────────
+    def _uc_log(self, line):
+        try:
+            self._uc_log_box.pack(fill='x', pady=(6, 0))
+            self._uc_log_box.config(state='normal')
+            self._uc_log_box.insert('end', line[:160] + '\n')
+            self._uc_log_box.see('end')
+            self._uc_log_box.config(state='disabled')
+            self._uc_status.config(text=line[:120], fg=FG2)
+        except Exception:
+            pass
+
+    def _uc_set_busy(self, busy, text=''):
+        self._uc_busy = busy
+        try:
+            if busy:
+                self._uc_cancel.clear()
+                self._uc_pbar.start()
+                self._uc_cancel_btn.pack(side='right')
+                self._uc_status.config(text=text, fg=ACCENT2)
+                for b in (self._uc_btn_check, self._uc_btn_all):
+                    b.config(state='disabled')
+            else:
+                self._uc_pbar.stop()
+                self._uc_cancel_btn.pack_forget()
+                for b in (self._uc_btn_check, self._uc_btn_all):
+                    b.config(state='normal')
+        except Exception:
+            pass
+
+    def _uc_refresh_pending(self):
+        try:
+            if pm_pending():
+                self._uc_restart.pack(fill='x', pady=(6, 0), after=self._uc_pbar)
+            else:
+                self._uc_restart.pack_forget()
+        except Exception:
+            pass
+
+    # ── app update handlers ───────────────────────────────────────────────────
+    def _uc_check_app(self):
+        import threading as _thr
+        self._uc_app_check.config(state='disabled', text='Checking...')
+        self._uc_app_lbl.config(text='Contacting GitHub...', fg=FG2)
+
+        def _work():
+            rel = app_latest_release()
+            self.after(0, lambda: self._uc_check_app_done(rel))
+        _thr.Thread(target=_work, daemon=True).start()
+
+    def _uc_check_app_done(self, rel):
+        self._uc_app_check.config(state='normal', text='🔍  Check for updates')
+        if rel is None:
+            self._uc_app_lbl.config(text='Could not reach GitHub - check your internet connection.', fg=YELLOW)
+            return
+        self._uc_latest = rel
+        if self._uc_newer(rel):
+            self._uc_app_lbl.config(text=f'⬆  v{rel["version"]} is available (you have v{APP_VERSION})', fg=GREEN)
+            self._uc_app_go.config(state='normal', bg=ACCENT, fg='#000', cursor='hand2')
+            self._uc_notes.pack(fill='x', pady=(6, 0))
+            self._uc_notes.config(state='normal'); self._uc_notes.delete('1.0', 'end')
+            self._uc_notes.insert('1.0', (rel.get('notes') or 'No release notes.')[:2500])
+            self._uc_notes.config(state='disabled')
+        else:
+            self._uc_app_lbl.config(text=f'✅  You are up to date (v{APP_VERSION}).', fg=GREEN)
+            self._uc_app_go.config(state='disabled', bg=BG4, fg=FG3)
+
+    def _uc_apply_latest(self):
+        rel = getattr(self, '_uc_latest', None)
+        if not self._uc_newer(rel):
+            return
+        if messagebox.askyesno('Update ClipFinder', f'Update to v{rel["version"]} and restart now?\n\n'
+                               'Your settings, keys and downloads are kept. The previous version is saved so you can go back.'):
+            self._apply_auto_update(rel['version'], rel)
+
+    def _uc_rollback_app(self):
+        if not messagebox.askyesno('Restore previous version', 'Put back the version of ClipFinder that was installed before the '
+                                   'last update, and restart?'):
+            return
+        ok, msg = app_rollback()
+        if ok:
+            messagebox.showinfo('Restored', msg + '\n\nClipFinder will restart.')
+            self._relaunch_app()
+        else:
+            messagebox.showinfo('Restore previous version', msg)
+
+    # ── package table ─────────────────────────────────────────────────────────
+    def _uc_refresh(self, online=False, force=False):
+        import threading as _thr
+        if online:
+            self._uc_set_busy(True, 'Checking PyPI for newer versions...')
+
+            def _work():
+                rows = pm_plan(online=True, force=force)
+                self.after(0, lambda: (self._uc_set_busy(False), self._uc_render(rows, checked=True)))
+            _thr.Thread(target=_work, daemon=True).start()
+        else:
+            self._uc_render(pm_plan(online=False), checked=False)
+
+    def _uc_render(self, rows, checked):
+        for w in self._uc_table.winfo_children():
+            w.destroy()
+        self._uc_rows = rows
+        icon = {'ok': ('✅', GREEN), 'missing': ('○', FG3), 'below': ('⚠', YELLOW), 'outdated': ('⬆', ACCENT2), 'newer': ('•', FG2)}
+        action = {'missing': '⬇ Install', 'below': '⬆ Fix', 'outdated': '⬆ Update', 'newer': '⬆ Upgrade', 'ok': '↻'}
+        group = None
+        todo = 0
+        for r in rows:
+            if r['group'] != group:
+                group = r['group']
+                tk.Label(self._uc_table, text=group.upper(), font=('Segoe UI', 7, 'bold'), fg=ACCENT, bg=BG3,
+                         anchor='w').pack(fill='x', pady=(8, 1))
+            fr = tk.Frame(self._uc_table, bg=BG3); fr.pack(fill='x', pady=1)
+            ic, col = icon.get(r['state'], ('?', FG2))
+            tk.Label(fr, text=ic, font=('Segoe UI', 9), fg=col, bg=BG3, width=2).pack(side='left')
+            tk.Label(fr, text=r['name'], font=('Consolas', 8, 'bold'), fg=FG if r['installed'] else FG2, bg=BG3,
+                     width=22, anchor='w').pack(side='left')
+            inst = r['installed'] or ('not installed' + ('' if r['required'] else ' (optional)'))
+            latest = f'  →  {r["latest"]}' if (checked and r['latest'] and r['state'] in ('outdated', 'below', 'newer')) else ''
+            tk.Label(fr, text=f'{inst}{latest}', font=('Consolas', 8), fg=col if r['state'] != 'ok' else FG2, bg=BG3,
+                     width=34, anchor='w').pack(side='left')
+            tk.Label(fr, text=r.get('desc', ''), font=('Segoe UI', 7), fg=FG3, bg=BG3, anchor='w').pack(side='left', fill='x', expand=True)
+            b = tk.Button(fr, text=action[r['state']], font=('Segoe UI', 8), bg=(ACCENT if r['state'] in ('missing', 'below', 'outdated') else BG4),
+                          fg=('#000' if r['state'] in ('missing', 'below', 'outdated') else FG2), relief='flat', bd=0,
+                          cursor='hand2', padx=8, pady=1, command=lambda e=r: self._uc_do([e], e['name']))
+            b.pack(side='right')
+            if r['state'] in ('missing', 'below', 'outdated') and (r['required'] or r['state'] != 'missing'):
+                todo += 1
+        self._uc_btn_all.config(text=f'⬆  Update all ({todo})' if todo else '⬆  Update all')
+        if checked and not todo:
+            self._uc_status.config(text='✅  Everything is up to date.', fg=GREEN)
+        elif not checked:
+            self._uc_status.config(text=f'{todo} update{"s" if todo != 1 else ""} needed - click "Check for updates" to see the latest versions.'
+                                   if todo else '', fg=YELLOW if todo else FG2)
+
+    def _uc_update_all(self):
+        rows = [r for r in (self._uc_rows or pm_plan(online=False))
+                if r['state'] in ('below', 'outdated') or (r['state'] == 'missing' and r['required'])]
+        if not rows:
+            messagebox.showinfo('Update all', 'Everything is up to date. Use "Check for updates" to look for newer versions.')
+            return
+        self._uc_do(rows, f'{len(rows)} module{"s" if len(rows) != 1 else ""}')
+
+    def _uc_install_required(self):
+        """Used by the first-run prompt: install every required module that is missing."""
+        rows = [r for r in pm_plan(online=False) if r['state'] in ('missing', 'below') and r['required']]
+        if rows:
+            self._uc_do(rows, 'required modules')
+
+    def _uc_repair(self):
+        import threading as _thr
+        if self._uc_busy:
+            return
+        self._uc_set_busy(True, 'Checking installed modules for conflicts...')
+
+        def _work():
+            entries = pm_repair_entries()
+            self.after(0, lambda: self._uc_repair_go(entries))
+        _thr.Thread(target=_work, daemon=True).start()
+
+    def _uc_repair_go(self, entries):
+        self._uc_set_busy(False)
+        if not entries:
+            self._uc_status.config(text='✅  No conflicts found between installed modules.', fg=GREEN)
+            messagebox.showinfo('Repair', 'No conflicts found - the installed modules are consistent.')
+            return
+        names = ', '.join(e['name'] + (e.get('spec') or '') for e in entries)
+        if messagebox.askyesno('Repair', f'Found modules that do not match each other. Reinstall these to fix it?\n\n{names}'):
+            self._uc_do(entries, 'repair')
+
+    def _uc_do(self, entries, label):
+        """Download + verify entries in staging, then apply now if nothing they replace is loaded, else on restart."""
+        import threading as _thr
+        if self._uc_busy:
+            return
+        self._uc_set_busy(True, f'Downloading {label}...')
+        self._uc_log_box.config(state='normal'); self._uc_log_box.delete('1.0', 'end'); self._uc_log_box.config(state='disabled')
+
+        def _work():
+            results = pm_stage(entries, on_line=lambda l: self.after(0, lambda l=l: self._uc_log(l)), cancel=self._uc_cancel)
+            self.after(0, lambda: self._uc_done(entries, results))
+        _thr.Thread(target=_work, daemon=True).start()
+
+    def _uc_done(self, entries, results):
+        self._uc_set_busy(False)
+        ok = [n for r in results if r.get('ok') for n in r['names']]
+        bad = [(n, r.get('error', '')) for r in results if not r.get('ok') for n in r['names']]
+        loaded = [e['name'] for e in entries if e['name'] in ok and e.get('mod') and e['mod'].split('.')[0] in sys.modules]
+        if ok and not loaded:
+            pm_apply_staged()                                    # nothing they replace is in use: swap right now
+            __import__('importlib').invalidate_caches()
+        msg = []
+        if ok:
+            msg.append(('Installed ' if not loaded else 'Downloaded ') + ', '.join(ok) + ('' if not loaded else ' - restart ClipFinder to finish'))
+        if bad:
+            msg.append('Could not install: ' + '; '.join(f'{n} ({why})' for n, why in bad))
+        for line in msg:
+            self.log(('✅ ' if 'Could not' not in line else '⚠ ') + line, GREEN if 'Could not' not in line else YELLOW)
+        self._uc_refresh(online=False)                            # redraws the table (and clears the status line)...
+        self._uc_refresh_pending()
+        self._uc_status.config(text='  |  '.join(msg) if msg else 'Cancelled.', fg=(YELLOW if bad else GREEN))   # ...so say the result last
+        try:
+            self._dep_refresh_fn()
+        except Exception:
+            pass
+
+    # ── Music Removal engine ──────────────────────────────────────────────────
+    def _uc_engine_refresh(self):
+        try:
+            st = eng_status('demucs')
+            if st['installed']:
+                self._eng_lbl.config(text=f'✅  Installed  -  Demucs {st["version"]}  +  PyTorch {st["torch"] or "?"}\n'
+                                          f'Location: {st["path"]}', fg=FG2)
+                self._eng_btn.config(text='↻  Update / Reinstall', bg=BG4, fg=FG)
+            else:
+                self._eng_lbl.config(text='Not installed. Music Removal needs a one-time download (about 700 MB).\n'
+                                          'It installs into its own folder and does not touch your other modules.', fg=YELLOW)
+                self._eng_btn.config(text='⬇  Install Music Removal engine', bg=ACCENT, fg='#000')
+        except Exception:
+            pass
+
+    def _uc_engine_install(self, name='demucs', on_done=None, status_cb=None):
+        """Build the engine in a side folder, self-test it, then swap it in. Safe to call from any tab."""
+        import threading as _thr
+        if getattr(self, '_uc_engine_busy', False):
+            return
+        self._uc_engine_busy = True
+        cancel = _thr.Event()
+        self.log('🎵 Installing the Music Removal engine (one-time download)...', ACCENT2)
+        self.set_busy(True)
+        self.set_progress('🎵 Installing Music Removal engine...', pct=None)
+
+        def _line(l):
+            self.after(0, lambda l=l: (self.set_progress(f'🎵 {l[:70]}', pct=None), status_cb(l) if status_cb else None))
+
+        def _work():
+            res = eng_install(name, on_line=_line, cancel=cancel)
+            def _fin():
+                self._uc_engine_busy = False
+                self.set_busy(False)
+                self.set_progress('', pct=0)
+                self._uc_engine_refresh()
+                if res['ok']:
+                    self.log(f'✅ Music Removal engine ready (Demucs {res.get("version")})', GREEN)
+                else:
+                    self.log(f'❌ Music Removal engine: {res.get("error")}', RED)
+                    messagebox.showerror('Music Removal engine', f'Could not install it:\n\n{res.get("error")}\n\nDetails are in the update log.')
+                if on_done:
+                    on_done(res)
+            self.after(0, _fin)
+        _thr.Thread(target=_work, daemon=True).start()
+
+    def _uc_engine_remove(self):
+        if eng_status('demucs')['installed'] and messagebox.askyesno('Remove engine', 'Remove the Music Removal engine and free the disk space?\nYou can install it again any time.'):
+            eng_remove('demucs')
+            self._uc_engine_refresh()
 
     def validate(self, need_ai=True, need_outdir=True):
         # Ensure pkgs/ is on path then check for whisper
@@ -15158,264 +15441,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
 
 
 
-        s6 = section('🔄  Update Modules',
-                     'Keep yt-dlp, whisper, ffmpeg and all AI packages up to date')
-        tk.Label(s6, text='Updates run in the background — app stays open. Check log for progress.',
-                font=('Segoe UI', 8), fg=FG2, bg=BG3, wraplength=700).pack(anchor='w', pady=(0,4))
-
-        # ── First-run / EXE notice ──────────────────────────────────────────
-        _is_frozen = getattr(sys, 'frozen', False)
-        def _check_heavy_installed():
-            """Return True if faster-whisper is installed (in PKGS_DIR or system)."""
-            _ensure_pkgs_on_path()
-            import importlib as _ilh2
-            try:
-                _ilh2.import_module('faster_whisper'); return True
-            except ImportError:
-                pass
-            # Check folder presence in PKGS_DIR
-            try:
-                return any(PKGS_DIR.glob('faster_whisper*')) or any(PKGS_DIR.glob('faster-whisper*'))
-            except: return False
-
-        # ── "Install All AI Packages" — always visible (works first-run AND re-install) ──
-        # Check quickly — just look for pkgs dir existence, don't scan imports
-        _heavy_installed = bool(list(PKGS_DIR.glob('faster_whisper*'))[:1]) if PKGS_DIR.exists() else False
-        _notice_bg = '#1a1200' if not _heavy_installed else BG3
-        _notice_border = ACCENT2 if not _heavy_installed else BORDER
-        notice = tk.Frame(s6, bg=_notice_bg, highlightbackground=_notice_border, highlightthickness=1)
-        if not _heavy_installed:
-            notice.pack(fill='x', pady=(0, 8))
-        ni = tk.Frame(notice, bg=_notice_bg); ni.pack(fill='x', padx=10, pady=8)
-
-        if not _heavy_installed:
-            tk.Label(ni, text='⚡  First-time setup — install AI packages below',
-                    font=('Segoe UI', 9, 'bold'), fg=ACCENT2, bg=_notice_bg).pack(anchor='w')
-            tk.Label(ni, text='Packages install to the app folder and persist across launches.',
-                    font=('Segoe UI', 8), fg=FG2, bg=_notice_bg).pack(anchor='w', pady=(2,4))
-        else:
-            pass  # Hide the notice entirely when all installed
-
-        # Per-package install progress bar (canvas-based)
-        _inst_prog_frame = tk.Frame(ni, bg=_notice_bg)
-        _inst_prog_canvas = tk.Canvas(_inst_prog_frame, bg=BG4, height=8, bd=0, highlightthickness=0)
-        _inst_prog_canvas.pack(fill='x')
-        _inst_prog_lbl = tk.Label(_inst_prog_frame, text='', font=('Segoe UI', 7), fg=FG2, bg=_notice_bg, anchor='w')
-        _inst_prog_lbl.pack(fill='x')
-        _inst_prog_frame.pack_forget()  # hidden until install starts
-
-        def _draw_inst_progress(pct, msg=''):
-            _inst_prog_canvas.delete('all')
-            w = _inst_prog_canvas.winfo_width() or 400
-            h = 8
-            _inst_prog_canvas.create_rectangle(0, 0, w, h, fill=BG4, outline='')
-            bar_w = max(0, int(w * pct / 100))
-            if bar_w > 0:
-                _inst_prog_canvas.create_rectangle(0, 0, bar_w, h, fill=ACCENT2, outline='')
-                _inst_prog_canvas.create_rectangle(max(0, bar_w-3), 0, bar_w, h, fill=FG, outline='')
-            _inst_prog_lbl.config(text=msg)
-
-        _INSTALL_HEAVY_PKGS = [
-            # Pure Python AI providers first
-            'google-genai', 'groq', 'openai', 'yt-dlp', 'requests', 'curl-cffi',
-            # Numeric base MUST come before imagehash/soundfile/whisper
-            'numpy', 'scipy',
-            # Audio + image (depend on numpy)
-            'Pillow', 'soundfile', 'imagehash',
-            # Whisper engines
-            'faster-whisper', 'openai-whisper',
-            # Video processing
-            'opencv-python',
-            # Optional face tracking
-            'mediapipe',
-            # Music removal
-            'torch', 'torchaudio', 'demucs',
-        ]
-
-        def _install_all_heavy():
-            _install_btn.config(text='⟳ Installing... (check log)', state='disabled', bg=BG4, fg=FG2)
-            _inst_prog_frame.pack(fill='x', pady=(4, 0))
-            _draw_inst_progress(0, 'Starting install...')
-            self.set_busy(True)
-            self.set_progress('Installing AI packages...', pct=2)
-
-            def _do_heavy():
-                import subprocess as _sp
-                n = len(_INSTALL_HEAVY_PKGS)
-                self.log('🔄 Installing all AI/transcription packages...', ACCENT2)
-                self.log('This may take 5-15 minutes depending on connection speed.', FG2)
-                ok_count = 0
-                for i, pkg in enumerate(_INSTALL_HEAVY_PKGS):
-                    pct_before = max(2, int(i / n * 95))
-                    self.after(0, lambda p=pkg, pct=pct_before: (
-                        _draw_inst_progress(pct, f'Installing {p}... ({pct}%)'),
-                        self.set_progress(f'⬇ Installing {p}...', pct=pct)
-                    ))
-                    self.log(f'  → {pkg}...', FG2)
-                    _nodeps = pkg in {'faster-whisper', 'openai-whisper'}
-                    _cmd = _pip_cmd([pkg], ['--no-deps'] if _nodeps else [])
-                    if _cmd is None:
-                        self.after(0, lambda: self.log('❌ Cannot find Python — check Settings', RED))
-                        break
-                    r = _sp.run(_cmd, capture_output=True, text=True, timeout=300)
-                    if r.returncode != 0 and _nodeps:
-                        r = _sp.run(_pip_cmd([pkg]), capture_output=True, text=True, timeout=300)
-                    if r.returncode != 0 and b'Access is denied' in (r.stderr or b'').encode():
-                        self.after(0, lambda p=pkg: self.log(
-                            f'⚠ {p} is locked (in use). Restart ClipFinder to complete install.', YELLOW))
-                        r = type('R', (), {'returncode': 0})()  # treat as ok, will work after restart
-                    _ok = r.returncode == 0
-                    if _ok:
-                        ok_count += 1
-                    if not _ok:
-                        _err_tail = (r.stderr or '')[-150:].strip()
-                        self.after(0, lambda p=pkg, e=_err_tail: self.log(f'  ❌ {p}: {e}', RED))
-                    else:
-                        self.after(0, lambda p=pkg: self.log(f'  ✅ {p}', GREEN))
-
-                def _finish():
-                    _draw_inst_progress(100, f'Done! {ok_count}/{n} packages installed.')
-                    _draw_inst_progress(100, f'{ok_count}/{n} packages installed.')
-                    if ok_count >= n - 2:
-                        _install_btn.config(text=f'✅ All installed ({ok_count}/{n}) — restart to activate',
-                                           bg='#1a3a1a', fg=GREEN, state='normal')
-                        self.cfg['_setup_done'] = True
-                        save_cfg(self.cfg)
-                        self.log(f'✅ {ok_count}/{n} packages installed! Restart ClipFinder to activate.', GREEN)
-                    else:
-                        _install_btn.config(text=f'⚠ {ok_count}/{n} installed — click to retry',
-                                           bg='#3a2000', fg=ACCENT2, state='normal')
-                        self.log(f'⚠ {ok_count}/{n} packages installed. Click again to retry.', YELLOW)
-                    self.set_busy(False)
-                    self.set_progress(f'✅ {ok_count}/{n} packages installed', pct=100)
-                    try: _refresh_dep_display()
-                    except Exception: pass
-                self.after(0, _finish)
-            import threading; threading.Thread(target=_do_heavy, daemon=True).start()
-
-        self._install_all_fn = _install_all_heavy  # store ref for first-run auto-trigger
-        _btn_text = '⬇  Install All AI Packages' if not _heavy_installed else '🔄  Reinstall All AI Packages'
-        _btn_bg   = ACCENT2 if not _heavy_installed else BG4
-        _btn_fg   = '#000' if not _heavy_installed else FG
-        _install_btn = tk.Button(ni, text=_btn_text,
-            font=('Segoe UI', 9, 'bold'), bg=_btn_bg, fg=_btn_fg,
-            relief='flat', bd=0, cursor='hand2', padx=16, pady=6,
-            command=_install_all_heavy)
-        _install_btn.pack(anchor='w')
-
-        tk.Label(s6, text='Use individual ↑ Update buttons below or "Update All" to refresh packages.',
-                font=('Segoe UI', 8), fg=FG2, bg=BG3, wraplength=700).pack(anchor='w', pady=(4,4))
-
-        mods = [
-            # ── AI / Transcription ──────────────────────────────────────────
-            ('faster-whisper', 'faster-whisper',            'GPU transcription engine  ← install first'),
-            ('openai-whisper', 'openai-whisper',            'Fallback transcription engine'),
-            ('google-genai',   'google-genai',              'Gemini AI provider'),
-            ('groq',           'groq',                      'Groq AI provider'),
-            ('openai',         'openai',                    'OpenRouter/OpenAI provider'),
-            # ── Video / Download ────────────────────────────────────────────
-            ('yt-dlp',         'yt-dlp',                   'Video downloader — update for new sites/fixes'),
-            ('curl-cffi',      'curl-cffi==0.7.4',          'Kick/Cloudflare bypass — pinned v0.7.4 (newer versions have broken submodules)'),
-            # ── Image / Video Processing ────────────────────────────────────
-            ('Pillow',         'Pillow',                    'Image processing'),
-            ('opencv-python',  'opencv-python',             'Video frame analysis + face tracking'),
-            ('imagehash',      'imagehash',                 'Duplicate image detection'),
-            ('mediapipe',      'mediapipe --no-deps',       'Face detection for 9:16 vertical crop'),
-            # ── Audio / Core ────────────────────────────────────────────────
-            ('soundfile',      'soundfile',                 'Audio read/write — required for Censor tab'),
-            ('numpy',          'numpy',                     'Numeric processing — required for audio/video'),
-            ('requests',       'requests',                  'HTTP requests — required for downloads'),
-            # ── Music Removal ────────────────────────────────────────────────
-            ('demucs',         'demucs',                    'AI music removal — required for Music Removal tab'),
-            ('torch',          'torch',                     'PyTorch — required by Demucs'),
-            ('torchaudio',     'torchaudio',                'Audio processing — required by Demucs'),
-            # ── Subtitle Burn-in ────────────────────────────────────────────
-            ('fonttools',      'fonttools',                 'Font enumeration — required for Burn Subtitles'),
-            ('ddgs',           'ddgs',                      'DuckDuckGo image search — required for Thumbnail Finder'),
-            ('bgutil-ytdlp-pot-provider', 'bgutil-ytdlp-pot-provider', 'YouTube PO token plugin — required for 1080p downloads'),
-            # ── Editor tab ──────────────────────────────────────────────────
-            ('vlc',            'python-vlc',                'VLC Python bindings — enables inline video player in Editor tab (requires VLC media player installed on system)'),
-        ]
-
-        # Packages that need --no-deps to avoid DLL permission conflicts
-        _NODEPS_PKGS = {'faster-whisper', 'openai-whisper'}
-
-        _UPDATE_FLAG = USER_DIR / 'pending_update.flag'
-
-        def _request_update_on_reboot(pkg='all'):
-            try:
-                existing = set(_UPDATE_FLAG.read_text().splitlines()) if _UPDATE_FLAG.exists() else set()
-                existing.add(pkg)
-                _UPDATE_FLAG.write_text('\n'.join(sorted(existing)))
-            except: pass
-
-        def _update_pkg(pkg_name, btn):
-            _request_update_on_reboot(pkg_name)
-            btn.config(text='⏳ On reboot', bg='#2a2000', fg=ACCENT2, state='normal')
-            self.log(f'📋 {pkg_name} queued — restart ClipFinder to install', ACCENT2)
-            messagebox.showinfo('Queued', f'{pkg_name} will install on next launch.\nRestart ClipFinder now to apply.')
-
-        def _update_all():
-            _request_update_on_reboot('all')
-            self.log('📋 All packages queued — restart ClipFinder to install', ACCENT2)
-            messagebox.showinfo('Queued', 'All packages will install on next launch.\nRestart ClipFinder now to apply.')
-
-        # Grid of packages
-
-        _dot_updates = []  # deferred package status checks
-
-        def _pkg_installed_check(pkg_name):
-            """Disk-only check (never imports the package - that froze the UI for seconds)."""
-            _dist = {'vlc': 'python-vlc'}.get(pkg_name, pkg_name)
-            if pkg_name == 'bgutil-ytdlp-pot-provider':
-                try:
-                    if (PKGS_DIR / 'yt_dlp_plugins').exists():
-                        return True
-                    return any('bgutil' in d.name.lower() for d in PKGS_DIR.iterdir() if d.is_dir())
-                except Exception:
-                    return False
-            return _dist_version(_dist) is not None
-
-        for i, (pkg, pkg_pip, desc) in enumerate(mods):
-            mr = tk.Frame(s6, bg=BG3); mr.pack(fill='x', pady=2)
-            # Show placeholder dot — update async after UI draws
-            _dot_lbl = tk.Label(mr, text='…',
-                    font=('Segoe UI', 9), fg=FG3, bg=BG3)
-            _dot_lbl.pack(side='left', padx=(8,2))
-            _name_lbl = tk.Label(mr, text=pkg, font=('Consolas', 8, 'bold'),
-                    fg=FG2, bg=BG3, width=18, anchor='w')
-            _name_lbl.pack(side='left', padx=(0,8))
-            # VLC download link — shown inline after the python-vlc row
-            if pkg == 'vlc':
-                import webbrowser as _wb_vlc
-                _vlc_link = tk.Label(mr, text='⬇ Download VLC', font=('Segoe UI', 8, 'underline'),
-                                     fg=ACCENT, bg=BG3, cursor='hand2')
-                _vlc_link.bind('<Button-1>', lambda e: _wb_vlc.open('https://www.videolan.org/vlc/'))
-                _vlc_link.pack(side='right', padx=(0,8))
-            def _update_dot(p=pkg, dl=_dot_lbl, nl=_name_lbl):
-                ok = _pkg_installed_check(p)
-                dl.config(text='✅' if ok else '○', fg=GREEN if ok else FG3)
-                nl.config(fg=FG if ok else FG2)
-            _dot_updates.append(_update_dot)
-            tk.Label(mr, text=desc, font=('Segoe UI', 8), fg=FG2, bg=BG3).pack(side='left')
-            upd_btn = tk.Button(mr, text='↑ Update', font=('Segoe UI', 8),
-                               bg=BG4, fg=FG2, relief='flat', bd=0, cursor='hand2', padx=10, pady=2)
-            upd_btn.config(command=lambda p=pkg_pip, b=upd_btn: _update_pkg(p, b))
-            upd_btn.pack(side='right')
-
-        # Run package status checks in background after UI is drawn
-        def _run_dot_updates():
-            for fn in _dot_updates:
-                try: self.after(0, fn)
-                except: pass
-        threading.Thread(target=_run_dot_updates, daemon=True).start()
-
-        upd_all_row = tk.Frame(s6, bg=BG3); upd_all_row.pack(fill='x', pady=(10,0))
-        tk.Button(upd_all_row, text='🔄  Update All Packages', font=('Segoe UI', 9, 'bold'),
-                 bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
-                 command=_update_all).pack(side='left')
-        tk.Label(upd_all_row, text='Recommended when you see download or AI errors',
-                font=('Segoe UI', 7), fg=FG2, bg=BG3).pack(side='left', padx=10)
+        self._build_update_center(section)
 
         # ── Core Dependencies ──
         s7 = section('🔧  Core Dependencies',
