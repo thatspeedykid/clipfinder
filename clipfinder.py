@@ -13354,7 +13354,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     score += max(0.0, 2.0 - abs(ratio - 1.777) * 2)
                     # 3. Colorfulness
                     import colorsys
-                    pixels = list(img.resize((40, 40)).convert("RGB").getdata())
+                    _raw40 = img.resize((40, 40)).convert("RGB").tobytes()
+                    pixels = list(zip(_raw40[0::3], _raw40[1::3], _raw40[2::3]))
                     sat = sum(colorsys.rgb_to_hsv(px[0]/255,px[1]/255,px[2]/255)[1]
                               for px in pixels) / max(len(pixels),1)
                     score += min(sat * 4, 2.0)
@@ -13366,7 +13367,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     if w >= 1280 and h >= 720:  score += 1.5
                     if w >= 1920 and h >= 1080: score += 1.0
 
-                    scored.append((score, img, img_url, w, h))
+                    scored.append((score, data, img_url, w, h))
+                    del img
                     ok += 1
                 except Exception:
                     continue
@@ -13377,7 +13379,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
 
             scored.sort(key=lambda x: -x[0])
             results = []
-            for rank, (score, img, url, w, h) in enumerate(scored[:count]):
+            for rank, (score, data, url, w, h) in enumerate(scored[:count]):
+                img = Image.open(io.BytesIO(data)).convert('RGB')
                 display = img.copy()
                 display.thumbnail((400, 230), Image.LANCZOS)
                 results.append({
@@ -13391,10 +13394,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             self.log(f'[Thumbnails] Done — {len(results)} images ready', GREEN)
             self.after(0, self._thumb_render)
 
-        except Exception:
+        except Exception as ex:
             err = traceback.format_exc()
             self.log(f'[Thumbnails] Error:\n{err}', RED)
-            self._thumb_set_status('Error — check log.', RED)
+            msg = str(ex).strip() if isinstance(ex, ValueError) else 'Error — check log.'
+            self._thumb_set_status(msg, RED)
         finally:
             self._thumb_running = False
             self.after(0, lambda: self.thumb_go_btn.config(
@@ -13428,9 +13432,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     results = [x for x in results if x[0]]
                     self.log(f'[Thumbnails] Unsplash: {len(results)} results', FG2)
                     return results[:max_results]
+                _http_err = f'Unsplash returned HTTP {r.status_code}: {(r.text or "")[:120]} - check your key/quota in Settings.'
             except Exception as ex:
                 self.log(f'[Thumbnails] Unsplash error: {ex}', YELLOW)
-            return []
+                return []
+            raise ValueError(_http_err)
 
         # ── REAL PEOPLE MODE — DuckDuckGo via ddgs library (no key needed) ────
         try:
@@ -13592,7 +13598,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         win.title(f'Preview #{r["rank"]} — {r["width"]}×{r["height"]}')
         win.configure(bg=BG)
         win.grab_set()
-        from PIL import ImageTk
+        from PIL import Image, ImageTk
         preview = r['img'].copy()
         preview.thumbnail((1280, 720), Image.LANCZOS)
         tk_img = ImageTk.PhotoImage(preview)
@@ -13681,9 +13687,13 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         self._ed_has_vlc = False
         try:
             import vlc as _vlc_test
-            self._ed_has_vlc = True
             self._ed_vlc_instance = _vlc_test.Instance('--no-xlib', '--quiet')
+            if self._ed_vlc_instance is None:
+                raise OSError('libvlc init failed')
             self._ed_vlc_player = self._ed_vlc_instance.media_player_new()
+            if self._ed_vlc_player is None:
+                raise OSError('libvlc player init failed')
+            self._ed_has_vlc = True
             self._ed_player_canvas = tk.Canvas(self._ed_player_frame, bg='#000000',
                                                highlightthickness=0)
             self._ed_player_canvas.pack(fill='both', expand=True)
@@ -13696,7 +13706,9 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             self._ed_player_canvas.bind('<Configure>', _ed_canvas_resize)
             tk.Label(self._ed_player_frame, text='VLC ready — load a source above',
                      font=('Segoe UI', 10), fg=FG2, bg='#000000').place(relx=0.5, rely=0.5, anchor='center')
-        except ImportError:
+        except (ImportError, OSError, AttributeError, SystemExit):
+            self._ed_has_vlc = False
+            self._ed_vlc_player = None
             self._ed_no_vlc_lbl = tk.Label(
                 self._ed_player_frame,
                 text='📺  No inline player available\n\n'
@@ -13877,6 +13889,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         self._ed_overlay_path.set('No overlay image')
         self._ed_overlay_img = ''
         self._ed_status_lbl.config(text='Overlay cleared')
+
+    def _ed_browse_file(self):
         path = filedialog.askopenfilename(
             title='Select video file',
             filetypes=[('Video files', '*.mp4 *.mkv *.mov *.avi *.webm *.ts *.flv'), ('All files', '*.*')])
@@ -13963,14 +13977,19 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         s = int(s)
         return f'{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}'
 
-    def _ed_parse_tc(self, tc):
-        """Parse HH:MM:SS or MM:SS into seconds."""
+    def _ed_parse_tc(self, tc, strict=False):
+        """Parse HH:MM:SS or MM:SS into seconds. strict=True raises ValueError instead of returning 0."""
         try:
-            parts = [int(x) for x in str(tc).strip().split(':')]
-            if len(parts) == 3: return parts[0]*3600 + parts[1]*60 + parts[2]
-            if len(parts) == 2: return parts[0]*60 + parts[1]
-            return int(parts[0])
-        except: return 0
+            parts = [float(x) for x in str(tc).strip().split(':')]
+            if not 1 <= len(parts) <= 3 or any(p < 0 for p in parts):
+                raise ValueError(tc)
+            secs = 0
+            for p in parts:
+                secs = secs*60 + p
+            return int(secs)
+        except (ValueError, TypeError, OverflowError):
+            if strict: raise ValueError(f'bad timecode: {tc!r}')
+            return 0
 
     def _ed_play_pause(self):
         if not self._ed_has_vlc or not self._ed_vlc_player: return
@@ -13996,7 +14015,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
 
     def _ed_mark_in(self):
         if self._ed_has_vlc and self._ed_vlc_player:
-            t = self._ed_vlc_player.get_time() // 1000
+            t = max(0, self._ed_vlc_player.get_time() // 1000)
         else:
             t = self._ed_parse_tc(self._ed_in_var.get())
         self._ed_in_var.set(self._ed_fmt(t))
@@ -14004,7 +14023,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
 
     def _ed_mark_out(self):
         if self._ed_has_vlc and self._ed_vlc_player:
-            t = self._ed_vlc_player.get_time() // 1000
+            t = max(0, self._ed_vlc_player.get_time() // 1000)
         else:
             t = self._ed_parse_tc(self._ed_out_var.get())
         self._ed_out_var.set(self._ed_fmt(t))
@@ -14016,8 +14035,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             messagebox.showwarning('No source', 'Load a video source first.'); return
         t_in  = self._ed_in_var.get().strip()
         t_out = self._ed_out_var.get().strip()
-        s_in  = self._ed_parse_tc(t_in)
-        s_out = self._ed_parse_tc(t_out)
+        try:
+            s_in  = self._ed_parse_tc(t_in, strict=True)
+            s_out = self._ed_parse_tc(t_out, strict=True)
+        except ValueError:
+            messagebox.showwarning('Invalid timecode', 'Use HH:MM:SS or MM:SS.'); return
         if s_out <= s_in:
             messagebox.showwarning('Invalid range', 'Out point must be after In point.'); return
         dur = s_out - s_in
@@ -14025,6 +14047,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             messagebox.showwarning('Too long', f'Max clip length is 6 minutes. This clip is {dur//60}m {dur%60}s.'); return
         if len(self._ed_queue) >= 10:
             messagebox.showwarning('Queue full', 'Max 10 clips in queue.'); return
+        t_in  = self._ed_fmt(s_in)
+        t_out = self._ed_fmt(s_out)
 
         n = len(self._ed_queue) + 1
         clip = {'in': t_in, 'out': t_out, 'src': src, 'label': f'Clip {n}',
@@ -14069,22 +14093,29 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         """Grab all queued clips via ffmpeg — streams from URL or cuts local file."""
         if not self._ed_queue:
             messagebox.showwarning('Empty queue', 'Add clips to the queue first.'); return
-        out_dir = self.cfg.get('output_folder', str(Path.home() / 'Videos'))
-        if not Path(out_dir).exists():
-            out_dir = str(Path.home() / 'Videos')
+        out_dir = self.v_outdir.get().strip() or self.cfg.get('outdir') or str(Path.home() / 'Videos')
+        try:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror('Output folder', f'Cannot create {out_dir}: {e}'); return
+        ov = self._ed_overlay_path.get().strip().strip('"')
+        overlay_img = '' if ov in ('', 'No overlay image') else ov
+        if overlay_img and not Path(overlay_img).exists():
+            messagebox.showwarning('Overlay not found', f'Overlay image not found:\n{overlay_img}'); return
 
         self._ed_grab_btn.config(state='disabled', text='⏳ Grabbing...')
         self._ed_status_lbl.config(text=f'Grabbing {len(self._ed_queue)} clip(s)...')
 
         import threading as _eth2
         queue_copy = list(self._ed_queue)
+        _ov_pos_val = self._ed_ov_pos.get()
+        _ov_scale_val = self._ed_ov_scale.get()
 
         def _grab():
             import subprocess as _sp2
-            ffmpeg = self.cfg.get('ffmpeg_path', 'ffmpeg')
-            overlay_img = getattr(self, '_ed_overlay_img', '').strip()
-            ov_pos_val  = self._ed_ov_pos.get()
-            ov_scale    = self._ed_ov_scale.get()
+            ffmpeg = find_ffmpeg()
+            ov_pos_val  = _ov_pos_val
+            ov_scale    = _ov_scale_val
             results = []
             for i, clip in enumerate(queue_copy):
                 out_name = f'clip_{i+1}_{clip["in"].replace(":","")}-{clip["out"].replace(":","")}.mp4'
@@ -14222,10 +14253,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                                  relief='flat', bd=0, cursor='hand2', padx=14, pady=6,
                                  activebackground=ACCENT2, command=self._studio_find_dupes)
         self.dup_btn.pack(side='left', padx=(0,8))
-        tk.Button(btn_row, text='📦 MOVE DUPES TO /duplicates',
+        self.move_btn = tk.Button(btn_row, text='📦 MOVE DUPES TO /duplicates',
                   font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0,
                   cursor='hand2', padx=10, pady=6,
-                  command=self._studio_move_dupes).pack(side='left')
+                  command=self._studio_move_dupes)
+        self.move_btn.pack(side='left')
 
         # ── DIVIDER ───────────────────────────────────────────────────────────
         tk.Frame(top, bg=BORDER, width=1).pack(side='left', fill='y', padx=8)
@@ -14344,14 +14376,15 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
     def _studio_set_status(self, msg, color=None):
         def _do():
             try:
-                if hasattr(self,'studio_status_lbl'): self.studio_status_lbl.config(text=msg, fg=color or FG2)
+                self.studio_result_lbl.config(text=msg, fg=color or FG2)
             except: pass
         if threading.current_thread() is threading.main_thread(): _do()
         else: self.after(0, _do)
 
     def _studio_set_busy(self, busy):
         state = 'disabled' if busy else 'normal'
-        for b in [getattr(self,x,None) for x in ("studio_dupe_btn","studio_move_btn","studio_upscale_btn") if hasattr(self,x)]:
+        for b in (getattr(self, 'dup_btn', None), getattr(self, 'up_btn', None), getattr(self, 'move_btn', None)):
+            if b is None: continue
             try: b.config(state=state)
             except: pass
 
@@ -14398,11 +14431,14 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             self.log(f'[Studio] Scanning {folder} for duplicates...')
             self._studio_set_status('Collecting images...')
 
-            paths = [p for p in Path(folder).rglob('*') if p.suffix.lower() in img_exts]
+            # skip the /duplicates quarantine folder that _studio_move_dupes creates
+            paths = [p for p in Path(folder).rglob('*') if p.suffix.lower() in img_exts
+                     and 'duplicates' not in [x.lower() for x in p.relative_to(folder).parts[:-1]]]
             self.log(f'[Studio] Found {len(paths)} images')
 
             if not paths:
                 self._studio_set_status('No images found in folder.')
+                self.after(0, lambda: self._studio_show_empty('No images found in folder.'))
                 return
 
             # Hash all images
@@ -14443,10 +14479,12 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             self._studio_set_status(f'Done! {len(groups)} groups, {total_dupes} duplicates found.', GREEN)
             self.after(0, lambda: self._studio_render_dupes(groups))
 
-        except Exception:
+        except Exception as ex:
             err = traceback.format_exc()
             self.log(f'[Studio] Dupe error:\n{err}', RED)
-            self._studio_set_status('Error — check log.', RED)
+            msg = str(ex).strip() if isinstance(ex, (ImportError, ValueError, RuntimeError)) else 'Error — check log.'
+            self._studio_set_status(msg, RED)
+            self.after(0, lambda m=msg: self._studio_show_empty(m))
         finally:
             self._studio_running = False
             self.after(0, lambda: self._studio_set_busy(False))
@@ -14597,10 +14635,26 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             except Exception:
                 self.log('[Studio] Installing opencv-contrib-python (one time)...', YELLOW)
                 self._studio_set_status('Installing opencv-contrib (one time ~50MB)...')
-                subprocess.check_call([_get_pip_executable(), '-m', 'pip', 'install',
-                                       'opencv-contrib-python', '--upgrade'])
-                _cv2 = _fresh_import('cv2')
-            _cv2 = _fresh_import('cv2')
+                # Install into PKGS_DIR (same place plain opencv-python lives), not the interpreter's
+                # site-packages, otherwise the plain cv2 in PKGS_DIR keeps shadowing it. Don't re-pull
+                # numpy (its .pyd is already loaded).
+                try:
+                    import numpy as _np_chk
+                    _cv_extra = ['--no-deps']
+                except Exception:
+                    _cv_extra = []
+                _cv_cmd = _pip_cmd(['opencv-contrib-python'], _cv_extra)
+                if _cv_cmd is None:
+                    raise RuntimeError('No Python found to run pip. Install Python 3.12 or reinstall ClipFinder.')
+                _cv_r = subprocess.run(_cv_cmd, capture_output=True, text=True, timeout=900)
+                if _cv_r.returncode != 0:
+                    raise RuntimeError('opencv-contrib install failed (if cv2 is locked, restart ClipFinder and retry): '
+                                       + (_cv_r.stderr or _cv_r.stdout or '')[-300:])
+                try:
+                    _cv2 = _fresh_import('cv2')
+                    _cv2.dnn_superres.DnnSuperResImpl_create()
+                except Exception:
+                    raise RuntimeError('opencv-contrib was installed. Please restart ClipFinder, then run Upscale again.')
             from PIL import Image as _Img
             import numpy as _np
             self.log('[Studio] Dependencies OK', GREEN)
@@ -14614,7 +14668,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 (f'EDSR_x{scale}.pb', 'EDSR', scale,
                  f'https://github.com/Saafke/EDSR_Tensorflow/raw/master/models/EDSR_x{scale}.pb'),
                 (f'FSRCNN_x{scale}.pb', 'FSRCNN', scale,
-                 f'https://github.com/nicehuster/cnn-facial-landmark/raw/master/FSRCNN_x{scale}.pb'),
+                 f'https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x{scale}.pb'),
                 (f'ESPCN_x{scale}.pb', 'ESPCN', scale,
                  f'https://github.com/fannymonori/TF-ESPCN/raw/master/export/ESPCN_x{scale}.pb'),
             ]
@@ -14624,10 +14678,19 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 if not dest.exists():
                     self.log(f'[Studio] Downloading {fname}...')
                     self._studio_set_status(f'Downloading {fname} (one time)...')
+                    _part = dest.with_name(dest.name + '.part')
                     try:
-                        _ur.urlretrieve(url, str(dest))
+                        import shutil as _shu
+                        with _ur.urlopen(url, timeout=30) as _resp, open(_part, 'wb') as _pf:
+                            _clen = int(_resp.headers.get('Content-Length') or 0)
+                            _shu.copyfileobj(_resp, _pf)
+                        if _clen and _part.stat().st_size != _clen:
+                            raise IOError(f'incomplete download ({_part.stat().st_size}/{_clen} bytes)')
+                        os.replace(_part, dest)
                     except Exception as ex:
                         self.log(f'[Studio] Download failed: {ex}', YELLOW)
+                        try: _part.unlink()
+                        except OSError: pass
                         if dest.exists(): dest.unlink()
                         continue
                 if dest.exists() and dest.stat().st_size > 5000:
@@ -14658,7 +14721,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     h_out, w_out = output.shape[:2]
                     out_name = f'{Path(fpath).stem}_x{scale}_{model_name_used}.png'
                     out_path = str(Path(out_dir) / out_name)
-                    _cv2.imwrite(out_path, output)
+                    # imencode + tofile handles non-ASCII paths (cv2.imwrite silently fails on them)
+                    _ok_enc, _buf = _cv2.imencode('.png', output)
+                    if not _ok_enc:
+                        raise RuntimeError('PNG encode failed')
+                    _buf.tofile(out_path)
                     self.log(f'[Studio] Saved: {out_name} ({w_in}x{h_in}→{w_out}x{h_out})', GREEN)
                     results_info.append({'name': out_name, 'path': out_path,
                                          'in_w': w_in, 'in_h': h_in,
@@ -14672,10 +14739,12 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             self.log(f'[Studio] Complete: {ok}/{len(files)}', GREEN)
             self.after(0, lambda: self._studio_render_upscale_results(results_info, out_dir))
 
-        except Exception:
+        except Exception as ex:
             err = traceback.format_exc()
             self.log(f'[Studio] Upscale error:\n{err}', RED)
-            self._studio_set_status('Error — check log.', RED)
+            msg = str(ex).strip() if isinstance(ex, (ImportError, ValueError, RuntimeError)) else 'Error — check log.'
+            self._studio_set_status(msg, RED)
+            self.after(0, lambda m=msg: self._studio_show_empty(m))
         finally:
             self._studio_running = False
             self.after(0, lambda: self._studio_set_busy(False))
