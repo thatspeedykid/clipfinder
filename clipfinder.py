@@ -253,6 +253,37 @@ def _fresh_import(module_name):
     return _il.import_module(module_name)
 
 
+def _dist_version(pip_name):
+    """Installed version of a distribution WITHOUT importing it, or None.
+
+    Importing cv2 / numpy / google.genai / ... to see if they exist takes seconds, and doing it on
+    the UI thread froze the window at start-up. This reads the *.dist-info folders in PKGS_DIR
+    (exact name match, newest wins) and falls back to importlib.metadata for site-packages."""
+    import re as _re_d
+    want = _re_d.sub(r'[-_.]+', '_', _re_d.split(r'[=<>!~\s\[;]', str(pip_name).strip())[0]).lower()
+    best = None
+    try:
+        for d in PKGS_DIR.iterdir():
+            n = d.name
+            if not n.endswith('.dist-info'):
+                continue
+            base, _, ver = n[:-len('.dist-info')].rpartition('-')
+            if _re_d.sub(r'[-_.]+', '_', base).lower() != want or not ver:
+                continue
+            key = tuple(int(x) for x in _re_d.findall(r'\d+', ver)[:5])
+            if best is None or key > best[0]:
+                best = (key, ver)
+    except OSError:
+        pass
+    if best:
+        return best[1]
+    try:
+        import importlib.metadata as _md
+        return _md.version(str(pip_name).split()[0])
+    except Exception:
+        return None
+
+
 def _ensure_pkgs_on_path():
     """Add package dirs to sys.path so installed packages are found."""
     import importlib as _il
@@ -306,14 +337,9 @@ def _ensure_torch_cuda_on_path():
             _os4.environ['PATH'] = _tl + _os4.pathsep + _os4.environ.get('PATH', '')
 _ensure_torch_cuda_on_path()
 
-# Fix file permissions on PKGS_DIR — Windows locks files when installed as admin
-# then run as normal user (or vice versa), causing Permission denied on import
-try:
-    import stat as _stat
-    for _pf in list(PKGS_DIR.rglob('*.py'))[:300]:
-        try: _pf.chmod(_stat.S_IRUSR | _stat.S_IWUSR | _stat.S_IRGRP | _stat.S_IROTH)
-        except: pass
-except: pass
+# (Removed: a startup loop that called PKGS_DIR.rglob('*.py') and chmod'ed the first 300 files.
+#  On Windows chmod only toggles the read-only flag, and the rglob walked all ~14k files of a
+#  normal install on EVERY launch - ~2s warm and far longer on a cold disk with antivirus.)
 
 def _run_pip_safe(packages):
     """Install packages to PKGS_DIR using Python 3.12 (matches EXE runtime)."""
@@ -2921,12 +2947,9 @@ class App(tk.Tk):
             except Exception:
                 self.after(0, lambda: self.v_status.set('Ready'))
         threading.Thread(target=_prefetch_ffmpeg, daemon=True).start()
-        # Pre-build settings tab in background so it's instant when clicked
-        def _prebuild_settings():
-            import time as _t_pb
-            _t_pb.sleep(4.0)  # wait for app to fully render and be responsive first
-            self.after(0, lambda: self._ensure_tab_built('settings') if hasattr(self, '_ensure_tab_built') else None)
-        threading.Thread(target=_prebuild_settings, daemon=True).start()
+        # NOTE: the Settings tab used to be pre-built here ~4s after launch. Tk work can only run on
+        # the UI thread, so that froze the window for several seconds right when the user started
+        # using it. It now builds on first click (see _switch_nb / _ensure_tab_built).
         # GPU whisper auto-install disabled — user installs via Settings → Update Modules
         # (auto-downloading at launch caused unwanted background downloads)
         # whisper.cpp auto-install disabled — user installs via Settings -> Update Modules
@@ -14333,50 +14356,16 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         _dot_updates = []  # deferred package status checks
 
         def _pkg_installed_check(pkg_name):
-            import importlib as _il
-            _imp_map = {
-                'faster-whisper': 'faster_whisper', 'openai-whisper': 'whisper',
-                'google-genai': 'google.genai', 'opencv-python': 'cv2',
-                'yt-dlp': 'yt_dlp', 'curl-cffi': 'curl_cffi',
-                'mediapipe': 'mediapipe', 'demucs': 'demucs',
-                'imagehash': 'imagehash', 'soundfile': 'soundfile',
-                'Pillow': 'PIL', 'numpy': 'numpy', 'requests': 'requests',
-                'groq': 'groq', 'openai': 'openai',
-                'torch': 'torch', 'torchaudio': 'torchaudio',
-                'fonttools': 'fontTools',
-                'bgutil-ytdlp-pot-provider': '__disk_check__',
-            }
-            mod = _imp_map.get(pkg_name, pkg_name.replace('-','_').lower())
-
-            # Disk-based check for yt-dlp plugins
-            if mod == '__disk_check__':
+            """Disk-only check (never imports the package - that froze the UI for seconds)."""
+            _dist = {'vlc': 'python-vlc'}.get(pkg_name, pkg_name)
+            if pkg_name == 'bgutil-ytdlp-pot-provider':
                 try:
-                    _dirs = [d.name for d in PKGS_DIR.iterdir() if d.is_dir()]
-                    _bgutil_dirs = [d for d in _dirs if 'bgutil' in d.lower() or 'yt_dlp_plugin' in d.lower()]
-                    if _bgutil_dirs:
+                    if (PKGS_DIR / 'yt_dlp_plugins').exists():
                         return True
-                except: pass
-                return False
-
-            # Heavy packages — skip import attempt, go straight to dist-info check
-            # These fail to import in isolation (need full dependency chain loaded)
-            _skip_import = {'demucs', 'openai-whisper', 'torch', 'torchaudio', 'python-vlc', 'mediapipe', 'faster-whisper'}
-            if pkg_name not in _skip_import:
-                # Primary: try importing
-                try:
-                    m = _il.import_module(mod)
-                    if mod == 'pydantic_core': _il.import_module('pydantic_core.core_schema')
-                    return True
-                except: pass
-
-            # Fallback (and primary for heavy packages): check dist-info folder in PKGS_DIR
-            try:
-                _pip_name = pkg_name.replace('-','_').lower()
-                for _d in PKGS_DIR.iterdir():
-                    if _d.is_dir() and _d.name.lower().startswith(_pip_name) and 'dist-info' in _d.name:
-                        return True
-            except: pass
-            return False
+                    return any('bgutil' in d.name.lower() for d in PKGS_DIR.iterdir() if d.is_dir())
+                except Exception:
+                    return False
+            return _dist_version(_dist) is not None
 
         for i, (pkg, pkg_pip, desc) in enumerate(mods):
             mr = tk.Frame(s6, bg=BG3); mr.pack(fill='x', pady=2)
@@ -14468,16 +14457,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 statuses[f'ggml-{sz}'] = m
             # Python packages
             _ensure_pkgs_on_path()  # make sure pkgs dir is on path
-            for pkg in ['faster_whisper', 'yt_dlp', 'cv2', 'curl_cffi', 'soundfile', 'imagehash']:
-                try:
-                    __import__(pkg)
-                    statuses[pkg] = True
-                except ImportError:
-                    # Check PKGS_DIR by multiple name variants
-                    _variants = [pkg, pkg.replace('_','-'), pkg.replace('-','_'), pkg.lower()]
-                    statuses[pkg] = any(
-                        any(PKGS_DIR.glob(f'{v}*')) for v in _variants
-                    )
+            for pkg, _dist in [('faster_whisper', 'faster-whisper'), ('yt_dlp', 'yt-dlp'),
+                               ('cv2', 'opencv-python'), ('curl_cffi', 'curl-cffi'),
+                               ('soundfile', 'soundfile'), ('imagehash', 'imagehash')]:
+                # disk-only: importing these on the UI thread took seconds (cv2, ctranslate2, ...)
+                statuses[pkg] = _dist_version(_dist) is not None
             return statuses
 
         # Status display frame
