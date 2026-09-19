@@ -1,33 +1,42 @@
-# ClipFinder — Python dependencies
+# ClipFinder - Python dependencies
 # Install: pip install -r requirements.txt
+#
+# This file is the SINGLE list the installer pre-bundles. CI installs it in ONE pip
+# transaction into ClipFinder_dist\pkgs (python -m pip install --target ... -r requirements.txt)
+# so pip resolves one consistent set (websockets, pydantic, numpy, ... are picked once).
+# Keep it that way: never split it into several installs.
+#
+# tkinter is built into Python - no pip install needed.
 
-# Core UI
-# tkinter is built into Python — no pip install needed
+# Downloader (default = yt-dlp-ejs + websockets etc. for YouTube; curl-cffi = browser impersonation)
+yt-dlp[default,curl-cffi]>=2026.8.19
 
-# Downloader
-yt-dlp
-curl-cffi
+# AI providers
+google-genai>=2.24,<3
+groq>=1.7,<2
+openai>=3.16,<4
 
-# Images
-Pillow
-imagehash
+# Transcription (faster-whisper brings ctranslate2 / onnxruntime / av)
+faster-whisper>=1.2.1,<2
 
-# AI Providers
-google-genai
-groq
-openai
+# Images / video / audio
+Pillow>=12.3,<13
+numpy>=2.0,<2.6
+opencv-contrib-python>=5.0,<6
+imagehash>=4.3.2
+soundfile>=0.14,<0.15
 
-# Transcription
-faster-whisper
-openai-whisper
+# Network / misc
+requests>=2.32.2,<3
+fonttools>=4.65
+ddgs>=9.16
+python-vlc>=3.0.21203
 
-# Video/Audio processing
-opencv-python
-soundfile
-numpy
-
-# Network
-requests
-
-# Optional — face tracking for vertical crop
-# mediapipe
+# ---------------------------------------------------------------------------
+# Optional - NOT bundled in the installer, NOT installed by CI.
+# The app offers these from Settings (or installs them itself) when the user asks.
+# ---------------------------------------------------------------------------
+# openai-whisper==20250625
+# torch  (CPU build: --index-url https://download.pytorch.org/whl/cpu)
+# demucs: the app installs it on demand into its own isolated environment
+#         (%LOCALAPPDATA%\ClipFinder\envs) - do not add it here.

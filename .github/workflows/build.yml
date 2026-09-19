@@ -1,105 +1,249 @@
+# Build & Release
+#
+# The git tag is the single source of truth for the version.  A tag push (vX.Y.Z or vX.Y.Z.W)
+# builds ClipFinder-Setup.exe and publishes it.  Every place that carries the version is checked
+# (source files up front, the built EXEs at the end) and any disagreement FAILS the build:
+#   tag == APP_VERSION (clipfinder.py) == !define APP_VERSION (ClipFinder.nsi) == README badge
+#       == installer EXE properties == launcher EXE properties == clipfinder.py shipped in the installer
+#
+# Release procedure: see tools/README.md.
+# Rehearse without publishing: Actions -> "Build & Release" -> Run workflow (dry_run = true).
+# The installer is then attached to the workflow run as an artifact; no release is created.
 name: Build & Release
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: build the installer and upload it as a workflow artifact, do NOT publish a release'
+        type: boolean
+        default: true
+
+concurrency:
+  # A moved/re-pushed tag cancels the older build of the same tag, so an older commit can never
+  # finish last and overwrite the release asset (v1.3.9.0 was built 3x with overlapping runs).
+  # Dry runs get their own group so they never cancel a real release build.
+  group: release-${{ github.ref }}-${{ inputs.dry_run && 'dry' || 'release' }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12.10'   # last 3.12.x with Windows binaries (PEP 693); the embedded Python is built from the SAME version
+  NSIS_VERSION: '3.12.0'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PYTHONUTF8: '1'
 
 jobs:
   build:
-    runs-on: windows-latest
-    timeout-minutes: 120
+    runs-on: windows-2025     # pinned: windows-latest migrates between OS images without notice
+    timeout-minutes: 40       # bundling only pip wheels (no torch) -> the whole job is a fraction of the old 12-15 min
+    permissions:
+      contents: write         # create the release + upload assets
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # Fail in seconds, not after a 10 minute build.
+      - name: Validate version and release inputs
+        id: version
+        shell: pwsh
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Fail([string]$msg) { Write-Host "::error::$msg"; throw $msg }
+
+          $isTag = ($env:REF_TYPE -eq 'tag')
+          $tag = ''
+          if ($isTag) {
+            $tag = $env:REF_NAME
+            if ($tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(\.(0|[1-9]\d*))?$') {
+              Fail "Tag '$tag' must look like v1.2.3 or v1.2.3.4"
+            }
+          }
+
+          # The tool is tested first so a broken checker can never wave a release through.
+          python tools/release_version.py selftest
+          if ($LASTEXITCODE -ne 0) { Fail 'tools/release_version.py selftest failed' }
+
+          # clipfinder.py == ClipFinder.nsi == README badge (== the tag when this is a tag build)
+          if ($isTag) { python tools/release_version.py check --tag $tag } else { python tools/release_version.py check }
+          if ($LASTEXITCODE -ne 0) { Fail 'Version check failed: the tag and the version in the source files disagree (details above)' }
+
+          $ver = (python tools/release_version.py get).Trim()
+          if ($LASTEXITCODE -ne 0 -or $ver -notmatch '^\d+\.\d+\.\d+\.\d+$') { Fail "Could not read APP_VERSION from clipfinder.py (got '$ver')" }
+
+          $notes = if ($isTag) { "RELEASE_NOTES_$tag.md" } else { "RELEASE_NOTES_v$ver.md" }
+          if (-not (Test-Path $notes)) { Fail "$notes is missing - write the release notes before tagging" }
+          if ((Get-Content -Raw $notes).Trim().Length -lt 20) { Fail "$notes is empty" }
+
+          foreach ($f in 'ClipFinder.nsi','clipfinder.py','clipfinder.ico','README.md','CHANGELOG.md',
+                         'requirements.txt','build_installer.bat','setup_embed.py','build_launcher.py',
+                         'tools\smoke_pkgs.py','assets\clipfinder_logo_512.png') {
+            if (-not (Test-Path $f)) { Fail "Required file missing: $f" }
+          }
+
+          python -m py_compile clipfinder.py
+          if ($LASTEXITCODE -ne 0) { Fail 'clipfinder.py does not compile' }
+
+          $publish = ($isTag -and ($env:DRY_RUN -ne 'true'))
+          "VER=$ver","TAG=$tag","NOTES=$notes","PUBLISH=$($publish.ToString().ToLower())" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding ascii
+          $mode = if ($publish) { 'RELEASE' } else { 'DRY RUN (no release will be published)' }
+          Write-Host "Building ClipFinder $ver - $mode - notes: $notes"
+
+      # Belt and braces: even though the check above already proved the files agree, this (re)writes
+      # the version with strict regexes and asserts each substitution happened exactly once, so a
+      # build can never carry a version other than the one resolved above.
+      - name: Stamp version into ClipFinder.nsi / clipfinder.py / README (asserted)
+        shell: pwsh
+        env:
+          VER: ${{ steps.version.outputs.VER }}
+          TAG: ${{ steps.version.outputs.TAG }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python tools/release_version.py set $env:VER
+          if ($LASTEXITCODE -ne 0) { throw 'Stamping failed: a version pattern no longer matches exactly once' }
+          if ($env:TAG) { python tools/release_version.py check --tag $env:TAG } else { python tools/release_version.py check }
+          if ($LASTEXITCODE -ne 0) { throw 'Version check after stamping failed' }
 
       - name: Install NSIS
-        run: choco install nsis --yes
-        shell: cmd
-
-      - name: Get version
-        id: version
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $ver = $tag.TrimStart('v')
-          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
-          echo "VER=$ver" >> $env:GITHUB_OUTPUT
         shell: pwsh
-
-      - name: Update version in NSIS script
         run: |
-          $ver = "${{ steps.version.outputs.VER }}"
-          $nsi = Get-Content ClipFinder.nsi -Raw
-          $nsi = $nsi -replace '!define APP_VERSION\s+"\d+\.\d+(\.\d+(\.\d+)?)?"', "!define APP_VERSION `"$ver`""
-          Set-Content ClipFinder.nsi $nsi
-        shell: pwsh
+          $ErrorActionPreference = 'Stop'
+          choco install nsis --version="$($env:NSIS_VERSION)" --yes --no-progress --limit-output
+          if ($LASTEXITCODE -ne 0) { throw "choco install nsis failed ($LASTEXITCODE)" }
+          $mk = 'C:\Program Files (x86)\NSIS\makensis.exe'
+          if (-not (Test-Path $mk)) { throw "makensis not found at $mk" }
+          & $mk /VERSION
+          if ($LASTEXITCODE -ne 0) { throw "makensis /VERSION failed ($LASTEXITCODE)" }
 
       - name: Build base (embedded python + launcher + app files)
+        shell: cmd
+        env:
+          PYEXE: python
         run: build_installer.bat
-        shell: cmd
 
-      - name: Pre-install packages using SYSTEM Python into pkgs folder
-        run: |
-          echo Using system Python to install packages into ClipFinder_dist\pkgs...
-          
-          echo [1/4] torch CPU...
-          py -3.12 -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --target ClipFinder_dist\pkgs --no-warn-script-location
-          
-          echo [2/4] faster-whisper...
-          py -3.12 -m pip install faster-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
-          
-          echo [3/4] openai-whisper...
-          py -3.12 -m pip install openai-whisper --target ClipFinder_dist\pkgs --no-warn-script-location
-          
-          echo [4/4] demucs...
-          py -3.12 -m pip install demucs --target ClipFinder_dist\pkgs --no-warn-script-location
-          
-          echo All packages installed.
-        shell: cmd
-        timeout-minutes: 60
-
-      - name: Verify pkgs folder
-        run: |
-          $items = Get-ChildItem ClipFinder_dist\pkgs -ErrorAction SilentlyContinue
-          if ($items) {
-            $size = (Get-ChildItem -Recurse ClipFinder_dist\pkgs | Measure-Object -Property Length -Sum).Sum
-            $mb = [math]::Round($size / 1MB, 1)
-            echo "SUCCESS: pkgs folder has $($items.Count) top-level items, total $mb MB"
-            $items | Select-Object -First 30 Name | Format-Table
-          } else {
-            echo "ERROR: pkgs folder is empty!"
-            exit 1
-          }
+      # ONE pip transaction so pip resolves a single consistent set (websockets, pydantic, numpy, ...).
+      # torch, openai-whisper, demucs, mediapipe are NOT bundled (installed on demand by the app).
+      - name: Pre-install packages into ClipFinder_dist\pkgs
         shell: pwsh
+        timeout-minutes: 20
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = (python -c "import platform; print(platform.python_version())").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "python failed ($LASTEXITCODE)" }
+          if ($v -ne $env:PYTHON_VERSION) { throw "Runner Python is $v but the embedded Python is built from $($env:PYTHON_VERSION)" }
+
+          python -m pip install --target ClipFinder_dist\pkgs --no-warn-script-location --only-binary=:all: -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed ($LASTEXITCODE)" }
+
+          python -m pip list --path ClipFinder_dist\pkgs --format=freeze | Tee-Object -FilePath pkgs-freeze.txt
+          if ($LASTEXITCODE -ne 0) { throw "pip list failed ($LASTEXITCODE)" }
+
+      - name: Smoke-test bundled packages with the EMBEDDED python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ClipFinder_dist\python\python.exe tools\smoke_pkgs.py ClipFinder_dist requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled packages are missing or do not import in the embedded Python' }
 
       - name: Compile NSIS installer
-        run: '& "C:\Program Files (x86)\NSIS\makensis.exe" ClipFinder.nsi'
         shell: pwsh
-
-      - name: Verify installer size
+        timeout-minutes: 20
         run: |
-          $size = (Get-Item ClipFinder-Setup.exe).Length
-          $mb = [math]::Round($size / 1MB, 1)
-          echo "ClipFinder-Setup.exe: $mb MB"
-          if ($mb -lt 400) {
-            echo "WARNING: Installer seems too small — packages may not be bundled"
-          }
+          $ErrorActionPreference = 'Stop'
+          & 'C:\Program Files (x86)\NSIS\makensis.exe' /V2 ClipFinder.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
+          if (-not (Test-Path ClipFinder-Setup.exe)) { throw 'makensis succeeded but ClipFinder-Setup.exe was not produced' }
+
+      # Read the version back out of what was actually built - no trusting of earlier steps.
+      - name: Verify the version inside the built files
         shell: pwsh
+        env:
+          VER: ${{ steps.version.outputs.VER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:VER
+          $problems = @()
+
+          foreach ($f in 'ClipFinder_dist\clipfinder.exe', 'ClipFinder-Setup.exe') {
+            $vi = (Get-Item $f).VersionInfo
+            foreach ($pair in @(@('FileVersion', $vi.FileVersion), @('ProductVersion', $vi.ProductVersion),
+                                @('FileVersionRaw', "$($vi.FileVersionRaw)"), @('ProductVersionRaw', "$($vi.ProductVersionRaw)"))) {
+              if ($pair[1] -ne $ver) { $problems += "$f $($pair[0]) is '$($pair[1])', expected '$ver'" }
+              else { Write-Host "ok  $f $($pair[0]) = $ver" }
+            }
+            if ($vi.ProductName -ne 'ClipFinder') { $problems += "$f ProductName is '$($vi.ProductName)', expected 'ClipFinder'" }
+          }
+
+          # the app file that goes into the installer (NSIS packs ClipFinder_dist\clipfinder.py)
+          $shipped = (python -c "import sys, pathlib; sys.path.insert(0, 'tools'); import release_version as r; print(r.read_app_version(pathlib.Path('ClipFinder_dist')))").Trim()
+          if ($LASTEXITCODE -ne 0) { $problems += 'could not read APP_VERSION from ClipFinder_dist\clipfinder.py' }
+          elseif ($shipped -ne $ver) { $problems += "ClipFinder_dist\clipfinder.py has APP_VERSION '$shipped', expected '$ver'" }
+          else { Write-Host "ok  ClipFinder_dist\clipfinder.py APP_VERSION = $ver" }
+          if ((Get-FileHash ClipFinder_dist\clipfinder.py).Hash -ne (Get-FileHash clipfinder.py).Hash) { $problems += 'ClipFinder_dist\clipfinder.py differs from the repo clipfinder.py' }
+          if (Test-Path ClipFinder_dist\clipfinder_core.py) { $problems += 'ClipFinder_dist\clipfinder_core.py exists: the core module is retired and must not ship' }
+
+          if ($problems.Count -gt 0) {
+            foreach ($p in $problems) { Write-Host "::error::$p" }
+            throw "Version verification failed with $($problems.Count) problem(s)"
+          }
+
+      - name: Verify installer size and write SHA256SUMS
+        shell: pwsh
+        env:
+          VER: ${{ steps.version.outputs.VER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $f  = Get-Item ClipFinder-Setup.exe
+          $mb = [math]::Round($f.Length / 1MB, 1)
+          Write-Host "ClipFinder-Setup.exe: $mb MB"
+          # No torch any more. A package-less installer is ~25 MB, so < 80 MB means packages are missing;
+          # > 450 MB means something heavy (torch, models) crept back in. NSIS and GitHub assets cap at 2 GiB.
+          if ($mb -lt 80)  { throw "Installer is only $mb MB (< 80 MB): packages are probably missing" }
+          if ($mb -gt 450) { throw "Installer is $mb MB (> 450 MB): something heavy (torch/models?) was bundled again" }
+          $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash *ClipFinder-Setup.exe" | Set-Content -Encoding ascii SHA256SUMS
+          "### ClipFinder-Setup.exe`n- version: $($env:VER)`n- size: $mb MB`n- sha256: $hash" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding ascii
+
+      - name: Upload installer (dry run only)
+        if: steps.version.outputs.PUBLISH != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClipFinder-Setup-${{ steps.version.outputs.VER }}
+          path: |
+            ClipFinder-Setup.exe
+            SHA256SUMS
+            pkgs-freeze.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        if: steps.version.outputs.PUBLISH == 'true'
+        uses: softprops/action-gh-release@v3
         with:
-          name: ClipFinder v${{ steps.version.outputs.VER }}
-          body_path: RELEASE_NOTES_v${{ steps.version.outputs.VER }}.md
-          files: ClipFinder-Setup.exe
+          tag_name: ${{ github.ref_name }}
+          name: ClipFinder ${{ github.ref_name }}
+          body_path: ${{ steps.version.outputs.NOTES }}
+          files: |
+            ClipFinder-Setup.exe
+            SHA256SUMS
+          fail_on_unmatched_files: true
           draft: false
           prerelease: false
         env:
