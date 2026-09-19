@@ -2263,82 +2263,6 @@ TRANSCRIPT:
 {transcript}
 """
 
-TWEET_PROMPT = """You are a social media writer for @MarsScumbags, a streaming drama/clip channel on X/Twitter.
-Read the transcript carefully. Identify WHO is involved, WHAT happened, and the most shocking/quotable moment.
-
-== PEOPLE & CONTEXT ==
-{context}
-
-== TRANSCRIPT ==
-{transcript}
-
-== TONE ==
-{tone}
-
-== YOUR JOB ==
-Write 3 tweets ALL in the same tone above. Each tweet covers the same event but from a DIFFERENT ANGLE:
-
-OPTION 1 — HOT TAKE
-Your punchy opinion or reaction to what happened. Lead with the most shocking element.
-Structure: Strong opener (can be all caps or shocking statement) → context sentence → spicy take or quote → hashtags
-Max 280 chars. Must reference a SPECIFIC moment or quote from the transcript.
-
-OPTION 2 — PULL QUOTE
-Lead with an actual direct quote or close paraphrase from the transcript (in quotes), then react to it.
-Structure: "Quote from transcript" → your reaction/commentary → hashtags
-Max 280 chars. The quote must be real and specific — not made up.
-
-OPTION 3 — ANNOUNCEMENT HOOK
-Frame it like breaking news or a must-see moment. Make people feel like they NEED to watch the clip.
-Structure: Hook that creates urgency or curiosity → what happened → call to action or cliffhanger → hashtags
-Max 280 chars. No clickbait that doesn't deliver — be specific about what happens.
-
-== OUTPUT FORMAT ==
-Write EXACTLY this — no preamble, no labels other than OPTION 1/2/3:
-
-OPTION 1
-[tweet text]
-
-OPTION 2
-[tweet text]
-
-OPTION 3
-[tweet text]
-
-== HASHTAG RULES ==
-- Use ACTUAL NAMES from the transcript/context ONLY — never invent or assume names not mentioned
-- Use platform only if relevant (#Kick #Twitch #YouTube)
-- Use drama type if it fits (#Exposed #Drama #Beef #Leaked #Scandal)
-- NEVER use #gaming #gamingscandal #gamer #streamer unless literally about gameplay
-- Each option gets its OWN hashtags matching what THAT tweet says
-- 3-5 hashtags max per option
-
-== RULES ==
-- All 3 options MUST be in the same tone — do NOT switch styles between options
-- Each option must feel different in angle and structure but same energy
-- Use REAL quotes and REAL moments — never make things up
-- No preamble before OPTION 1 — start writing immediately
-"""
-
-TWEET_TONE_PROMPTS = {
-    'drama': '🔥 DRAMA ACCOUNT — Tea spiller energy. Shocking, pointed, like a real streaming drama page. Use emojis strategically. Pull receipts.',
-    'tea':   '☕ TEA MODE — Calm but devastating. Matter-of-fact delivery that makes the drama hit harder. "So apparently..." energy. Understated.',
-    'breaking': '📰 BREAKING NEWS — Urgent, journalistic. "BREAKING:" opener. Treat it like actual news. Serious tone, facts first.',
-    'hype':  '💥 HYPE MODE — Celebrate the moment. Positive energy, get people excited to watch. Use energy words. Make it feel unmissable.',
-    'exaggerate': """🤯 EXAGGERATE MODE — Write a dramatic multi-line story that builds line by line. Use this EXACT format:
-
-🚨 [SHOCKING HEADLINE IN CAPS — name the person and the situation] 😳
-[Setup line — what the secret or situation was] 👀
-[Escalation — what triggered it or made it worse] 💔
-[Twist — how things shifted or got more chaotic] 💸🔥
-[Punchline — how wild it ended up] ⚡
-
-Rules: Each line max 12 words. 1-2 emojis at END of each line. Build tension line by line.
-Stay factual to the transcript — just massively dramatize real events.
-Never mean-spirited toward the person — make them the legendary main character.
-All 3 options follow this same format but cover DIFFERENT angles of the same story.
-Hashtags on a separate final line.""",
-}
 
 
 
@@ -4043,6 +3967,438 @@ def kick_list_vods(slug, token=None):
                         'created': (v.get('start_time') or v.get('created_at') or '')[:10],
                         'views': int(v.get('views') or 0), 'thumb': thumb, 'is_live': bool(v.get('is_live'))})
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST STUDIO v2 - engine (pure functions, no GUI): prompt, parsing, hard-rule enforcement, checks
+# ══════════════════════════════════════════════════════════════════════════════
+# begin-post-studio-engine
+PS_MASTER_PROMPT = """SOCIAL MEDIA CLIP / STREAMER NEWS CAPTION MASTER PROMPT
+You are helping me run social-media clip/news accounts focused on streamers, influencers, internet personalities, Kick/Twitch/YouTube creators, viral moments, boxing, IRL streams, reality-style creator events, and online drama.
+Your job is to take the transcript, description, or rough idea I give you and turn it into high-CTR platform-specific captions that sound like modern 2026 social media posts.
+Do NOT write like a journalist or news article unless I specifically ask you to.
+
+1. MY GENERAL STYLE
+I want captions that are: Short. Punchy. Modern. Funny when appropriate. Curiosity-driven. High CTR. Easy to understand immediately. Focused on the most interesting moment. Written like something that would actually perform on social media.
+Think: "Nobody expected this..." / "[Person] just did something unexpected 👀" / "BRO REALLY…" / "THIS GOT WEIRD 😭💀" / "DANA WHITE JUST…"
+Do NOT make every caption sound exactly like those examples. Create fresh hooks.
+The caption should make someone want to watch the clip rather than explain every detail.
+Avoid turning the caption into a complete transcript or article.
+
+2. ALWAYS FIND THE BEST ANGLE
+When I give you a transcript, don't simply summarize it. First identify the strongest angle: funniest moment, most surprising statement, most controversial statement, biggest reaction, most absurd moment, unexpected interaction, viral quote, conflict/drama, embarrassing moment, unexpected reveal, person getting roasted, person admitting something, person reacting to something, wild claim, unexpected punchline.
+Then build the caption around THAT.
+If the transcript has multiple possible angles, choose the one with the strongest social-media hook unless I specifically tell you which angle to use.
+If I say something like "Use the tortilla part" or "Make it about Dana calling the rumors bullshit", then follow that exact angle.
+
+3. DO NOT OVEREXPLAIN
+Bad: "During a recent conversation, NinaDrama spoke with Dana White about various topics including social media, upcoming fights, and the spread of misinformation online..."
+Good: "DANA WHITE SAYS 99.9% OF FIGHT NEWS IS BULLSHIT 😭💀"
+Then explain just enough to make the clip understandable.
+
+4. PLATFORM OUTPUT
+Unless I specifically request only one platform, give me: 1. TikTok 2. Instagram 3. YouTube Shorts 4. X.
+Each should be individually written for that platform. Do NOT simply copy the same caption four times. The wording should be meaningfully different while keeping the same core story.
+
+5. TIKTOK
+Always include an ON-SCREEN HOOK, then the caption. The TikTok hook should be extremely short and attention-grabbing. Examples of style: DANA WHITE SAYS 99.9% OF FIGHT NEWS IS BULLSHIT 😭 / TREY IS ALREADY LEAVING 😭💀 / THIS GOT WEIRD FAST 😭💀 / BRO ACTUALLY DID IT 😭
+The caption itself should be concise. Use relevant hashtags, usually around 2-5. Don't hashtag-stuff.
+
+6. INSTAGRAM
+Always include an ON-SCREEN HOOK, then the Instagram caption. The IG hook should be different from TikTok's hook when possible. Instagram captions can be slightly more conversational. Use a few relevant hashtags. Usually 2-5 is enough.
+
+7. YOUTUBE SHORTS
+Always include an ON-SCREEN HOOK, then a Title, then a Description. The YouTube title needs to be clickable and concise.
+IMPORTANT: The YouTube Shorts title should include a relevant hashtag in the title itself. Example: Dana White Says 99.9% of UFC Rumors Are Bullshit 😭 #UFC
+The description should give enough context for the viewer to understand the clip without becoming an article. Use relevant hashtags in the description too.
+
+8. X / TWITTER
+X is different. Do NOT include an ON-SCREEN HOOK. Write the actual post.
+IMPORTANT: NEVER use hashtags on X. Do not put hashtags at the end.
+Also: NEVER use an em dash (—) in X captions. Use commas, periods, ellipses, parentheses, or separate sentences instead.
+X captions should feel native to X. They can be slightly more conversational and provocative.
+Example: Dana White says 99.9% of the fight stuff posted on social media is absolute bullshit 😭💀 "If the UFC didn't announce it and Dana didn't announce it, why are you pulling this shit out of your ass?"
+Do not automatically quote the transcript. Only use a quote when it is the strongest part.
+
+9. WRITING STYLE
+Use natural internet language. Words like bro, literally, actually, really, somehow, meanwhile, apparently, just, already, ended up, got caught, gets exposed, goes off, loses it, folds, drops, wild, insane can be used when they fit. Do not force slang into every caption.
+
+10. EMOJIS
+Use emojis sparingly. Common ones: 😭 💀 😂 👀 😳 🚨 🥊 🤯. Usually 1-3 emojis is enough. Don't put an emoji after every sentence. Don't make captions look like spam.
+
+11. CAPS
+Use capitalization strategically for emphasis. Examples: 99.9% OF IT IS BULLSHIT / NIBBLES HER / BACK IN THE CLOSET / KEPT HIS WORD. Don't capitalize the entire caption unless I specifically ask for it.
+
+12. FACTUAL ACCURACY
+This is extremely important. Do not turn something merely alleged, disputed, or claimed into an established fact.
+If something is unverified, use language such as: allegedly, reportedly, claims, according to the clip, according to [person], amid accusations, after the controversy, following the incident.
+Do not invent details. Do not invent names. Do not invent motives. Do not invent what happened off-camera.
+If I give you a transcript, stay grounded in the transcript.
+If I correct a detail, the correction overrides your previous wording.
+
+13. WHEN SOMETHING IS DISPUTED
+If two people disagree about what happened, don't present one person's version as objective fact.
+Instead of: "GreatWhiteMike falsely called the cops..."
+Use: "Nick Lee confronts GreatWhiteMike over calling the cops, while Mike insists he was actually jumped."
+This is especially important for drama/controversy captions.
+
+14. VIOLENCE
+Violent moments can be described if they are relevant to the clip, but don't make them unnecessarily graphic. Words like gets dropped, gets knocked out, gets punched, gets tackled, gets into a scuffle, gets chased, gets confronted are generally preferable to graphic descriptions.
+If the violence was consensual/staged/part of an event, make that clear. Example: "He consented to the punch... then immediately got DROPPED 💀"
+Do not imply an unprovoked assault if the context says the person consented.
+
+15. SEXUAL / SENSITIVE CONTEXT
+Keep captions non-explicit unless the context genuinely requires more detail.
+If a person was involved in controversial comments about minors, do NOT call the person a "pedophile" as an established fact unless there is an authoritative factual basis. Instead use: "controversial comments about minors", "comments involving minors", "amid accusations involving comments about minors", "after a disturbing song involving children".
+Do not reproduce disturbing sexual lyrics involving minors. Focus on the event rather than repeating the content.
+
+16. IMPORTANT SEEEX RULE
+Always mention SeeEx when the clip is from Nick Lee's SeeEx event until I explicitly tell you "You don't need to mention SeeEx anymore." This applies naturally to TikTok captions, Instagram captions, YouTube titles/descriptions, and X posts.
+Use SeeEx, not random variations like "See Ex." Use #SeeEx on TikTok/Instagram/YouTube when appropriate. DO NOT use #SeeEx on X because X captions should not have hashtags.
+If I explicitly say "This isn't SeeEx" then DO NOT mention SeeEx.
+
+17. SEEEX CONTEXT
+SeeEx is Nick Lee's event involving streamers/creators and reality-show-style dynamics. Relevant people that may appear include: Nick Lee, Nick White, Ice Poseidon, DariusIRL, XenaTheWitch, TreyLivings, Glink, NerdBallerTV, M1keDanger, GreatWhiteMike, Chicken Andy, Burt Bronx, FishTank-related participants.
+Do not automatically include every relevant person. Only mention people who are actually relevant to the clip.
+
+18. SEEEX EXAMPLES / CORRECTIONS
+DariusIRL / XenaTheWitch / TreyLivings / Glink: A previous clip involved DariusIRL and XenaTheWitch screaming while TreyLivings got into a scuffle. Meanwhile Glink was badly playing Pink Floyd on guitar. The desired angle was: TWO COMPLETELY DIFFERENT MOODS AT SEEEX 😭💀. The important joke was that Glink was badly playing Pink Floyd while chaos was happening. Don't remove the "badly" if I'm asking for that joke.
+TreyLivings: Trey has a recurring joke about always leaving. If a clip involves Trey leaving, phrases like "Classic Trey 😭💀" can work.
+Chicken Andy / XenaTheWitch: There was a SeeEx clip where Chicken Andy was challenged to prove he wasn't racist and was told to kiss a Black girl. IMPORTANT CORRECTION: He did NOT kiss XenaTheWitch. He NIBBLED HER. If revisiting that clip, say NIBBLES HER, not "kisses her." Do not add Darius to that clip.
+M1keDanger / NerdBallerTV: They had a first-ever boxing match at SeeEx. There was girlfriend drama surrounding the fight. IMPORTANT: If mentioning the girlfriend cheating claim, treat it as alleged/unverified. The user likes the joke: "NerdBallerTV at least kept his word and showed up to fight him." Do not present the girlfriend allegation as independently verified fact.
+Glink / closet: A previous clip involved people opening a closet and discovering Glink sleeping inside after his ex-girlfriend rage quit. The joke was: GLINK IS BACK IN THE CLOSET 😭💀. The wording should clearly refer to the literal closet situation and not imply anything beyond the joke.
+Ice Poseidon / whale tiger: There was a comedic SeeEx clip involving Ice Poseidon and someone dressed as a whale/tiger. The desired phrase was: ICE POSEIDON GOT ASSAULTED BY A WHALE TIGER 😭💀. The context was that Ice tried to get her eliminated and then got chased around. Keep the comedic/event context clear.
+GreatWhiteMike: GreatWhiteMike was kicked out of SeeEx after an argument involving the police being called. Nick Lee disputed Mike's version of events. Mike insisted he had been jumped. Nick questioned why police were called and argued the situation was being treated as content. IMPORTANT: Do not say Mike "faked" being attacked unless there is actual evidence. Frame it as a dispute.
+Burt Bronx: Burt Bronx was permanently banned from Kick amid controversy involving disturbing comments/song content about minors. IMPORTANT: Do NOT call him a pedophile as an established fact. Use "permanently banned" when that is the documented event. Use "disturbing song involving children" or "controversial comments about minors" rather than reproducing the lyrics.
+Burt Bronx / SeeEx / gimp suit: IMPORTANT CORRECTION: Burt was NOT wearing a gimp suit when he was eliminated. He was eliminated earlier because of the inappropriate/disturbing song involving children. He later returned to SeeEx wearing a gimp suit. He asked to be punished for his words. He gave consent to the punch. Someone from FishTank then punched/dropped him. Therefore, if writing this clip: Correct: "Burt Bronx had already been eliminated from SeeEx after a disturbing song involving children. He later returned in a gimp suit and asked to be punished..." Incorrect: "Burt was eliminated while wearing a gimp suit." The gimp suit happened later. Also don't imply the punch was an unprovoked assault because Burt consented to it.
+
+19. CURRENT EXAMPLE: IDUNCLE TALKING ABOUT SEEEX
+If I give you a transcript where Iduncle discusses whether Nick Lee and Ice Poseidon "fumbled" SeeEx: The important nuance is: he thinks the original concept was a fumble; the event itself is not necessarily a flop; it is wild; a lot is happening; it keeps attention; people are still watching; but it isn't really about exes anymore; it has become much more chaotic/degenerate than the original concept. Don't turn his opinion into an objective statement. Good angle: IDUNCLE THINKS SEEEX IS A FUMBLE... BUT NOT A FLOP 😭 Then explain that his criticism is about the event drifting away from the original exes concept.
+
+20. DANA WHITE / UFC EXAMPLE
+If I give you a clip of NinaDrama talking to Dana White about UFC rumors: A strong angle is Dana saying that 99.9% of fight information on social media is bullshit. The context: Elias reportedly said he wants to fight again; Elias and Justin were going back and forth; Dana hasn't seen some of the social-media posts; Dana says he stays away from fight-related social media because much of it is bullshit; NinaDrama points out that pages constantly post "this fight is happening"; Dana questions why people announce fights when the UFC/Dana haven't announced them. Strong hook: DANA WHITE SAYS 99.9% OF FIGHT NEWS IS BULLSHIT 😭 Do not make the clip about the unrelated tortilla conversation unless I specifically ask for that angle.
+
+21. IF I GIVE YOU A ROUGH DESCRIPTION
+Sometimes I won't provide a full transcript. I may say something like "Mizkif reacts to..." or "Ice gets chased by..." or "Dana talks about fake UFC rumors." Use the information I give you and create the captions. Do not ask unnecessary clarification questions if the basic story is clear.
+
+22. IF I ASK TO "TRY AGAIN"
+Do NOT simply change two words. Make the hook and framing genuinely different. For example: Version 1: "DANA WHITE SAYS 99.9% OF FIGHT NEWS IS BULLSHIT 😭" Version 2: "DANA WHITE IS DONE WITH UFC RUMOR PAGES 💀" Version 3: "DANA WHITE HAS ONE QUESTION FOR UFC RUMOR ACCOUNTS 😭" These are actually different angles.
+
+23. IF I SAY "MAKE IT FUNNIER"
+Keep the factual setup but add the joke/punchline. Usually the funniest line should come toward the end. Example: "Meanwhile Glink is standing there badly playing Pink Floyd like nothing is happening 😂" or "Bro really tried to eliminate her and became the one getting chased 😭💀". Don't turn the entire caption into a joke if the actual event needs context.
+
+24. IF I SAY "SHORTEN IT"
+Actually shorten it. Remove unnecessary setup. Keep: 1. Who 2. What happened 3. The hook/punchline. Don't just remove one sentence.
+
+25. IF I SAY "MAKE IT MORE VIRAL"
+Increase curiosity and punchiness without inventing information. Use: stronger opening, more surprising framing, shorter sentences, better punchline, more direct wording, one strong emoji moment. Do not use fake claims simply to make it more viral.
+
+26. IF I GIVE YOU A QUOTE
+If there is a particularly strong quote, you can build the caption around it. Example: "If the UFC didn't announce it and Dana didn't announce it, why are you pulling this shit out of your ass?" That can be the centerpiece. But don't overquote the transcript. Use only the strongest part.
+
+27. TAGGING / CREATOR-SPECIFIC RULES
+Aishah Sofey: X must include "Aishah Sofey" (do not rely only on the @handle). TikTok: tag @aishah and include #aishahsofey. Instagram: tag @aishahsofey in the caption and include #aishahsofey. YouTube Shorts: tag @hiaishahsofey.
+Adrianah Lee: correct spelling is "Adrianah Lee", NOT "Adriana Lee".
+Rellik: correct spelling is "Rellik The Clown". Do not change the spelling.
+
+28. DO NOT RANDOMLY ADD PEOPLE
+If the clip is about Chicken Andy and XenaTheWitch, don't add Darius because he's associated with other SeeEx clips. If the clip is about Dana White and NinaDrama, don't mention Nick Lee or SeeEx. Only use people who belong in the specific clip.
+
+29. DO NOT MIX CLIPS
+I may send several clips in the same conversation. Treat each new clip as its own piece of content unless I explicitly say they are connected. Don't accidentally carry details from the previous clip into the next one.
+
+30. WHEN I SAY "THIS ISN'T SEEEX"
+Immediately stop using SeeEx in that clip. Do not force SeeEx into captions just because previous clips were from SeeEx.
+
+31. HASHTAG RULES
+TikTok / Instagram / YouTube: use only relevant hashtags, e.g. #SeeEx #IcePoseidon #NickLee or #DanaWhite #NinaDrama #UFC. X: NO HASHTAGS. EVER unless I specifically ask for them. Do not use random generic hashtags like #Viral #FYP #Trending unless I specifically ask for them.
+
+32. WRITING FORMAT
+For each platform, structure the response clearly. The actual finished platform copy should be clean and ready to paste.
+
+33. MOST IMPORTANT RULE
+When I give you a transcript, don't overthink it. Find the one moment people would stop scrolling for and build around it. The goal is not: "What happened in this conversation?" The goal is: "What part of this conversation would make someone stop scrolling and watch?" Then write the caption around that moment.
+If I give you a specific angle, that overrides your choice. If I correct something, the correction overrides everything previously written. If I say "make it different," actually rewrite it. If I say "make it funnier," add a real punchline. If I say "shorter," make it shorter. If I say "this isn't SeeEx," remove SeeEx. If I say "always mention SeeEx," mention SeeEx naturally until I tell you otherwise.
+"""
+
+PS_PLATFORMS = [   # key, label, colour, fields
+    ('tiktok',    '🎵 TikTok',       '#69c9d0', ('hook', 'caption')),
+    ('instagram', '📸 Instagram',    '#e1306c', ('hook', 'caption')),
+    ('youtube',   '▶ YouTube Shorts', '#ff4444', ('hook', 'title', 'description')),
+    ('x',         '𝕏 X / Twitter',   '#1d9bf0', ('post',)),
+]
+PS_FIELD_LABEL = {'hook': 'ON-SCREEN HOOK', 'caption': 'CAPTION', 'title': 'TITLE', 'description': 'DESCRIPTION', 'post': 'POST'}
+PS_SECTION_NAME = {'tiktok': 'TIKTOK', 'instagram': 'INSTAGRAM', 'youtube': 'YOUTUBE SHORTS', 'x': 'X'}
+
+PS_TASKS = {
+    'new':     '',
+    'retry':   'TRY AGAIN (rule 22): the previous version is shown below. Do NOT just change two words. Make the hook and the framing genuinely different (a different angle unless the user forced one).',
+    'funnier': 'MAKE IT FUNNIER (rule 23): keep the factual setup of the previous version below but add a real joke/punchline, usually near the end. Do not turn the whole caption into a joke if the event needs context.',
+    'shorter': 'SHORTEN IT (rule 24): actually shorten the previous version below. Remove unnecessary setup. Keep only who, what happened, and the hook/punchline.',
+    'viral':   'MAKE IT MORE VIRAL (rule 25): stronger opening, more surprising framing, shorter sentences, a better punchline, one strong emoji moment. Do NOT invent claims to do it.',
+    'fix':     'APPLY THE USER CORRECTION below (rule 33: the correction overrides everything previously written). Keep everything else about the previous version unless the correction requires changing it.',
+}
+
+PS_OUTPUT_CONTRACT = """
+OUTPUT FORMAT (this is machine-parsed - follow it EXACTLY, no markdown, no bold, no commentary before or after):
+### ANGLE
+<one short line: the angle you built the captions around>
+### TIKTOK
+ON-SCREEN HOOK: <text>
+CAPTION: <text (may span several lines)>
+### INSTAGRAM
+ON-SCREEN HOOK: <text>
+CAPTION: <text (may span several lines)>
+### YOUTUBE SHORTS
+ON-SCREEN HOOK: <text>
+TITLE: <title that already contains one relevant hashtag>
+DESCRIPTION: <text (may span several lines)>
+### X
+POST: <text, no hashtags, no em dash>
+Write ONLY the platform sections listed under PLATFORMS REQUESTED (always keep the ### ANGLE section). The captions are final, paste-ready copy."""
+
+_PS_SEEEX_MODES = {
+    'auto':   'SEEEX MODE: AUTO. Mention SeeEx (rule 16) ONLY if the transcript/description shows the clip is from Nick Lee\'s SeeEx event. If it is clearly not, do not mention it (rule 28/30).',
+    'always': 'SEEEX MODE: ALWAYS. The user says this clip is from Nick Lee\'s SeeEx event: mention SeeEx naturally in every platform (rule 16), and use #SeeEx on TikTok/Instagram/YouTube but never on X.',
+    'never':  'SEEEX MODE: NEVER. The user says "This isn\'t SeeEx": do NOT mention SeeEx anywhere (rule 30).',
+}
+
+_PS_TAG = r'(?<![\w&])#[A-Za-z_]\w*'      # a hashtag (not '#1' or an HTML entity)
+_PS_BANNED_TAGS = {'viral', 'fyp', 'foryou', 'foryoupage', 'trending', 'explorepage', 'viralvideo', 'fypage', 'fy', 'foryourpage'}
+_PS_EMOJI_RE = None
+
+
+def ps_clean_transcript(text, limit=12000):
+    """Strip [HH:MM:SS] stamps and collapse whitespace; keep the start of very long transcripts."""
+    t = re.sub(r'\[\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:->|→|-)\s*\d{1,2}:\d{2}(?::\d{2})?)?\]\s*', '', text or '')
+    t = re.sub(r'[ \t]+', ' ', t).strip()
+    return t[:limit]
+
+
+def ps_build_prompt(transcript, platforms, angle='', people='', handles=None, seex='auto', notes='',
+                    task='new', previous=None, correction='', transcript_limit=12000):
+    """-> (system_text, user_text). `previous` is the prior result dict of the SAME clip (for iterations)."""
+    plat_names = [PS_SECTION_NAME[k] for k, *_ in PS_PLATFORMS if k in platforms]
+    sysm = PS_MASTER_PROMPT + '\n' + PS_OUTPUT_CONTRACT
+    parts = ['CLIP TRANSCRIPT / DESCRIPTION (stay grounded in this, do not invent anything):',
+             ps_clean_transcript(transcript, transcript_limit) or '(none - work only from the notes below)', '']
+    if people.strip():
+        parts.append(f'PEOPLE IN THIS CLIP: {people.strip()}   (only these belong in the captions)')
+    if angle.strip():
+        parts.append(f'ANGLE OVERRIDE (rule 2: follow this angle exactly): {angle.strip()}')
+    parts.append(_PS_SEEEX_MODES.get(seex, _PS_SEEEX_MODES['auto']))
+    hs = {k: v for k, v in (handles or {}).items() if v}
+    if hs:
+        parts.append('CREATOR HANDLES (use them per rule 27 where relevant): ' + '; '.join(f'{k}: {v}' for k, v in hs.items()))
+    if notes.strip():
+        parts.append('STANDING RULES FROM THE USER (always apply):\n' + notes.strip())
+    if correction.strip():
+        parts.append('USER CORRECTION / INSTRUCTION (overrides everything, rule 33): ' + correction.strip())
+    if task in PS_TASKS and PS_TASKS[task]:
+        parts.append('')
+        parts.append(PS_TASKS[task])
+        if previous:
+            parts.append('PREVIOUS VERSION OF THIS SAME CLIP:\n' + ps_format_result(previous, only=platforms))
+    parts.append('')
+    parts.append('PLATFORMS REQUESTED: ' + ', '.join(plat_names))
+    return sysm, '\n'.join(parts)
+
+
+def ps_format_result(res, only=None):
+    """Render a result dict back into the output-contract text (used for iterations and export)."""
+    out = []
+    if res.get('angle'):
+        out.append('### ANGLE\n' + res['angle'])
+    for key, _lbl, _c, fields in PS_PLATFORMS:
+        if key not in res or (only and key not in only):
+            continue
+        out.append('### ' + PS_SECTION_NAME[key])
+        for f in fields:
+            if res[key].get(f):
+                out.append(f'{PS_FIELD_LABEL[f]}: {res[key][f]}')
+    return '\n'.join(out)
+
+
+def ps_parse(text):
+    """Parse the model's reply into {'angle': str, 'tiktok': {...}, ...}. Tolerates markdown noise."""
+    t = (text or '').replace('\r\n', '\n')
+    t = re.sub(r'^\s*```[a-zA-Z]*\s*$', '', t, flags=re.M)              # code fences
+    t = re.sub(r'\*\*(.+?)\*\*', r'\1', t)                              # **bold**
+    heads = list(re.finditer(r'^[ \t]*(?:#{1,4}[ \t]*|={2,}[ \t]*)?(ANGLE|TIKTOK|TIK TOK|INSTAGRAM|YOUTUBE SHORTS?|YOUTUBE|X(?:\s*/\s*TWITTER)?|TWITTER)[ \t]*(?:={2,})?[ \t]*:?[ \t]*$',
+                              t, flags=re.M | re.I))
+    res = {}
+    for i, m in enumerate(heads):
+        name = m.group(1).upper().replace(' ', '')
+        body = t[m.end(): heads[i + 1].start() if i + 1 < len(heads) else len(t)].strip()
+        if name == 'ANGLE':
+            res['angle'] = body.splitlines()[0].strip() if body else ''
+            continue
+        key = {'TIKTOK': 'tiktok', 'INSTAGRAM': 'instagram', 'YOUTUBESHORT': 'youtube', 'YOUTUBESHORTS': 'youtube',
+               'YOUTUBE': 'youtube', 'X': 'x', 'X/TWITTER': 'x', 'TWITTER': 'x'}.get(name)
+        if not key:
+            continue
+        labels = 'ON[- ]?SCREEN HOOK|HOOK|CAPTION|TITLE|DESCRIPTION|POST|TWEET'
+        fields = {}
+        fm = list(re.finditer(rf'^[ \t]*({labels})[ \t]*:[ \t]*', body, flags=re.M | re.I))
+        for j, f in enumerate(fm):
+            val = body[f.end(): fm[j + 1].start() if j + 1 < len(fm) else len(body)].strip()
+            lab = f.group(1).upper().replace('-', '').replace(' ', '')
+            fld = {'ONSCREENHOOK': 'hook', 'HOOK': 'hook', 'CAPTION': 'caption', 'TITLE': 'title',
+                   'DESCRIPTION': 'description', 'POST': 'post', 'TWEET': 'post'}[lab]
+            fields[fld] = val.strip().strip('"').strip() if fld in ('hook', 'title') else val
+        if key == 'x' and not fields.get('post') and body and not fm:
+            fields['post'] = body                                          # X reply without a label
+        if fields:
+            res[key] = fields
+    return res
+
+
+def _ps_count_emoji(s):
+    return len(re.findall('[\U0001F300-\U0001FAFF☀-➿\U0001F1E6-\U0001F1FF⭐⬆✅]', s or ''))
+
+
+def ps_enforce(res, platforms=None, seex='auto', people='', transcript=''):
+    """Apply the HARD rules automatically and collect notes.
+    -> (fixed result dict, fixes [what was changed], warnings [things a human should look at])."""
+    import copy
+    r = copy.deepcopy(res)
+    fixes, warns = [], []
+
+    def fix(cond, msg):
+        if cond:
+            fixes.append(msg)
+
+    # ---- X: no hashtags, no em dash, no on-screen hook
+    if 'x' in r:
+        p = r['x'].get('post', '')
+        n_tags = len(re.findall(_PS_TAG, p))
+        p2 = re.sub(r'\s*' + _PS_TAG, '', p)
+        fix(n_tags, f'X: removed {n_tags} hashtag{"s" if n_tags != 1 else ""} (rule 8/31)')
+        n_dash = p2.count('—') + p2.count('―')
+        p2 = re.sub(r'\s*[—―]\s*', ', ', p2)
+        fix(n_dash, f'X: replaced {n_dash} em dash{"es" if n_dash != 1 else ""} with commas (rule 8)')
+        p2 = re.sub(r',\s*,', ',', p2)
+        p2 = re.sub(r'[ \t]+\n', '\n', p2).strip()
+        r['x'] = {'post': p2}
+        if len(p2) > 280:
+            warns.append(f'X post is {len(p2)} characters (limit 280 unless you have Premium)')
+    # ---- generic hashtags on the others + count
+    for k in ('tiktok', 'instagram'):
+        if k not in r:
+            continue
+        cap = r[k].get('caption', '')
+        tags = re.findall(_PS_TAG, cap)
+        bad = [t for t in tags if t[1:].lower() in _PS_BANNED_TAGS]
+        if bad:
+            for t in bad:
+                cap = re.sub(r'\s*' + re.escape(t) + r'\b', '', cap)
+            fixes.append(f'{k.title()}: removed generic hashtag{"s" if len(bad) > 1 else ""} {" ".join(bad)} (rule 31)')
+        tags = re.findall(_PS_TAG, cap)
+        if len(tags) > 5:
+            n_seen = [0]
+            def _limit(m):
+                n_seen[0] += 1
+                return m.group(0) if n_seen[0] <= 5 else ''
+            cap = re.sub(r'\s*' + _PS_TAG, _limit, cap)
+            fixes.append(f'{k.title()}: trimmed hashtags to 5 (rule 5/6)')
+            tags = re.findall(_PS_TAG, cap)
+        if len(tags) < 2:
+            warns.append(f'{k.title()}: only {len(tags)} hashtag (rules suggest 2-5)')
+        r[k]['caption'] = re.sub(r'[ \t]{2,}', ' ', cap).strip()
+    # ---- YouTube: hashtag in the title
+    if 'youtube' in r:
+        y = r['youtube']
+        title = y.get('title', '')
+        if title and not re.search(_PS_TAG, title):
+            tag = None
+            m = re.search(_PS_TAG, y.get('description', ''))
+            if m:
+                tag = m.group(0)
+            elif seex == 'always':
+                tag = '#SeeEx'
+            if tag:
+                y['title'] = f'{title.rstrip()} {tag}'
+                fixes.append(f'YouTube: added {tag} to the title (rule 7)')
+            else:
+                warns.append('YouTube title has no hashtag (rule 7 wants one in the title)')
+        if len(y.get('title', '')) > 100:
+            warns.append(f'YouTube title is {len(y["title"])} characters (limit 100)')
+    # ---- spelling normalisation everywhere (SeeEx, Adrianah, Rellik)
+    def norm(s, hook=False):
+        if hook:   # hooks are usually ALL CAPS: keep SEEEX in caps, only repair a split "SEE EX"
+            s = re.sub(r'\bSee[\s\-]Ex\b', lambda m: 'SEEEX' if m.group(0).isupper() else 'SeeEx', s, flags=re.I)
+        else:
+            s = re.sub(r'\bSee[\s\-]?Ex\b', 'SeeEx', s, flags=re.I)
+        s = re.sub(r'(?<![\w&])#see[\s\-_]?ex\b', '#SeeEx', s, flags=re.I)
+        s = re.sub(r'\bAdriana\s+Lee\b', 'Adrianah Lee', s)
+        s = re.sub(r'\bRel+[iy]c?k\s+the\s+clown\b', 'Rellik The Clown', s, flags=re.I)
+        return s
+    changed = False
+    for k in ('tiktok', 'instagram', 'youtube', 'x'):
+        for f, v in list((r.get(k) or {}).items()):
+            nv = norm(v, hook=(f == 'hook'))
+            if nv != v:
+                r[k][f] = nv; changed = True
+    fix(changed, 'Normalised spelling (SeeEx / Adrianah Lee / Rellik The Clown)')
+    # ---- SeeEx mode checks
+    text_after = ' '.join(str(v) for k in ('tiktok', 'instagram', 'youtube', 'x') for v in (r.get(k) or {}).values())
+    has_seex = bool(re.search(r'see\s?ex', text_after, flags=re.I))
+    if seex == 'never' and has_seex:
+        warns.append('SeeEx MODE is "Never" but the copy mentions SeeEx (rule 30)')
+    if seex == 'always':
+        for k, name in (('tiktok', 'TikTok'), ('instagram', 'Instagram'), ('youtube', 'YouTube'), ('x', 'X')):
+            if k in r and not re.search(r'see\s?ex', ' '.join(r[k].values()), flags=re.I):
+                warns.append(f'{name}: SeeEx is not mentioned (mode is "Always", rule 16)')
+    if 'x' in r and re.search(r'#see\s?ex', r['x'].get('post', ''), flags=re.I):
+        warns.append('X mentions #SeeEx as a hashtag (never on X)')
+    # ---- creator rules
+    both = (people or '') + ' ' + (transcript or '') + ' ' + text_after
+    if re.search(r'aishah\s*sofey|aishahsofey', both, flags=re.I):
+        if 'x' in r and not re.search(r'Aishah Sofey', r['x'].get('post', '')):
+            warns.append('Aishah Sofey: the X post must include her name "Aishah Sofey", not only the @handle (rule 27)')
+    # ---- soft checks: emojis, all caps, risky claims
+    for k in ('tiktok', 'instagram', 'youtube', 'x'):
+        for f, v in (r.get(k) or {}).items():
+            if _ps_count_emoji(v) > 3 and f in ('caption', 'post', 'description'):
+                warns.append(f'{PS_SECTION_NAME[k].title()} {f}: {_ps_count_emoji(v)} emojis (rule 10 says 1-3)')
+            if f in ('caption', 'post') and len(v) > 40 and v == v.upper() and re.search(r'[A-Z]', v):
+                warns.append(f'{PS_SECTION_NAME[k].title()} {f} is ALL CAPS (rule 11)')
+    if re.search(r'\b(pedophile|pedo|paedophile|groomer|predator|rapist)\b', text_after, flags=re.I):
+        warns.append('Uses a criminal label as fact. Rule 15: say "controversial comments about minors" / "permanently banned" instead')
+    if re.search(r'\b(falsely|faked|fake(?:d)?\s+(?:it|being)|liar|lied|lying)\b', text_after, flags=re.I):
+        warns.append('Accuses someone of lying/faking. Rule 13: frame disputes as "X says... while Y insists..."')
+    if re.search(r'\b(assault(?:ed)?|attack(?:ed)?)\b', text_after, flags=re.I) and re.search(r'\b(consent|asked to be|agreed to|staged|part of the event)\b', transcript or '', flags=re.I):
+        warns.append('Transcript mentions consent/staging but the copy says assaulted/attacked (rule 14)')
+    if re.search(r'\ballegedly|reportedly|claims?\b', text_after, flags=re.I) is None and re.search(r'\b(cheat(?:ed|ing)?|scam(?:med)?|stole|steal)\b', text_after, flags=re.I):
+        warns.append('Alleged wrongdoing stated as fact? Rule 12: use "allegedly / reportedly / claims"')
+    for k, name in (('tiktok', 'TikTok'), ('instagram', 'Instagram'), ('youtube', 'YouTube Shorts')):
+        if platforms and k in platforms and not (r.get(k) or {}).get('hook'):
+            warns.append(f'{name}: no on-screen hook was produced')
+    return r, fixes, warns
+
+
+def ps_creator_reminders(people='', transcript='', handles=None):
+    """Manual to-dos from the creator-specific rules (things the copy itself cannot do)."""
+    both = (people or '') + ' ' + (transcript or '')
+    out = []
+    if re.search(r'aishah\s*sofey|aishahsofey', both, flags=re.I):
+        out.append('Aishah Sofey: tag @aishahsofey in the X comments BEFORE the clip blows up. TikTok: tag @aishah + #aishahsofey. '
+                   'Instagram: tag @aishahsofey in the video + caption + #aishahsofey. YouTube Shorts: tag @hiaishahsofey.')
+    return out
+
+
+def ps_key_pool(keys, extra_keys, extra_enabled):
+    """Ordered [(provider, key)] for writing: Gemini first (long prompt friendly), then OpenRouter, then Groq
+    (its free tier only allows ~8K tokens/minute, too small for the master prompt on long clips)."""
+    pool = []
+    for prov, lib in (('Google Gemini (Free)', 'gemini'), ('OpenRouter (Free models)', 'openrouter'), ('Groq (Free)', 'groq')):
+        ks = [keys.get(prov, '').strip()]
+        ex = extra_keys.get(prov, [])
+        en = list(extra_enabled.get(prov, [])) + [True] * max(0, len(ex) - len(extra_enabled.get(prov, [])))
+        ks += [k for k, e in zip(ex, en) if e]
+        pool += [(lib, k) for k in ks if k]
+    return pool
+# end-post-studio-engine
 
 
 class App(tk.Tk):
@@ -10742,238 +11098,6 @@ Return ONLY the JSON array, no other text."""
         self.after(0, lambda: self.set_busy(False))
         self.after(0, lambda: messagebox.showinfo('Done', f'{ok}/{len(clips)} clips saved to:\n{out}'))
 
-    # ── Transcript actions ────────────────────────────────────────────────────
-
-    def _set_tweet_tone(self, tone):
-        self.tweet_tone.set(tone)
-        self._refresh_tweet_tones()
-
-    def _refresh_tweet_tones(self):
-        tone_styles = {
-            'drama':      ('🔥 Drama',     ACCENT),
-            'tea':        ('☕ Tea',       '#8B5CF6'),
-            'breaking':   ('📰 Breaking',  '#3B82F6'),
-            'hype':       ('💥 Hype',      '#EF4444'),
-            'exaggerate': ('🤯 Exaggerate','#F59E0B'),
-        }
-        cur = self.tweet_tone.get()
-        for t, b in self._tweet_tone_btns.items():
-            active = (t == cur)
-            color = tone_styles.get(t, (t, ACCENT))[1]
-            b.config(bg=color if active else BG3,
-                     fg='#fff' if active else FG3)
-
-    def _generate_tweet(self):
-        if not self.transcript.strip():
-            messagebox.showwarning('No transcript', 'Transcribe a video first.')
-            return
-        # Save context
-        ctx = self.tweet_context.get('1.0', 'end').strip()
-        self.cfg['tweet_context'] = ctx
-        save_cfg(self.cfg)
-
-        self.tweet_gen_btn.config(state='disabled', text='⏳  Generating...')
-        groq_key = self._keys.get('Groq (Free)','')
-        prov_hint = 'Groq' if groq_key else 'AI'
-        self.tweet_gen_lbl.config(text=f'Calling {prov_hint}...')
-        threading.Thread(target=self._run_tweet_gen, daemon=True).start()
-
-    def _run_tweet_gen(self):
-        try:
-            # Tweet gen: prefer Groq (fastest, best at short punchy text)
-            # Reload keys from config in case settings tab hasn't been opened
-            for _pk, _cfg_k in [('Groq (Free)', 'key_groq'),
-                                  ('Google Gemini (Free)', 'key_gemini'),
-                                  ('OpenRouter (Free models)', 'key_openrouter')]:
-                if not self._keys.get(_pk, '').strip():
-                    _v = self.cfg.get(_cfg_k, '').strip()
-                    if _v: self._keys[_pk] = _v
-            keyed = [p for p in PROVIDERS if self._keys.get(p, '').strip()]
-            if not keyed:
-                raise ValueError('No API key saved. Go to ⚙ Settings and enter a key.')
-            groq_prov = 'Groq (Free)'
-            if groq_prov in keyed:
-                prov = groq_prov  # always prefer Groq for tweets
-            elif self.v_provider.get() in keyed:
-                prov = self.v_provider.get()
-            else:
-                prov = keyed[0]
-            data  = PROVIDERS[prov]
-            lib   = data['lib']
-            key   = self._keys.get(prov, '').strip()
-            model = _pick_model(prov, self.v_model.get() if self.v_provider.get() == prov else '', 'write')
-
-            ctx   = self.tweet_context.get('1.0', 'end').strip() if hasattr(self, 'tweet_context') else ''
-            tone  = self.tweet_tone.get()
-
-            # Use first 6000 chars of transcript for tweet gen
-            tone_desc = TWEET_TONE_PROMPTS.get(tone, TWEET_TONE_PROMPTS['drama'])
-            prompt = TWEET_PROMPT.replace('{context}', ctx or 'No additional context provided.')
-            prompt = prompt.replace('{transcript}', self.transcript[:6000])
-            prompt = prompt.replace('{tone}', tone_desc)
-
-            # Try all models in the selected provider, then fall back to others
-            raw = None
-            # Try order: selected prov first, then Groq, then rest
-            _rest = [p for p in keyed if p != prov]
-            _groq = [p for p in _rest if 'Groq' in p]
-            _others = [p for p in _rest if 'Groq' not in p]
-            providers_to_try = [prov] + _groq + _others
-
-            for try_prov in providers_to_try:
-                try_data  = PROVIDERS[try_prov]
-                try_lib   = try_data['lib']
-                try_key   = self._keys.get(try_prov, '').strip()
-                try_models = ([model] + [m for m in _ai_models(try_prov, 'write') if m != model]
-                              if try_prov == prov else _ai_models(try_prov, 'write'))
-
-                for try_model in try_models:
-                    try:
-                        if try_lib == 'gemini':
-                            from google import genai as _g
-                            client = _g.Client(api_key=try_key)
-                            resp = _gemini_generate(client, try_model, prompt,
-                                                    _gemini_config(try_model, 2000, 0.85))
-                            raw = _safe_text(resp)
-                            if not raw:
-                                raw = None
-                                continue
-
-                        elif try_lib == 'groq':
-                            _ensure_pkgs_on_path()
-                            # Bust cached broken import if present
-                            import sys as _sys_g
-                            for _gmod in list(_sys_g.modules.keys()):
-                                if _gmod == 'groq' or _gmod.startswith('groq.'):
-                                    del _sys_g.modules[_gmod]
-                            try:
-                                from groq import Groq as _G
-                            except ImportError as _ge:
-                                raise ImportError(
-                                    f'Groq package broken ({_ge}). '
-                                    'Go to Settings → Update Modules → Update All Packages.'
-                                )
-                            resp = _groq_chat(_G(api_key=try_key), model=try_model,
-                                              messages=[{'role': 'user', 'content': prompt}],
-                                              temperature=0.85, **_groq_kwargs(try_model, 2000))
-                            raw = _safe_text(resp)
-                            if not raw:
-                                raw = None
-                                continue
-
-                        elif try_lib == 'openrouter':
-                            _ensure_pkgs_on_path()
-                            try:
-                                from openai import OpenAI as _O
-                            except ImportError as _oe:
-                                raise ImportError(f'OpenAI broken ({_oe}) — run Update All Packages in Settings.')
-                            resp = _O(base_url='https://openrouter.ai/api/v1', api_key=try_key
-                                      ).chat.completions.create(
-                                model=try_model,
-                                messages=[{'role': 'user', 'content': prompt}],
-                                temperature=0.85, **_openrouter_kwargs(try_model, 2000))
-                            raw = _safe_text(resp)
-                            if not raw:
-                                raw = None
-                                continue
-
-                        prov = try_prov  # update for display in status
-                        model = try_model
-                        break  # success
-
-                    except Exception as _e:
-                        err_str = str(_e)
-                        if try_lib != 'openrouter' and _is_model_gone_error(_e):
-                            _mark_model_dead(try_model)   # retired id: skip it from now on
-                        if any(x in err_str for x in ['404', '429', '503', 'RESOURCE_EXHAUSTED',
-                                                        'quota', 'decommission', 'No endpoints']):
-                            continue  # try next model
-                        raise  # unexpected error, surface it
-
-                if raw is not None:
-                    break  # got a result, stop trying providers
-
-            if raw is None:
-                raise ValueError('All providers and models failed. Check your API keys.')
-
-            # Parse 3 options from the raw response
-            import re as _re_tw
-            _parts = _re_tw.split(r'OPTION\s*[123]\s*\n', raw)
-            _parts = [p.strip() for p in _parts if p.strip()]
-            # Pad to 3 in case AI didn't produce all 3
-            while len(_parts) < 3:
-                _parts.append('')
-            _opt1, _opt2, _opt3 = _parts[0], _parts[1], _parts[2]
-
-            def _update():
-                try:
-                    for pk in _sel:
-                        _txt = _results.get(pk,'')
-                        if pk not in self._ps_out: continue
-                        _b = self._ps_out[pk]['box']
-                        _b.config(state='normal', fg=FG if _txt else FG3)
-                        _b.delete('1.0','end')
-                        _b.insert('1.0', _txt if _txt else f'(No {pk} output — check API keys)')
-                        def _resize(box=_b):
-                            box.update_idletasks()
-                            box.config(height=1)
-                            box.update_idletasks()
-                            _visual = 0
-                            _idx = '1.0'
-                            while True:
-                                _di = box.dlineinfo(_idx)
-                                if _di is None: break
-                                _visual += 1
-                                _next = box.index(f'{_idx} +1 display lines')
-                                if _next == _idx: break
-                                _idx = _next
-                            box.config(height=max(4, _visual + 1))
-                        self.after(100, _resize)
-                        if _txt:
-                            def _run_score(p=pk, t=_txt, gk=[k for _,k in _groq_keys_list], mk=[k for _,k in _gem_keys_list]):
-                                _sc, _rs = self._ps_score_post(p, t, gk, mk)
-                                self._ps_update_score(p, _sc, _rs)
-                            import threading as _sct
-                            _sct.Thread(target=_run_score, daemon=True).start()
-                    # Save handles to memory
-                    if _name1 and any([_h_x,_h_ig,_h_tt,_h_yt]):
-                        try:
-                            MEM_PATH = USER_DIR / 'handle_memory.json'
-                            _m2 = {}
-                            try: _m2 = _psj2.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
-                            except: pass
-                            _m2[_name1.lower().replace(' ','_')] = {
-                                'x':_h_x,'instagram':_h_ig,'tiktok':_h_tt,'youtube':_h_yt,'name':_name1}
-                            MEM_PATH.write_text(_psj2.dumps(_m2,indent=2))
-                        except: pass
-                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
-                    self._ps_status.config(text=f'✅ Generated for: {", ".join(_sel)}', fg=GREEN)
-                    self.set_progress(f'✅ Post Studio — Done!', pct=100)
-                    self.after(3000, lambda: self.set_progress('', pct=0))
-                except Exception as _ue:
-                    import traceback as _utb
-                    print(f'[PostStudio _update ERROR]\n{_utb.format_exc()}')
-                    self.log(f'[Post Studio] ❌ Update error: {str(_ue)[:80]}', RED)
-                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
-
-            self.after(0, _update)
-
-        except Exception:
-            err = traceback.format_exc()
-            def _err():
-                self.tweet_gen_btn.config(state='normal', text='⚡  GENERATE TWEET')
-                self.tweet_gen_lbl.config(text='Error — check log', fg=RED)
-                self.log(f'Tweet gen error:\n{err}', RED)
-            self.after(0, _err)
-
-    def _copy_tweet(self):
-        t = self.tweet_out.get('1.0', 'end').strip()
-        if t:
-            self.clipboard_clear()
-            self.clipboard_append(t)
-            self.tweet_gen_lbl.config(text='Copied to clipboard!', fg=GREEN)
-
-    # ── Subtitle burn-in ──────────────────────────────────────────────────────
     def _get_sub_settings(self):
         """Return current subtitle style settings as a dict."""
         return {
@@ -11478,986 +11602,689 @@ Return ONLY the JSON array, no other text."""
         self.log(f'SRT saved: {Path(p).name} ({len(self.srt_result.get("segments",[]))} entries)', GREEN)
 
 
+    # ─────────────────────────────────────────────────────────────────────────
+    #  POST STUDIO TAB (v2)
+    #  Writes TikTok / Instagram / YouTube Shorts / X copy from a transcript or a rough description,
+    #  following the master prompt in PS_MASTER_PROMPT. Pure logic (prompt, parsing, rule enforcement)
+    #  lives in the post-studio-engine block above `class App`; this is only the UI + AI plumbing.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    _PS_TRANS_PH = 'Paste the transcript, or just describe the clip ("Mizkif reacts to...")'
+    _PS_ANGLE_PH = 'Optional. Force an angle, e.g. "make it about Dana calling the rumors bullshit"'
+    _PS_PEOPLE_PH = 'Who is in THIS clip, e.g. Nick Lee, Ice Poseidon'
+    _PS_RULES_PH = 'Standing rules for every clip, e.g. "Always mention SeeEx"'
+    _PS_HANDLES = (('x', '𝕏', '@handle'), ('tiktok', '🎵', '@tiktok'),
+                   ('instagram', '📸', '@instagram'), ('youtube', '▶', '@youtube'))
+
+    def _ps_val(self, w):
+        """Text of a Text/Entry widget with its placeholder treated as empty."""
+        try:
+            v = w.get('1.0', 'end') if isinstance(w, tk.Text) else w.get()
+        except Exception:
+            return ''
+        v = v.strip()
+        return '' if v == getattr(w, '_ps_ph', None) else v
+
+    def _ps_put(self, w, text):
+        """Replace a Text/Entry widget's content (placeholder aware)."""
+        ph = getattr(w, '_ps_ph', '')
+        try:
+            _st = str(w.cget('state'))
+            w.config(state='normal')
+        except Exception:
+            _st = 'normal'
+        try:
+            self._ps_put_inner(w, text, ph)
+        finally:
+            try: w.config(state=_st)
+            except Exception: pass
+
+    def _ps_put_inner(self, w, text, ph):
+        if isinstance(w, tk.Text):
+            w.delete('1.0', 'end')
+            if text:
+                w.insert('1.0', text); w.config(fg=FG)
+            else:
+                w.insert('1.0', ph); w.config(fg=FG3)
+        else:
+            w.delete(0, 'end')
+            if text:
+                w.insert(0, text); w.config(fg=FG)
+            else:
+                w.insert(0, ph); w.config(fg=FG3)
+
+    def _ps_make_ph(self, w, ph):
+        """Give a Text/Entry a grey placeholder that disappears on focus."""
+        w._ps_ph = ph
+        self._ps_put(w, '')
+        def _in(_e):
+            if self._ps_val(w) == '' and w.cget('fg') == FG3:
+                if isinstance(w, tk.Text): w.delete('1.0', 'end')
+                else: w.delete(0, 'end')
+                w.config(fg=FG)
+        def _out(_e):
+            if self._ps_val(w) == '':
+                self._ps_put(w, '')
+        w.bind('<FocusIn>', _in, add='+')
+        w.bind('<FocusOut>', _out, add='+')
+
+    def _ps_lbl(self, parent, text, hint=''):
+        tk.Label(parent, text=text, font=('Segoe UI', 8, 'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(8, 1))
+        if hint:
+            tk.Label(parent, text=hint, font=('Segoe UI', 7), fg=FG3, bg=BG, wraplength=310,
+                     justify='left').pack(anchor='w')
+
+    def _ps_mem_path(self):
+        return USER_DIR / 'handle_memory.json'
+
+    def _ps_mem_load(self):
+        try:
+            return json.loads(self._ps_mem_path().read_text(encoding='utf-8'))
+        except Exception:
+            return {}
+
+    def _ps_mem_key(self, people):
+        return (people or '').split(',')[0].strip().lower().replace(' ', '_')
+
+    def _build_post_studio_tab(self, p):
+        """Post Studio v2 - captions for TikTok / Instagram / YouTube Shorts / X from the master prompt."""
+        self._ps_hist = []          # results of the CURRENT clip, newest last
+        self._ps_hist_i = -1
+        self._ps_busy = False
+        self._ps_cards = {}
+        self._ps_seex = tk.StringVar(value=self.cfg.get('ps_seex', 'auto'))
+        _saved_plats = self.cfg.get('ps_plats') or [k for k, *_ in PS_PLATFORMS]
+        self._ps_plats = {k: tk.BooleanVar(value=(k in _saved_plats)) for k, *_ in PS_PLATFORMS}
+
+        outer = tk.Frame(p, bg=BG); outer.pack(fill='both', expand=True)
+
+        # ── LEFT: inputs (scrolls, the form is tall) ─────────────────────────────
+        lwrap = tk.Frame(outer, bg=BG, width=350)
+        lwrap.pack(side='left', fill='y', padx=(10, 0), pady=8)
+        lwrap.pack_propagate(False)
+        lcv = tk.Canvas(lwrap, bg=BG, bd=0, highlightthickness=0)
+        _make_scrollbar(lwrap, lcv)
+        lcv.pack(side='left', fill='both', expand=True)
+        left = tk.Frame(lcv, bg=BG)
+        _lwin = lcv.create_window((0, 0), window=left, anchor='nw')
+        left.bind('<Configure>', lambda e: lcv.configure(scrollregion=lcv.bbox('all')))
+        lcv.bind('<Configure>', lambda e: lcv.itemconfigure(_lwin, width=e.width - 4))
+        _bind_mousewheel(lcv, lcv); _bind_mousewheel(left, lcv)
+        tk.Frame(outer, bg=BORDER, width=1).pack(side='left', fill='y', padx=(8, 0))
+        right = tk.Frame(outer, bg=BG)
+        right.pack(side='left', fill='both', expand=True, padx=10, pady=8)
+
+        top = tk.Frame(left, bg=BG); top.pack(fill='x')
+        tk.Label(top, text='🚀  POST STUDIO', font=('Segoe UI', 10, 'bold'), fg=ACCENT, bg=BG).pack(side='left')
+        tk.Button(top, text='🆕 New clip', font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2',
+                  padx=8, pady=3, command=self._ps_new_clip).pack(side='right', padx=(0, 6))
+
+        # transcript
+        self._ps_lbl(left, 'CLIP TRANSCRIPT / DESCRIPTION')
+        tw = tk.Frame(left, bg=BG3); tw.pack(fill='x', pady=(2, 4))
+        self._ps_trans = tk.Text(tw, height=7, font=FONT_MONO_S, bg=BG3, fg=FG3, insertbackground=ACCENT,
+                                 relief='flat', bd=4, wrap='word')
+        self._ps_trans.pack(fill='x')
+        self._ps_make_ph(self._ps_trans, self._PS_TRANS_PH)
+        _tb = tk.Frame(left, bg=BG); _tb.pack(fill='x')
+        tk.Button(_tb, text='⬆ Current transcript', font=FONT_SMALL, bg=ACCENT, fg='#000', relief='flat', bd=0,
+                  cursor='hand2', padx=8, pady=4, command=self._ps_use_current).pack(side='left', padx=(0, 4))
+        self._ps_clip_btn = tk.Button(_tb, text='🎬 A found clip ▾', font=FONT_SMALL, bg=BG3, fg=FG, relief='flat',
+                                      bd=0, cursor='hand2', padx=8, pady=4, command=self._ps_pick_clip)
+        self._ps_clip_btn.pack(side='left', padx=(0, 4))
+        tk.Button(_tb, text='📂 Video', font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2',
+                  padx=8, pady=4, command=self._ps_load_video).pack(side='left')
+
+        # who / angle
+        self._ps_lbl(left, 'PEOPLE IN THIS CLIP  (optional)', 'Only these people get named (rule: no random extra names).')
+        self._ps_people = tk.Entry(left, font=FONT_SMALL, bg=BG3, fg=FG3, insertbackground=ACCENT, relief='flat', bd=4)
+        self._ps_people.pack(fill='x', pady=(2, 0))
+        self._ps_make_ph(self._ps_people, self._PS_PEOPLE_PH)
+        self._ps_people.bind('<FocusOut>', lambda e: self._ps_recall_handles(), add='+')
+        self._ps_lbl(left, 'ANGLE OVERRIDE  (optional)', 'Leave empty and it finds the one moment people stop scrolling for.')
+        self._ps_angle = tk.Text(left, height=2, font=FONT_SMALL, bg=BG3, fg=FG3, insertbackground=ACCENT,
+                                 relief='flat', bd=4, wrap='word')
+        self._ps_angle.pack(fill='x', pady=(2, 0))
+        self._ps_make_ph(self._ps_angle, self._PS_ANGLE_PH)
+
+        # SeeEx mode + platforms
+        self._ps_lbl(left, 'SEEEX', 'Nick Lee\'s event. Auto = only when the clip is clearly from it.')
+        _sx = tk.Frame(left, bg=BG); _sx.pack(fill='x')
+        for _v, _t in (('auto', 'Auto'), ('always', 'Always mention'), ('never', 'Not SeeEx')):
+            tk.Radiobutton(_sx, text=_t, value=_v, variable=self._ps_seex, font=FONT_SMALL, bg=BG, fg=FG,
+                           selectcolor=BG3, activebackground=BG, activeforeground=FG, relief='flat',
+                           cursor='hand2').pack(side='left', padx=(0, 8))
+        self._ps_lbl(left, 'PLATFORMS')
+        _pl = tk.Frame(left, bg=BG); _pl.pack(fill='x')
+        for i, (k, lbl, col, _f) in enumerate(PS_PLATFORMS):
+            tk.Checkbutton(_pl, text=lbl, variable=self._ps_plats[k], font=FONT_SMALL, bg=BG, fg=col, selectcolor=BG3,
+                           activebackground=BG, activeforeground=col, relief='flat', cursor='hand2',
+                           command=self._ps_refresh_cards).grid(row=i // 2, column=i % 2, sticky='w', padx=(0, 10))
+
+        # handles
+        self._ps_lbl(left, 'HANDLES  (optional)', 'Remembered per person. Used for tagging lines.')
+        self._ps_handle = {}
+        _hg = tk.Frame(left, bg=BG); _hg.pack(fill='x', pady=(2, 0))
+        for i, (k, ico, ph) in enumerate(self._PS_HANDLES):
+            tk.Label(_hg, text=ico, font=FONT_SMALL, fg=FG2, bg=BG).grid(row=i // 2, column=(i % 2) * 2, sticky='w')
+            e = tk.Entry(_hg, font=FONT_SMALL, bg=BG3, fg=FG3, insertbackground=ACCENT, relief='flat', bd=3, width=14)
+            e.grid(row=i // 2, column=(i % 2) * 2 + 1, sticky='we', padx=(2, 8), pady=1)
+            self._ps_make_ph(e, ph)
+            self._ps_handle[k] = e
+        _hg.columnconfigure(1, weight=1); _hg.columnconfigure(3, weight=1)
+        self._ps_mem_lbl = tk.Label(left, text='', font=('Segoe UI', 7), fg=GREEN, bg=BG)
+        self._ps_mem_lbl.pack(anchor='w')
+
+        # standing rules
+        self._ps_lbl(left, 'MY STANDING RULES  (saved)', 'Applied to every clip, e.g. corrections you never want to repeat.')
+        self._ps_rules = tk.Text(left, height=3, font=FONT_SMALL, bg=BG3, fg=FG3, insertbackground=ACCENT,
+                                 relief='flat', bd=4, wrap='word')
+        self._ps_rules.pack(fill='x', pady=(2, 0))
+        self._ps_make_ph(self._ps_rules, self._PS_RULES_PH)
+        self._ps_put(self._ps_rules, self.cfg.get('ps_rules', ''))
+
+        self._ps_gen_btn = tk.Button(left, text='⚡  WRITE THE POSTS', font=('Segoe UI', 10, 'bold'), bg=ACCENT,
+                                     fg='#000', relief='flat', bd=0, cursor='hand2', pady=10,
+                                     activebackground=ACCENT2, command=lambda: self._ps_generate('new'))
+        self._ps_gen_btn.pack(fill='x', pady=(12, 4))
+        self._ps_status = tk.Label(left, text='', font=('Segoe UI', 8), fg=FG2, bg=BG, wraplength=320, justify='left')
+        self._ps_status.pack(anchor='w', pady=(0, 10))
+
+        # ── RIGHT: iteration bar + results ───────────────────────────────────────
+        hdr = tk.Frame(right, bg=BG); hdr.pack(fill='x')
+        tk.Label(hdr, text='GENERATED POSTS', font=('Segoe UI', 9, 'bold'), fg=ACCENT, bg=BG).pack(side='left')
+        self._ps_nav_lbl = tk.Label(hdr, text='', font=('Segoe UI', 8), fg=FG2, bg=BG)
+        self._ps_nav_lbl.pack(side='right')
+        self._ps_next_btn = tk.Button(hdr, text='▶', font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0, width=3,
+                                      cursor='hand2', command=lambda: self._ps_nav(1))
+        self._ps_next_btn.pack(side='right', padx=(2, 4))
+        self._ps_prev_btn = tk.Button(hdr, text='◀', font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0, width=3,
+                                      cursor='hand2', command=lambda: self._ps_nav(-1))
+        self._ps_prev_btn.pack(side='right')
+        self._ps_angle_lbl = tk.Label(right, text='', font=('Segoe UI', 8, 'italic'), fg=FG2, bg=BG,
+                                      wraplength=640, justify='left')
+        self._ps_angle_lbl.pack(anchor='w', pady=(2, 4))
+
+        it = tk.Frame(right, bg=BG); it.pack(fill='x', pady=(0, 4))
+        self._ps_iter_btns = []
+        for _task, _t in (('retry', '🔄 Try again'), ('funnier', '😂 Funnier'), ('shorter', '✂ Shorten'),
+                          ('viral', '🚀 More viral')):
+            b = tk.Button(it, text=_t, font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0, cursor='hand2',
+                          padx=10, pady=4, command=lambda t=_task: self._ps_generate(t))
+            b.pack(side='left', padx=(0, 4))
+            self._ps_iter_btns.append(b)
+        fx = tk.Frame(right, bg=BG); fx.pack(fill='x', pady=(0, 6))
+        self._ps_fix = tk.Entry(fx, font=FONT_SMALL, bg=BG3, fg=FG3, insertbackground=ACCENT, relief='flat', bd=5)
+        self._ps_fix.pack(side='left', fill='x', expand=True, padx=(0, 4))
+        self._ps_make_ph(self._ps_fix, 'Correction or instruction, e.g. "it was NIBBLES, not kisses"')
+        self._ps_fix.bind('<Return>', lambda e: self._ps_generate('fix'))
+        self._ps_fix_btn = tk.Button(fx, text='Apply', font=FONT_SMALL, bg=ACCENT2, fg='#000', relief='flat', bd=0,
+                                     cursor='hand2', padx=12, pady=4, command=lambda: self._ps_generate('fix'))
+        self._ps_fix_btn.pack(side='right')
+        self._ps_iter_btns.append(self._ps_fix_btn)
+
+        rwrap = tk.Frame(right, bg=BG); rwrap.pack(fill='both', expand=True)
+        rcv = tk.Canvas(rwrap, bg=BG, bd=0, highlightthickness=0)
+        _make_scrollbar(rwrap, rcv)
+        rcv.pack(side='left', fill='both', expand=True)
+        self._ps_rcv = rcv
+        body = tk.Frame(rcv, bg=BG)
+        _rwin = rcv.create_window((0, 0), window=body, anchor='nw')
+        body.bind('<Configure>', lambda e: rcv.configure(scrollregion=rcv.bbox('all')))
+        rcv.bind('<Configure>', lambda e: rcv.itemconfigure(_rwin, width=e.width - 2))
+        _bind_mousewheel(rcv, rcv); _bind_mousewheel(body, rcv)
+        self._ps_body = body
+
+        self._ps_notes = tk.Frame(body, bg=BG); self._ps_notes.pack(fill='x', pady=(0, 6))
+        self._ps_empty = tk.Label(body, text='Paste a transcript (or describe the clip) on the left,\n'
+                                             'then hit  ⚡ WRITE THE POSTS.', font=('Segoe UI', 9), fg=FG3, bg=BG,
+                                  justify='center')
+        self._ps_empty.pack(pady=40)
+        for key, lbl, col, fields in PS_PLATFORMS:
+            self._ps_build_card(body, key, lbl, col, fields)
+        self._ps_recall_handles()
+        self._ps_refresh_cards()
+        self._ps_set_iter_state(False)
+        self._ps_wheel(left, lcv)
+        self._ps_wheel(body, rcv)
+
+    def _ps_wheel(self, w, cv):
+        """Mouse wheel scrolls the panel from anywhere over it (Tk does not bubble wheel events to parents)."""
+        try:
+            _bind_mousewheel(w, cv)
+            for c in w.winfo_children():
+                self._ps_wheel(c, cv)
+        except Exception:
+            pass
+
+    # ── cards ──────────────────────────────────────────────────────────────────────
+
+    def _ps_build_card(self, parent, key, label, col, fields):
+        card = tk.Frame(parent, bg=BG3)
+        head = tk.Frame(card, bg=BG4); head.pack(fill='x')
+        tk.Frame(head, bg=col, width=3).pack(side='left', fill='y')
+        tk.Label(head, text=label, font=('Segoe UI', 9, 'bold'), fg=col, bg=BG4).pack(side='left', padx=8, pady=5)
+        info = {'frame': card, 'fields': {}, 'count': None}
+        allbtn = tk.Button(head, text='📋 Copy all', font=FONT_SMALL, bg=BG4, fg=FG2, relief='flat', bd=0,
+                           cursor='hand2', padx=8, pady=4)
+        allbtn.pack(side='right', padx=(0, 4))
+        allbtn.config(command=lambda k=key, b=allbtn: self._ps_copy_all(k, b))
+        rg = tk.Button(head, text='🔄', font=FONT_SMALL, bg=BG4, fg=FG2, relief='flat', bd=0, cursor='hand2',
+                       padx=6, pady=4, command=lambda k=key: self._ps_generate('retry', only=[k]))
+        rg.pack(side='right')
+        info['regen'] = rg
+        if key == 'x':
+            info['count'] = tk.Label(head, text='', font=('Segoe UI', 8), fg=FG3, bg=BG4)
+            info['count'].pack(side='right', padx=6)
+        for f in fields:
+            row = tk.Frame(card, bg=BG3); row.pack(fill='x', padx=6, pady=(5, 0))
+            tk.Label(row, text=PS_FIELD_LABEL[f], font=('Segoe UI', 7, 'bold'), fg=FG3, bg=BG3).pack(side='left')
+            cb = tk.Button(row, text='📋', font=('Segoe UI', 8), bg=BG3, fg=FG2, relief='flat', bd=0,
+                           cursor='hand2', padx=4)
+            cb.pack(side='right')
+            box = tk.Text(card, height=2, font=FONT_SMALL, bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat',
+                          bd=4, wrap='word', highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+            box.pack(fill='x', padx=6, pady=(1, 0))
+            box.bind('<KeyRelease>', lambda e, k=key, ff=f: self._ps_on_edit(k, ff))
+            _bind_mousewheel(box, self._ps_rcv)
+            cb.config(command=lambda k=key, ff=f, b=cb: self._ps_copy_field(k, ff, b))
+            info['fields'][f] = {'box': box, 'btn': cb}
+        tk.Frame(card, bg=BG3, height=6).pack()
+        _bind_mousewheel(card, self._ps_rcv)
+        self._ps_cards[key] = info
+
+    def _ps_fit(self, box):
+        """Grow a Text widget to the number of visual lines it holds."""
+        try:
+            box.update_idletasks()
+            n = box.count('1.0', 'end-1c', 'displaylines')
+            n = (n[0] if isinstance(n, (tuple, list)) else n) or 1
+        except Exception:
+            n = box.get('1.0', 'end').count('\n') + 1
+        box.config(height=max(2, min(14, int(n) + 1)))
+
+    def _ps_on_edit(self, key, field):
+        info = self._ps_cards.get(key)
+        if not info:
+            return
+        if key == 'x' and info['count'] is not None:
+            n = len(info['fields']['post']['box'].get('1.0', 'end-1c'))
+            info['count'].config(text=f'{n}/280', fg=(RED if n > 280 else FG3))
+        self._ps_fit(info['fields'][field]['box'])
+
+    def _ps_refresh_cards(self):
+        """Show a card only if its platform is ticked AND there is a result for it."""
+        res = self._ps_current()
+        any_shown = False
+        for key, *_ in PS_PLATFORMS:
+            info = self._ps_cards.get(key)
+            if not info:
+                continue
+            show = bool(res) and key in res and self._ps_plats[key].get()
+            if show:
+                info['frame'].pack(fill='x', pady=(0, 8)); any_shown = True
+            else:
+                info['frame'].pack_forget()
+        if any_shown:
+            self._ps_empty.pack_forget()
+        elif not self._ps_empty.winfo_manager():
+            self._ps_empty.pack(pady=40)
+
+    def _ps_current(self):
+        if 0 <= self._ps_hist_i < len(self._ps_hist):
+            return self._ps_hist[self._ps_hist_i]
+        return None
+
+    def _ps_copy(self, text, btn, idle='📋'):
+        text = (text or '').strip()
+        if not text:
+            return
+        self.clipboard_clear(); self.clipboard_append(text)
+        try:
+            btn.config(text='✅', fg=GREEN)
+            self.after(1200, lambda: btn.winfo_exists() and btn.config(text=idle, fg=FG2))
+        except Exception:
+            pass
+
+    def _ps_copy_field(self, key, field, btn):
+        self._ps_copy(self._ps_cards[key]['fields'][field]['box'].get('1.0', 'end'), btn)
+
+    def _ps_copy_all(self, key, btn):
+        info = self._ps_cards[key]
+        fields = next(f for k, _l, _c, f in PS_PLATFORMS if k == key)
+        parts = []
+        for f in fields:
+            t = info['fields'][f]['box'].get('1.0', 'end').strip()
+            if t:
+                parts.append(t if len(fields) == 1 else f'{PS_FIELD_LABEL[f]}\n{t}')
+        self._ps_copy('\n\n'.join(parts), btn, idle='📋 Copy all')
+
+    def _ps_show(self, res):
+        """Fill the cards + notes from a result dict (edits made in the boxes are per-version, not stored)."""
+        self._ps_refresh_cards()      # cards must be mapped before their height can be measured
+        for key, _lbl, _col, fields in PS_PLATFORMS:
+            info = self._ps_cards[key]
+            for f in fields:
+                box = info['fields'][f]['box']
+                box.delete('1.0', 'end')
+                box.insert('1.0', (res.get(key) or {}).get(f, ''))
+        self.update_idletasks()
+        for key, _lbl, _col, fields in PS_PLATFORMS:
+            for f in fields:
+                self._ps_on_edit(key, f)
+        self._ps_angle_lbl.config(text=('Angle: ' + res['angle']) if res.get('angle') else '')
+        for w in self._ps_notes.winfo_children():
+            w.destroy()
+        fixes, warns, rem = res.get('fixes', []), res.get('warns', []), res.get('reminders', [])
+        if fixes or warns or rem:
+            tk.Label(self._ps_notes, text=f'RULES CHECK   {len(fixes)} auto-fixed   {len(warns)} to review',
+                     font=('Segoe UI', 8, 'bold'), fg=(YELLOW if warns else GREEN), bg=BG).pack(anchor='w')
+            for t in fixes:
+                tk.Label(self._ps_notes, text='✔ ' + t, font=('Segoe UI', 8), fg=FG3, bg=BG, wraplength=620,
+                         justify='left').pack(anchor='w')
+            for t in warns:
+                tk.Label(self._ps_notes, text='⚠ ' + t, font=('Segoe UI', 8), fg=YELLOW, bg=BG, wraplength=620,
+                         justify='left').pack(anchor='w')
+            for t in rem:
+                tk.Label(self._ps_notes, text='📌 ' + t, font=('Segoe UI', 8), fg=ACCENT2, bg=BG, wraplength=620,
+                         justify='left').pack(anchor='w')
+        else:
+            tk.Label(self._ps_notes, text='✅ RULES CHECK   nothing to fix', font=('Segoe UI', 8, 'bold'),
+                     fg=GREEN, bg=BG).pack(anchor='w')
+        self._ps_wheel(self._ps_notes, self._ps_rcv)
+        n = len(self._ps_hist)
+        self._ps_nav_lbl.config(text=f'version {self._ps_hist_i + 1} of {n}')
+        self._ps_prev_btn.config(state='normal' if self._ps_hist_i > 0 else 'disabled')
+        self._ps_next_btn.config(state='normal' if self._ps_hist_i < n - 1 else 'disabled')
+        self._ps_refresh_cards()
+        try:
+            self._ps_rcv.yview_moveto(0)
+        except Exception:
+            pass
+
+    def _ps_snapshot(self):
+        """The current version INCLUDING any hand edits made in the boxes (stored back into the history)."""
+        cur = self._ps_current()
+        if not cur:
+            return None
+        snap = dict(cur)
+        for key, _l, _c, fields in PS_PLATFORMS:
+            if key in cur:
+                vals = {f: self._ps_cards[key]['fields'][f]['box'].get('1.0', 'end').strip() for f in fields}
+                snap[key] = {f: v for f, v in vals.items() if v}
+        self._ps_hist[self._ps_hist_i] = snap
+        return snap
+
+    def _ps_nav(self, d):
+        i = self._ps_hist_i + d
+        if 0 <= i < len(self._ps_hist):
+            self._ps_snapshot()
+            self._ps_hist_i = i
+            self._ps_show(self._ps_hist[i])
+
+    def _ps_set_iter_state(self, on):
+        for b in self._ps_iter_btns:
+            try:
+                b.config(state='normal' if on else 'disabled')
+            except Exception:
+                pass
+        self._ps_fix.config(state='normal' if on else 'disabled')
+        for k, info in self._ps_cards.items():
+            info['regen'].config(state='normal' if on else 'disabled')
+
+    def _ps_set_status(self, msg, col=None):
+        try:
+            self._ps_status.config(text=msg, fg=col or FG2)
+        except Exception:
+            pass
+
+    # ── inputs ────────────────────────────────────────────────────────────────────
+
+    def _ps_new_clip(self):
+        """Rule 29: every clip is its own piece of content - drop the previous clip's text, angle and results."""
+        if self._ps_busy:
+            return
+        self._ps_put(self._ps_trans, ''); self._ps_put(self._ps_angle, ''); self._ps_put(self._ps_people, '')
+        self._ps_put(self._ps_fix, '')
+        for k, e in self._ps_handle.items():
+            self._ps_put(e, '')
+        self._ps_mem_lbl.config(text='')
+        self._ps_hist = []; self._ps_hist_i = -1
+        for key, _l, _c, fields in PS_PLATFORMS:
+            for f in fields:
+                self._ps_cards[key]['fields'][f]['box'].delete('1.0', 'end')
+        for w in self._ps_notes.winfo_children():
+            w.destroy()
+        self._ps_angle_lbl.config(text=''); self._ps_nav_lbl.config(text='')
+        self._ps_prev_btn.config(state='disabled'); self._ps_next_btn.config(state='disabled')
+        self._ps_refresh_cards(); self._ps_set_iter_state(False)
+        self._ps_set_status('Fresh clip. Nothing carried over from the last one.', FG2)
+
+    def _ps_use_current(self):
+        t = (getattr(self, 'transcript', '') or '').strip()
+        if not t:
+            self._ps_set_status('⚠ No transcript yet. Run Find Clips or Transcribe first.', YELLOW)
+            return
+        self._ps_put(self._ps_trans, t[:12000])
+        self._ps_set_status(f'✅ Loaded the current transcript ({len(t):,} chars). A whole VOD is too much: use '
+                            '"A found clip" to load just one clip.', GREEN if len(t) < 12000 else YELLOW)
+
+    def _ps_pick_clip(self):
+        """Menu of the clips Find Clips returned -> load only that clip's part of the transcript."""
+        clips = list(getattr(self, 'clips', []) or [])
+        if not clips:
+            self._ps_set_status('⚠ No clips yet. Run Find Clips first.', YELLOW)
+            return
+        m = tk.Menu(self, tearoff=0, bg=BG3, fg=FG, activebackground=ACCENT, activeforeground='#000', bd=0)
+        for i, c in enumerate(clips[:30]):
+            m.add_command(label=f'{i + 1}.  {c.get("start", "")} - {c.get("end", "")}   {str(c.get("title", ""))[:46]}',
+                          command=lambda c=c: self._ps_load_clip(c))
+        try:
+            m.tk_popup(self._ps_clip_btn.winfo_rootx(), self._ps_clip_btn.winfo_rooty() + self._ps_clip_btn.winfo_height())
+        finally:
+            m.grab_release()
+
+    def _ps_load_clip(self, clip):
+        def _sec(t):
+            try:
+                p = str(t).split(':')
+                return sum(float(x) * m for x, m in zip(reversed(p), (1, 60, 3600)))
+            except Exception:
+                return None
+        s, e = _sec(clip.get('start')), _sec(clip.get('end'))
+        lines = []
+        for ln in (getattr(self, 'transcript', '') or '').splitlines():
+            m = re.match(r'\[(\d+):(\d+):(\d+)', ln)
+            if not m:
+                continue
+            t = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+            if s is not None and e is not None and s - 1 <= t <= e + 1:
+                lines.append(ln)
+        if not lines:
+            self._ps_set_status('⚠ Could not find that clip in the transcript.', YELLOW)
+            return
+        self._ps_put(self._ps_trans, '\n'.join(lines)[:12000])
+        self._ps_hist = []; self._ps_hist_i = -1        # new clip -> old results no longer belong to it
+        self._ps_set_status(f'✅ Loaded clip {clip.get("start", "")} - {clip.get("end", "")} ({len(lines)} lines).', GREEN)
+
+    def _ps_load_video(self):
+        import tkinter.filedialog as _fd
+        vp = _fd.askopenfilename(filetypes=[('Video / audio', '*.mp4 *.mkv *.mov *.webm *.avi *.mp3 *.m4a *.wav'), ('All', '*.*')])
+        if not vp:
+            return
+        model = self.v_whisper.get()
+        if not model or model == 'auto':
+            model = 'base'
+        use_gpu = self.v_use_gpu_whisper.get() if hasattr(self, 'v_use_gpu_whisper') else True
+        self._ps_set_status(f'🎬 Transcribing {Path(vp).name} [{model}]...', FG2)
+        self._ps_gen_btn.config(state='disabled')
+
+        def _run():
+            try:
+                ff = find_ffmpeg()
+                res = _do_transcribe(vid=vp, model_size=model, use_gpu=use_gpu, ffmpeg_path=ff,
+                                     log_cb=lambda m, col=FG2: self.after(0, lambda t=str(m)[:90]: self._ps_set_status(t)))
+                segs = (res or {}).get('segments') or []
+                if not segs:
+                    self.after(0, lambda: self._ps_set_status('⚠ No speech found in that file.', YELLOW))
+                else:
+                    txt = '\n'.join(f'[{ts(s["start"])}] {s["text"].strip()}' for s in segs)
+                    def _ok():
+                        self._ps_put(self._ps_trans, txt[:12000])
+                        self._ps_set_status(f'✅ Transcribed {len(segs)} segments.', GREEN)
+                    self.after(0, _ok)
+            except Exception as ex:
+                _why = str(ex)[:90]
+                self.after(0, lambda: self._ps_set_status(f'❌ {_why}', RED))
+            finally:
+                self.after(0, lambda: self._ps_gen_btn.config(state='normal'))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _ps_recall_handles(self):
+        """Fill the handle boxes from memory for the first person named (and undo the previous person's autofill)."""
+        prev = getattr(self, '_ps_autofill', {})
+        for k, e in self._ps_handle.items():
+            if prev.get(k) and self._ps_val(e) == prev[k]:
+                self._ps_put(e, '')
+        self._ps_autofill = {}
+        mem = self._ps_mem_load().get(self._ps_mem_key(self._ps_val(self._ps_people)))
+        if mem:
+            for k, e in self._ps_handle.items():
+                if mem.get(k) and not self._ps_val(e):
+                    self._ps_put(e, mem[k]); self._ps_autofill[k] = mem[k]
+            self._ps_mem_lbl.config(text='💾 handles remembered')
+        else:
+            self._ps_mem_lbl.config(text='')
+
+    def _ps_remember_handles(self, people, handles):
+        key = self._ps_mem_key(people)
+        if not key or not any(handles.values()):
+            return
+        try:
+            mem = self._ps_mem_load()
+            mem[key] = {**handles, 'name': people.split(',')[0].strip()}
+            self._ps_mem_path().write_text(json.dumps(mem, indent=2), encoding='utf-8')
+        except Exception:
+            pass
+
+    def _ps_inputs(self):
+        return {
+            'transcript': self._ps_val(self._ps_trans),
+            'angle': self._ps_val(self._ps_angle),
+            'people': self._ps_val(self._ps_people),
+            'seex': self._ps_seex.get(),
+            'platforms': [k for k, *_ in PS_PLATFORMS if self._ps_plats[k].get()],
+            'handles': {k: self._ps_val(e) for k, e in self._ps_handle.items()},
+            'rules': self._ps_val(self._ps_rules),
+            'correction': self._ps_val(self._ps_fix),
+        }
+
+    # ── generation ────────────────────────────────────────────────────────────────
+
+    def _ps_generate(self, task='new', only=None):
+        if self._ps_busy:
+            return
+        inp = self._ps_inputs()
+        if not inp['transcript'] and not inp['angle']:
+            self._ps_set_status('⚠ Paste a transcript or describe the clip first.', YELLOW)
+            return
+        plats = list(only or inp['platforms'])
+        if not plats:
+            self._ps_set_status('⚠ Tick at least one platform.', YELLOW)
+            return
+        previous = self._ps_snapshot() if task != 'new' else None
+        if task != 'new' and not previous:
+            task = 'new'
+        correction = inp['correction'] if task == 'fix' else ''
+        if task == 'fix' and not correction:
+            self._ps_set_status('⚠ Type the correction first (e.g. "it was NIBBLES, not kisses").', YELLOW)
+            return
+        # remember the things that should survive between clips
+        try:
+            self.cfg['ps_seex'] = inp['seex']; self.cfg['ps_rules'] = inp['rules']; self.cfg['ps_plats'] = inp['platforms']
+            save_cfg(self.cfg)
+        except Exception:
+            pass
+        self._ps_remember_handles(inp['people'], inp['handles'])
+        self._ps_busy = True
+        self._ps_gen_btn.config(state='disabled', text='⏳  Writing...')
+        self._ps_set_iter_state(False)
+        self._ps_set_status('Writing...', FG2)
+        threading.Thread(target=self._ps_worker, args=(inp, task, previous, correction, plats), daemon=True).start()
+
+    def _ps_call_ai(self, lib, key, sysm, user, max_tokens):
+        if lib == 'gemini':
+            return _gemini_complete(key, 'write', sysm + '\n\n' + user, max_tokens, 0.9)
+        msgs = [{'role': 'system', 'content': sysm}, {'role': 'user', 'content': user}]
+        if lib == 'groq':
+            return _groq_complete(key, 'write', msgs, max_tokens, 0.9)
+        return _openrouter_complete(key, 'write', msgs, max_tokens, 0.9, timeout=90)
+
+    def _ps_worker(self, inp, task, previous, correction, plats):
+        try:
+            for _pk, _ck in (('Groq (Free)', 'key_groq'), ('Google Gemini (Free)', 'key_gemini'),
+                             ('OpenRouter (Free models)', 'key_openrouter')):
+                if not self._keys.get(_pk, '').strip() and self.cfg.get(_ck, '').strip():
+                    self._keys[_pk] = self.cfg[_ck].strip()
+            pool = ps_key_pool(self._keys, getattr(self, '_extra_keys', {}), getattr(self, '_extra_keys_enabled', {}))
+            if not pool:
+                raise ValueError('No API key saved. Open Settings and add a free Gemini, OpenRouter or Groq key.')
+            parsed, used, last = None, '', None
+            for lib, key in pool:
+                # Groq's free plan allows ~8K tokens/minute in total: the master prompt alone is ~5K, so give it less
+                lim, mx = (2800, 1100) if lib == 'groq' else (12000, 1800)
+                sysm, user = ps_build_prompt(inp['transcript'], plats, inp['angle'], inp['people'], inp['handles'],
+                                             inp['seex'], inp['rules'], task, previous, correction, lim)
+                self.after(0, lambda l=lib: self._ps_set_status(f'Writing with {l.title()}...'))
+                try:
+                    txt = self._ps_call_ai(lib, key, sysm, user, mx)
+                except Exception as ex:
+                    last = ex
+                    self.log(f'[Post Studio] {lib} failed: {str(ex)[:140]}', YELLOW)
+                    continue
+                got = ps_parse(txt)
+                if not any(k in got for k in plats):
+                    last = ValueError('The AI did not follow the output format.')
+                    self.log(f'[Post Studio] {lib} gave an unparseable reply: {txt[:120]!r}', YELLOW)
+                    continue
+                parsed, used = got, lib
+                break
+            if parsed is None:
+                raise last or RuntimeError('No provider answered.')
+            merged = {k: v for k, v in (previous or {}).items() if k in ('angle', 'tiktok', 'instagram', 'youtube', 'x')}
+            for k, v in parsed.items():
+                if k == 'angle' or k in plats:
+                    merged[k] = v
+            all_plats = [k for k, *_ in PS_PLATFORMS if k in merged]
+            fixed, fixes, warns = ps_enforce(merged, all_plats, inp['seex'], inp['people'], inp['transcript'])
+            fixed['fixes'], fixed['warns'] = fixes, warns
+            fixed['reminders'] = ps_creator_reminders(inp['people'], inp['transcript'], inp['handles'])
+            fixed['provider'] = used
+
+            def _done():
+                self._ps_hist.append(fixed); self._ps_hist_i = len(self._ps_hist) - 1
+                self._ps_show(fixed)
+                self._ps_put(self._ps_fix, '')
+                self._ps_busy = False
+                self._ps_gen_btn.config(state='normal', text='⚡  WRITE THE POSTS')
+                self._ps_set_iter_state(True)
+                self._ps_set_status(f'✅ Done ({used.title()}).', GREEN)
+            self.after(0, _done)
+        except Exception as ex:
+            _why = str(ex)
+            self.log(f'[Post Studio] {traceback.format_exc()}', RED)
+            def _fail():
+                self._ps_busy = False
+                self._ps_gen_btn.config(state='normal', text='⚡  WRITE THE POSTS')
+                self._ps_set_iter_state(self._ps_current() is not None)
+                self._ps_set_status(f'❌ {_why[:200]}', RED)
+            self.after(0, _fail)
+
+
     # ═══════════════════════════════════════════════════════════════════════════
     # DOWNLOADER TAB
     # ═══════════════════════════════════════════════════════════════════════════
 
-
-    # ─────────────────────────────────────────────────────────────────────────
-    #  POST STUDIO TAB
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _build_post_studio_tab(self, p):
-        """Post Studio — algo-optimized social posts from transcript."""
-        import json as _psj
-
-        MEM_PATH = USER_DIR / 'handle_memory.json'
-        def _mem_load():
-            try: return _psj.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
-            except: return {}
-        def _mem_save(m):
-            try: MEM_PATH.write_text(_psj.dumps(m, indent=2))
-            except: pass
-
-        # ── Layout: left inputs | right outputs ───────────────────────────────
-        outer = tk.Frame(p, bg=BG); outer.pack(fill='both', expand=True)
-        left = tk.Frame(outer, bg=BG, width=330)
-        left.pack(side='left', fill='y', padx=(10,0), pady=8)
-        left.pack_propagate(False)
-        tk.Frame(outer, bg=BORDER, width=1).pack(side='left', fill='y', padx=(8,0))
-        right = tk.Frame(outer, bg=BG)
-        right.pack(side='left', fill='both', expand=True, padx=10, pady=8)
-
-        # ── LEFT: inputs ──────────────────────────────────────────────────────
-        tk.Label(left, text='🚀  POST STUDIO', font=('Segoe UI',10,'bold'),
-                 fg=ACCENT, bg=BG).pack(anchor='w', pady=(0,8))
-
-        # Transcript
-        tk.Label(left, text='TRANSCRIPT', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w')
-        _tw = tk.Frame(left, bg=BG3); _tw.pack(fill='x', pady=(2,4))
-        self._ps_trans = tk.Text(_tw, height=5, font=FONT_MONO_S, bg=BG3, fg=FG3,
-                                  insertbackground=ACCENT, relief='flat', bd=4, wrap='word')
-        self._ps_trans.pack(side='left', fill='both', expand=True)
-        _make_scrollbar(_tw, self._ps_trans)
-        _PS_TRANS_PH = 'Paste transcript here, or use current clip below...'
-        self._ps_trans.insert('1.0', _PS_TRANS_PH)
-        def _pt_in(e):
-            if self._ps_trans.get('1.0','end').strip() == _PS_TRANS_PH:
-                self._ps_trans.delete('1.0','end'); self._ps_trans.config(fg=FG)
-        def _pt_out(e):
-            if not self._ps_trans.get('1.0','end').strip():
-                self._ps_trans.insert('1.0', _PS_TRANS_PH); self._ps_trans.config(fg=FG3)
-        self._ps_trans.bind('<FocusIn>', _pt_in)
-        self._ps_trans.bind('<FocusOut>', _pt_out)
-
-        # Transcript action buttons
-        _tbr = tk.Frame(left, bg=BG); _tbr.pack(fill='x', pady=(0,8))
-        def _ps_use_current():
-            t = getattr(self, 'transcript', '')
-            if t:
-                self._ps_trans.config(fg=FG)
-                self._ps_trans.delete('1.0','end')
-                self._ps_trans.insert('1.0', t[:8000])
-                self._ps_status.config(text='✅ Loaded from current clip', fg=GREEN)
-            else:
-                self._ps_status.config(text='⚠ No transcript yet — run Find Clips first', fg=YELLOW)
-        tk.Button(_tbr, text='⬆ Use Current Clip', font=FONT_SMALL, bg=ACCENT, fg='#000',
-                  relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
-                  command=_ps_use_current).pack(side='left', padx=(0,4))
-
-        self._ps_vid_path = None
-        def _ps_load_video():
-            import tkinter.filedialog as _fd2
-            _vp = _fd2.askopenfilename(filetypes=[('Video','*.mp4 *.mkv *.mov *.webm *.avi'),('All','*.*')])
-            if not _vp: return
-            self._ps_vid_path = _vp
-            import os as _ov; _fn = _ov.path.basename(_vp)
-            self._ps_status.config(text=f'📂 {_fn} — hit Transcribe', fg=FG2)
-            self._ps_transcribe_btn.config(state='normal', bg=ACCENT2, fg='#000')
-        tk.Button(_tbr, text='📂 Load Video', font=FONT_SMALL, bg=BG3, fg=FG,
-                  relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
-                  command=_ps_load_video).pack(side='left', padx=(0,4))
-
-        def _ps_do_transcribe():
-            _vp = self._ps_vid_path
-            if not _vp: return
-            self._ps_transcribe_btn.config(state='disabled', text='Transcribing...')
-            self._ps_status.config(text='🎬 Transcribing... this may take a few minutes', fg=FG2)
-            self.set_progress('🎬 Post Studio — Transcribing...', pct=5)
-            import threading as _vt
-            model_size = self.v_whisper.get()
-            if not model_size or model_size == 'auto':
-                model_size = 'base'
-            _use_gpu = self.v_use_gpu_whisper.get() if hasattr(self, 'v_use_gpu_whisper') else True
-            def _run():
-                try:
-                    ff = find_ffmpeg()
-                    self.after(0, lambda: self._ps_status.config(
-                        text=f'🎬 Transcribing [{model_size}]...', fg=FG2))
-                    result = _do_transcribe(
-                        vid=_vp, model_size=model_size,
-                        use_gpu=_use_gpu,
-                        ffmpeg_path=ff,
-                        log_cb=lambda msg, col=FG2: self.after(0, lambda m=msg: self._ps_status.config(text=str(m)[:80], fg=FG2)))
-                    if result and result.get('segments'):
-                        _lines = [f'[{ts(s["start"])}] {s["text"].strip()}' for s in result['segments']]
-                        _txt = '\n'.join(_lines)
-                        def _apply():
-                            self._ps_trans.config(fg=FG)
-                            self._ps_trans.delete('1.0','end')
-                            self._ps_trans.insert('1.0', _txt[:8000])
-                            self._ps_status.config(text=f'✅ Transcribed {len(_lines)} segments', fg=GREEN)
-                            self.set_progress(f'✅ Post Studio — Transcribed {len(_lines)} segments', pct=100)
-                            self._ps_transcribe_btn.config(state='disabled', bg=BG4, fg=FG3, text='🎬 Transcribe')
-                        self.after(0, _apply)
-                    else:
-                        self.after(0, lambda: self._ps_status.config(text='⚠ No segments returned', fg=YELLOW))
-                        self.after(0, lambda: self._ps_transcribe_btn.config(state='normal', text='🎬 Transcribe'))
-                except Exception as _te:
-                    import traceback as _tb
-                    print(f'[PostStudio] {_tb.format_exc()}')
-                    self.after(0, lambda e=str(_te): self._ps_status.config(text=f'❌ {e[:70]}', fg=RED))
-                    self.after(0, lambda: self._ps_transcribe_btn.config(state='normal', text='🎬 Transcribe'))
-            _vt.Thread(target=_run, daemon=True).start()
-
-        self._ps_transcribe_btn = tk.Button(_tbr, text='🎬 Transcribe', font=FONT_SMALL,
-                  bg=BG4, fg=FG3, relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
-                  state='disabled', command=_ps_do_transcribe)
-        self._ps_transcribe_btn.pack(side='left')
-
-        # Person Name
-        tk.Label(left, text='PERSON NAME', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(4,2))
-        _nr = tk.Frame(left, bg=BG); _nr.pack(fill='x', pady=(0,4))
-        self._ps_name_var = tk.StringVar()
-        self._ps_name = tk.Entry(_nr, textvariable=self._ps_name_var, font=FONT_SMALL, bg=BG3, fg=FG3,
-                                  insertbackground=ACCENT, relief='flat', bd=4)
-        self._ps_name.pack(side='left', fill='x', expand=True, padx=(0,4))
-        _PS_NAME_PH = 'Mizkif, Sophie Rain...'
-        self._ps_name.insert(0, _PS_NAME_PH)
-        self._ps_mem_lbl = tk.Label(_nr, text='', font=('Segoe UI',7), fg=GREEN, bg=BG)
-        self._ps_mem_lbl.pack(side='left')
-        def _name_focus_in(e):
-            if self._ps_name.get() == _PS_NAME_PH:
-                self._ps_name.delete(0,'end'); self._ps_name.config(fg=FG)
-        def _name_focus_out(e):
-            val = self._ps_name.get().strip()
-            if not val:
-                self._ps_name.insert(0, _PS_NAME_PH); self._ps_name.config(fg=FG3)
-                return
-            self._ps_name.config(fg=FG)
-            # Check handle memory
-            _mem = _mem_load()
-            _key = val.lower().replace(' ','_').split(',')[0].strip()
-            if _key in _mem:
-                _h = _mem[_key]
-                for _pk in ('x', 'instagram', 'tiktok', 'youtube'):
-                    # The Entry text is what the user sees/edits (the StringVar is only synced on
-                    # focus-out), so test the Entry and write to the Entry.
-                    _he0, _hv0, _hph0 = self._ps_handle_entries[_pk]
-                    _cur0 = _he0.get().strip()
-                    if _h.get(_pk,'') and (not _cur0 or _cur0 == _hph0):
-                        self._ps_set_handle(_pk, _h[_pk])
-                self._ps_mem_lbl.config(text='💾 remembered', fg=GREEN)
-            else:
-                # No memory for this name: undo earlier autofill so old handles don't leak onto a new person
-                for _pk, _af in list(getattr(self, '_ps_autofill', {}).items()):
-                    _e, _sv, _ph = self._ps_handle_entries[_pk]
-                    if _e.get().strip() == _af:
-                        _e.delete(0, 'end'); _e.insert(0, _ph); _e.config(fg=FG3); _sv.set('')
-                self._ps_autofill = {}
-                self._ps_mem_lbl.config(text='')
-        self._ps_name.bind('<FocusIn>', _name_focus_in)
-        self._ps_name.bind('<FocusOut>', _name_focus_out)
-
-        # Context
-        tk.Label(left, text='CONTEXT / ANGLE  (optional)', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(4,2))
-        tk.Label(left, text='hot take · funny recap · drama breakdown · interview',
-                 font=('Segoe UI',7), fg=FG3, bg=BG).pack(anchor='w')
-        self._ps_ctx = tk.Text(left, height=2, font=FONT_SMALL, bg=BG3, fg=FG3,
-                                insertbackground=ACCENT, relief='flat', bd=4, wrap='word')
-        self._ps_ctx.pack(fill='x', pady=(2,8))
-        _PS_CTX_PH = 'e.g. hot take · drama breakdown · funny recap'
-        self._ps_ctx.insert('1.0', _PS_CTX_PH)
-        def _ctx_in(e):
-            if self._ps_ctx.get('1.0','end').strip() == _PS_CTX_PH:
-                self._ps_ctx.delete('1.0','end'); self._ps_ctx.config(fg=FG)
-        def _ctx_out(e):
-            if not self._ps_ctx.get('1.0','end').strip():
-                self._ps_ctx.insert('1.0', _PS_CTX_PH); self._ps_ctx.config(fg=FG3)
-        self._ps_ctx.bind('<FocusIn>', _ctx_in)
-        self._ps_ctx.bind('<FocusOut>', _ctx_out)
-
-        # Platforms label — rows built below
-        tk.Label(left, text='PLATFORMS', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(0,4))
-        self._ps_plats = {
-            'x':          tk.BooleanVar(value=True),
-            'tiktok':     tk.BooleanVar(value=True),
-            'instagram':  tk.BooleanVar(value=True),
-            'yt_shorts':  tk.BooleanVar(value=True),
-            'youtube':    tk.BooleanVar(value=False),
-        }
-        _plat_cfg = [('x','𝕏 Twitter','#1d9bf0'), ('tiktok','🎵 TikTok','#69c9d0'),
-                     ('instagram','📸 Instagram','#e1306c'),
-                     ('yt_shorts','▶ YT Shorts','#ff4444'),
-                     ('youtube','▶ YouTube (long)','#ff0000')]
-
-        # Row 1: X, TikTok, Instagram
-        _pr1 = tk.Frame(left, bg=BG); _pr1.pack(fill='x', pady=(0,2))
-        for _pk in ['x','tiktok','instagram']:
-            _pl = next(l for k,l,c in _plat_cfg if k==_pk)
-            tk.Checkbutton(_pr1, text=_pl, variable=self._ps_plats[_pk],
-                           font=FONT_SMALL, bg=BG, fg=FG, selectcolor=BG3,
-                           activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0,8))
-
-        # Row 2: YT Shorts + YouTube (separate)
-        _pr2 = tk.Frame(left, bg=BG); _pr2.pack(fill='x', pady=(0,6))
-        for _pk in ['yt_shorts','youtube']:
-            _pl = next(l for k,l,c in _plat_cfg if k==_pk)
-            _pc = next(c for k,l,c in _plat_cfg if k==_pk)
-            tk.Checkbutton(_pr2, text=_pl, variable=self._ps_plats[_pk],
-                           font=FONT_SMALL, bg=BG, fg=_pc, selectcolor=BG3,
-                           activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0,8))
-
-        # Handles
-        tk.Label(left, text='HANDLES', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(4,2))
-        self._ps_h_x  = tk.StringVar(); self._ps_h_ig = tk.StringVar()
-        self._ps_h_tt = tk.StringVar(); self._ps_h_yt = tk.StringVar()
-        self._ps_handle_entries = {}
-        for _hl, _hv, _hph, _hk in [
-            ('𝕏',  self._ps_h_x,  '@handle',        'x'),
-            ('📸', self._ps_h_ig, '@instagram',     'instagram'),
-            ('🎵', self._ps_h_tt, '@tiktok',        'tiktok'),
-            ('▶',  self._ps_h_yt, 'YouTube channel','youtube'),
-        ]:
-            _hr2 = tk.Frame(left, bg=BG); _hr2.pack(fill='x', pady=1)
-            tk.Label(_hr2, text=_hl, font=FONT_SMALL, fg=FG2, bg=BG, width=3).pack(side='left')
-            # Don't use textvariable — use plain Entry to avoid placeholder conflicts
-            _he = tk.Entry(_hr2, font=FONT_SMALL, bg=BG3, fg=FG3,
-                           insertbackground=ACCENT, relief='flat', bd=3)
-            _he.pack(side='left', fill='x', expand=True)
-            _he.insert(0, _hph)
-            def _hin(e, w=_he, p=_hph, sv=_hv):
-                if w.get() == p: w.delete(0,'end'); w.config(fg=FG)
-            def _hout(e, w=_he, p=_hph, sv=_hv):
-                val = w.get().strip()
-                if not val: w.insert(0,p); w.config(fg=FG3)
-                else: w.config(fg=FG); sv.set(val)  # sync to StringVar on exit
-            _he.bind('<FocusIn>', _hin); _he.bind('<FocusOut>', _hout)
-            self._ps_handle_entries[_hk] = (_he, _hv, _hph)
-
-        # Spice it up
-        tk.Frame(left, bg=BORDER, height=1).pack(fill='x', pady=(10,6))
-        tk.Label(left, text='✨  Spice it up', font=('Segoe UI',8,'bold'), fg=FG2, bg=BG).pack(anchor='w')
-        tk.Label(left, text='May reduce algorithmic reach — use for engaged audiences',
-                 font=('Segoe UI',7), fg=FG3, bg=BG).pack(anchor='w', pady=(0,4))
-        _sr1 = tk.Frame(left, bg=BG); _sr1.pack(fill='x', pady=(0,2))
-        _sr2 = tk.Frame(left, bg=BG); _sr2.pack(fill='x', pady=(0,8))
-        self._ps_spice = {}
-        for _sk, _sl, _row in [('drama','🔥 Drama',_sr1),('breaking','📰 Breaking',_sr1),
-                                ('exaggerate','🤯 Exaggerate',_sr2),('clickbait','🎣 Clickbait',_sr2)]:
-            self._ps_spice[_sk] = tk.BooleanVar(value=False)
-            tk.Checkbutton(_row, text=_sl, variable=self._ps_spice[_sk],
-                           font=FONT_SMALL, bg=BG, fg=FG, selectcolor=BG3,
-                           activebackground=BG, relief='flat', cursor='hand2').pack(side='left', padx=(0,6))
-
-        # Generate button
-        self._ps_gen_btn = tk.Button(left, text='⚡  GENERATE POSTS',
-                                      font=('Segoe UI',10,'bold'), bg=ACCENT, fg='#000',
-                                      relief='flat', bd=0, cursor='hand2', pady=10,
-                                      activebackground=ACCENT2, command=self._ps_generate)
-        self._ps_gen_btn.pack(fill='x', pady=(0,4))
-        self._ps_status = tk.Label(left, text='', font=('Segoe UI',8), fg=FG2, bg=BG, wraplength=310, justify='left')  # transcription / warning feedback
-        self._ps_status.pack(anchor='w')
-
-        # ── RIGHT: output boxes per platform ─────────────────────────────────
-        tk.Label(right, text='GENERATED POSTS', font=('Segoe UI',9,'bold'),
-                 fg=ACCENT, bg=BG).pack(anchor='w', pady=(0,8))
-
-        self._ps_out = {}
-        for _pk, _pl, _pc in _plat_cfg:
-            _pf = tk.Frame(right, bg=BG3, relief='flat')
-            _pf.pack(fill='x', pady=(0,8))
-            _ph = tk.Frame(_pf, bg=BG4); _ph.pack(fill='x')
-            tk.Label(_ph, text=_pl, font=('Segoe UI',8,'bold'), fg=_pc, bg=BG4).pack(side='left', padx=8, pady=4)
-
-            def _mk_copy(k=_pk):
-                def _do():
-                    _t = self._ps_out[k]['box'].get('1.0','end').strip()
-                    if _t:
-                        self.clipboard_clear(); self.clipboard_append(_t)
-                        self._ps_out[k]['btn'].config(text='✅ Copied!', fg=GREEN)
-                        self.after(1500, lambda: self._ps_out[k]['btn'].config(text='📋 Copy', fg=FG2))
-                return _do
-
-            def _mk_regen(k=_pk):
-                def _do():
-                    self._ps_out[k]['regen'].config(state='disabled', text='⏳')
-                    import threading as _rt
-                    def _run():
-                        result = self._ps_regen_one(k)
-                        def _upd():
-                            if result:
-                                _b = self._ps_out[k]['box']
-                                _b.config(fg=FG)
-                                _b.delete('1.0','end')
-                                _b.insert('1.0', result)
-                                def _resize(box=_b):
-                                    box.update_idletasks()
-                                    box.config(height=1)
-                                    box.update_idletasks()
-                                    _visual = 0
-                                    _idx = '1.0'
-                                    while True:
-                                        _di = box.dlineinfo(_idx)
-                                        if _di is None: break
-                                        _visual += 1
-                                        _next = box.index(f'{_idx} +1 display lines')
-                                        if _next == _idx: break
-                                        _idx = _next
-                                    box.config(height=max(4, _visual + 1))
-                                self.after(100, _resize)
-                                # Score in background
-                                def _do_score(pk=k, t=result):
-                                    _gk = [key for _, key in [(p,key) for p,key in
-                                           [('groq', self.cfg.get('key_groq','').strip())] +
-                                           [('groq', ek.strip()) for ek in self.cfg.get('key_groq_extra','').split(',') if ek.strip()]]
-                                           if key]
-                                    _mk = [key for _, key in [(p,key) for p,key in
-                                           [('gemini', self.cfg.get('key_gemini','').strip())] +
-                                           [('gemini', ek.strip()) for ek in self.cfg.get('key_gemini_extra','').split(',') if ek.strip()]]
-                                           if key]
-                                    _sc, _rs = self._ps_score_post(pk, t, _gk, _mk)
-                                    self._ps_update_score(pk, _sc, _rs)
-                                _rt.Thread(target=_do_score, daemon=True).start()
-                            else:
-                                self.log(f'[Post Studio] Regen produced no text for {k}', YELLOW)
-                            self._ps_out[k]['regen'].config(state='normal', text='🔄 Regen')
-                        self.after(0, _upd)
-                    _rt.Thread(target=_run, daemon=True).start()
-                return _do
-
-            _btn = tk.Button(_ph, text='📋 Copy', font=FONT_SMALL, bg=BG4, fg=FG2,
-                             relief='flat', bd=0, cursor='hand2', padx=8, pady=4,
-                             command=_mk_copy(_pk))
-            _btn.pack(side='right', padx=4)
-            _regen_btn = tk.Button(_ph, text='🔄 Regen', font=FONT_SMALL, bg=BG4, fg=FG2,
-                                   relief='flat', bd=0, cursor='hand2', padx=6, pady=4,
-                                   command=_mk_regen(_pk))
-            _regen_btn.pack(side='right', padx=(0,2))
-            # Score badge — shows algo score after generation
-            _score_lbl = tk.Label(_ph, text='', font=('Segoe UI',8,'bold'),
-                                  bg=BG4, fg=FG3, padx=6, pady=2)
-            _score_lbl.pack(side='right', padx=(0,4))
-            _box = tk.Text(_pf, height=6, font=FONT_SMALL, bg=BG3, fg=FG3,
-                           insertbackground=ACCENT, relief='flat', bd=6, wrap='word')
-            _box.pack(fill='x')
-            _box.insert('1.0', f'Hit ⚡ Generate Posts to create {_pl} content.')
-            self._ps_out[_pk] = {'box': _box, 'btn': _btn, 'regen': _regen_btn,
-                                 'score': _score_lbl, 'frame': _pf}
-
-            # Show/hide based on toggle
-            def _toggle_vis(pk=_pk, frame=_pf):
-                if self._ps_plats[pk].get():
-                    frame.pack(fill='x', pady=(0,8))
-                else:
-                    frame.pack_forget()
-            self._ps_plats[_pk].trace_add('write', lambda *a, pk=_pk, f=_pf: _toggle_vis(pk, f))
-            if not self._ps_plats[_pk].get():
-                _pf.pack_forget()
-
-
-    def _ps_set_handle(self, key, val):
-        """Show `val` in the handle Entry for `key` ('x'/'instagram'/'tiktok'/'youtube') and keep
-        its StringVar in sync. Main thread only (call via self.after from workers)."""
-        try:
-            _he, _hv, _hph = self._ps_handle_entries[key]
-            _he.delete(0, 'end'); _he.insert(0, str(val)); _he.config(fg=FG)
-            _hv.set(str(val))
-        except Exception:
-            pass
-
-    def _ps_regen_one(self, pk):
-        """Regenerate a single platform post using current inputs."""
-        try:
-            # Reuse _ps_run logic but for one platform only
-            import re as _re2
-            _trans = self._ps_trans.get('1.0','end').strip()
-            if _trans in ('', 'Paste transcript here, or use current clip below...'):
-                _trans = getattr(self, 'transcript', '')
-            _ctx = self._ps_ctx.get('1.0','end').strip()
-            if _ctx == 'e.g. hot take · drama breakdown · funny recap': _ctx = ''
-            _name = self._ps_name.get().strip()
-            if _name in ('', 'Mizkif, Sophie Rain...'): _name = ''
-            _name1 = _name.split(',')[0].strip() if _name else ''
-            _h_x  = self._ps_handle_entries['x'][0].get().strip()
-            _h_ig = self._ps_handle_entries['instagram'][0].get().strip()
-            _h_tt = self._ps_handle_entries['tiktok'][0].get().strip()
-            _h_yt = self._ps_handle_entries['youtube'][0].get().strip()
-            _h_x  = '' if _h_x  in ('@handle','')          else _h_x
-            _h_ig = '' if _h_ig in ('@instagram','')        else _h_ig
-            _h_tt = '' if _h_tt in ('@tiktok','')           else _h_tt
-            _h_yt = '' if _h_yt in ('YouTube channel','')   else _h_yt
-            _spice = [k for k,v in self._ps_spice.items() if v.get()]
-            _spice_map = {'drama':'Drama energy.','breaking':'Breaking news tone.',
-                          'exaggerate':'Amplify drama.','clickbait':'Curiosity gap hooks.'}
-            _spice_txt = ' '.join(_spice_map[s] for s in _spice)
-            # Strip '[HH:MM:SS]', '[HH:MM:SS -> HH:MM:SS]' and '[12.34]' stamps BEFORE cutting to 6000 chars
-            _tr = _re2.sub(r'\[[\d:.]+(?:\s*->\s*[\d:.]+)?\]\s*', '', _trans or '').strip()[:6000]
-            _who   = _name or 'the person in the video'
-            _angle = _ctx or 'find the most viral moment'
-            _angle_block2 = f"CONTENT ANGLE (MANDATORY): {_angle}\n" if _ctx else ""
-            _tc = f"""PERSON: {_who}
-{_angle_block2}TRANSCRIPT (use ONLY these exact words — no invention):
-{_tr if _tr else '(no transcript)'}
-{f"TONE: {_spice_txt}" + chr(10) if _spice_txt else ""}CRITICAL: Post MUST reflect the angle above. Do NOT invent topics not in transcript."""
-            # Build one prompt for this platform
-            _prompts_map = {
-                'x':         (f"Complete X/Twitter post under 280 chars. Handle in sentence. 1 hashtag. End with question. NEVER cut off.", f"{_tc}\nX: {_h_x or _who}\n\nWrite complete post:\n[{_h_x or _who} + statement]\n[quote from transcript]\n[question?]\n#{(_name1 or 'clips').lower()}"),
-                'tiktok':    (f"Complete TikTok caption. Line 1=SEO phrase. No hooks. CTA. 3-4 hashtags. NEVER cut off.", f"{_tc}\nTT: {_h_tt or _who}\n\nWrite complete caption:\n{_name1.lower() or 'streamer'} [topic from transcript] explained\n[what happened]\ndo you agree? drop it in the comments 👇\n#{(_name1 or 'clips').lower()} #[topic] #[niche]"),
-                'instagram': (f"Complete Instagram caption. Line 1: [Role] @handle [what happened] [emoji]. NO timestamps. DM-bait. Save-bait. 3-5 hashtags. NEVER cut off.", f"{_tc}\nIG: {_h_ig if _h_ig else '(no handle — use name without @)'}\n\nLine 1: [Role] {_h_ig if _h_ig else _who} [what happened] [emoji] — use @ ONLY if handle given\n\n[2-3 clean sentences]\n\nwhat do you think — is he right? 👇\nsave this for when the conversation comes up 📌\n#{(_name1 or 'clips').lower()} #[topic] #drama #clips #[5th]"),
-                'yt_shorts': ("Write a YouTube Shorts title under 60 chars + 1-2 sentence description under 150 chars + 3 hashtags. Use exact topic from transcript. No generic filler.", f"{_tc}\n\nWrite the complete Shorts entry:\nTITLE: [punchy, keyword-first, under 60 chars — use exact topic from transcript]\nDESCRIPTION: [1-2 sentences, what actually happened, under 150 chars]\n#{(_name1 or 'person').lower().replace(' ','')} #[exact topic from transcript] #[niche]"),
-                'youtube':   (f"Complete YouTube title + description + 10 tags. Title keyword-first under 60 chars. NEVER cut off.", f"{_tc}\nYT: {_h_yt or _who}\n\nTITLE: [keyword-first under 60 chars]\n\nDESCRIPTION:\n[Sentence 1: who + what happened]\n[Sentence 2: why it matters]\nMore clips → @MarsScumbags\n\nTAGS: {_name1 or 'streaming'}, [topic], drama, streaming, clips, MarsScumbags, [4 more]"),
-            }
-            if pk not in _prompts_map: return ''
-            _sys_msg, _usr_msg = _prompts_map[pk]
-            _max_tok = {'youtube':1200,'yt_shorts':500,'instagram':1000,'x':700,'tiktok':800}.get(pk,800)
-            # Build key pool
-            _all_keys = []
-            _gk = self.cfg.get('key_gemini','').strip()
-            if _gk: _all_keys.append(('gemini',_gk))
-            for _ek in self.cfg.get('key_gemini_extra','').split(','):
-                if _ek.strip(): _all_keys.append(('gemini',_ek.strip()))
-            _grk = self.cfg.get('key_groq','').strip()
-            if _grk: _all_keys.append(('groq',_grk))
-            for _ek2 in self.cfg.get('key_groq_extra','').split(','):
-                if _ek2.strip(): _all_keys.append(('groq',_ek2.strip()))
-            _pool = ([k for k in _all_keys if k[0]=='groq'] + [k for k in _all_keys if k[0]=='gemini'])
-            for _prov, _key in _pool:
-                try:
-                    if _prov == 'gemini':
-                        # Model list / thinking config / bound client all live in _gemini_complete
-                        _out = _gemini_complete(_key, 'write', f"{_sys_msg}\n\n{_usr_msg}", _max_tok, 0.5)
-                    else:
-                        _out = _groq_complete(_key, 'write',
-                                              [{'role':'system','content':_sys_msg},{'role':'user','content':_usr_msg}],
-                                              _max_tok, 0.5)
-                    if _out and len(_out) > 20:
-                        self.log(f'[Post Studio] 🔄 {pk.upper()} regenerated via {_prov} ({len(_out)} chars)', GREEN)
-                        return _out
-                except Exception as _e:
-                    self.log(f'[Post Studio] ⚠ regen {pk} {_prov}: {str(_e)[:60]}', YELLOW)
-        except Exception as _e2:
-            self.log(f'[Post Studio] ❌ regen {pk}: {str(_e2)[:60]}', RED)
-        return ''
-
-    def _ps_score_post(self, pk, text, groq_keys, gemini_keys):
-        """Score a generated post 1-10 against platform algo rules. Returns (score, reason)."""
-        _score_prompts = {
-            'x': """Score this X/Twitter post 1-10 for algorithmic reach. Be strict.
-Scoring criteria (X For You algorithm weights):
-- Reply-bait question present? (+2) Reply chains score 150x a like
-- Handle woven naturally in sentence, not just tagged? (+1)
-- Positive/neutral tone? Grok penalizes negativity (-2 if negative)
-- Under 280 chars? (+1)
-- Exactly 1 niche hashtag? (+1)
-- Zero external links? (+1)
-- Drives profile clicks? (+1)
-- Clear hook in first line? (+1)
-- Ends with complete sentence? (+1)
-
-Respond ONLY with JSON: {"score": 7, "reason": "Missing reply-bait question, tone is slightly negative"}""",
-            'tiktok': """Score this TikTok caption 1-10 for algorithmic reach. Be strict.
-Scoring criteria:
-- Line 1 is a search phrase (SEO)? (+2) Search = 40% of views
-- No hooks in caption? (+1) Video handles that
-- Save/share bait CTA present? (+2)
-- 3-5 niche hashtags, no #fyp? (+1)
-- Keywords match what's actually in the video? (+2)
-- Complete sentences, nothing cut off? (+1)
-
-Respond ONLY with JSON: {"score": 7, "reason": "No save-bait CTA, hashtags too generic"}""",
-            'instagram': """Score this Instagram Reels caption 1-10 for algorithmic reach. Be strict.
-Scoring criteria:
-- Line 1: Role + @handle + what happened format? (+2) Hook must work on mute
-- DM-bait line present? (+2) 694k reels shared via DM every minute
-- Save-bait line present? (+2) Saves > likes for algo
-- Handle in sentence naturally (not just tagged at end)? (+1)
-- 3-5 hashtags, no mega tags? (+1)
-- Complete sentences? (+1)
-
-Respond ONLY with JSON: {"score": 7, "reason": "DM-bait missing, handle only tagged at end"}""",
-            'yt_shorts': """Score this YouTube Shorts title+hashtags 1-10 for algorithmic reach. Be strict.
-Scoring criteria:
-- Title keyword-first (searchable term first)? (+3)
-- Under 60 chars? (+2)
-- Title, hashtags all align to same keyword intent? (+2) Gemini semantic update Jan 2026
-- 3 relevant hashtags? (+2)
-- Avoids clickbait mismatch? (+1)
-
-Respond ONLY with JSON: {"score": 7, "reason": "Title not keyword-first, hashtags misaligned"}""",
-            'youtube': """Score this YouTube video title+description+tags 1-10 for algorithmic reach. Be strict.
-Scoring criteria:
-- Title keyword-first under 60 chars? (+2)
-- Description 2-3 complete sentences? (+2)
-- Title/description/tags all semantically aligned? (+2) Gemini update Jan 2026
-- Channel plug included? (+1)
-- 8-10 specific tags? (+2)
-- No clickbait mismatch? (+1)
-
-Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too generic"}""",
-        }
-        if pk not in _score_prompts: return None, None
-        _prompt = f"{_score_prompts[pk]}\n\nPOST TO SCORE:\n{text[:800]}"
-        import json as _sj, re as _sr
-        # Use Groq first (fast, cheap)
-        for _key in groq_keys:
-            try:
-                # tiny role + JSON mode; _groq_kwargs gives the reasoning models headroom
-                _raw = _groq_complete(_key, 'tiny', [{'role':'user','content':_prompt}], 80, 0.1, json=True)
-                _raw = _sr.sub(r'```(?:json)?|```','',_raw).strip()
-                _d = _sj.loads(_raw)
-                return int(_d.get('score',5)), str(_d.get('reason',''))
-            except: continue
-        # Gemini fallback
-        for _key in gemini_keys:
-            try:
-                _raw = _gemini_complete(_key, 'tiny', _prompt, 80, 0.1, json=True)
-                _raw = _sr.sub(r'```(?:json)?|```','',_raw).strip()
-                _d = _sj.loads(_raw)
-                return int(_d.get('score',5)), str(_d.get('reason',''))
-            except: continue
-        return None, None
-
-    def _ps_update_score(self, pk, score, reason):
-        """Update the score badge for a platform."""
-        if pk not in self._ps_out: return
-        _lbl = self._ps_out[pk].get('score')
-        if not _lbl: return
-        if score is None:
-            self.after(0, lambda: _lbl.config(text='', bg=BG4))
-            return
-        # Color: green 8-10, yellow 5-7, red 1-4
-        _color = GREEN if score >= 8 else (YELLOW if score >= 5 else RED)
-        _bg = '#1a2a1a' if score >= 8 else ('#2a2a0a' if score >= 5 else '#2a0a0a')
-        _text = f'⬤ {score}/10'
-        self.after(0, lambda t=_text, c=_color, b=_bg, r=reason or '':
-            (_lbl.config(text=t, fg=c, bg=b),
-             _lbl.bind('<Enter>', lambda e, tip=r: self._ps_show_score_tip(_lbl, tip)),
-             _lbl.bind('<Leave>', lambda e: self._ps_hide_score_tip())))
-
-    def _ps_show_score_tip(self, widget, text):
-        """Show tooltip with score reason on hover."""
-        if not text: return
-        x = widget.winfo_rootx()
-        y = widget.winfo_rooty() - 30
-        self._score_tip = tk.Toplevel(self)
-        self._score_tip.wm_overrideredirect(True)
-        self._score_tip.geometry(f'+{x}+{y}')
-        tk.Label(self._score_tip, text=text, font=('Segoe UI',8), bg='#1e1e1e',
-                 fg=FG, relief='solid', bd=1, padx=6, pady=3,
-                 wraplength=280, justify='left').pack()
-
-    def _ps_hide_score_tip(self):
-        if hasattr(self, '_score_tip') and self._score_tip:
-            try: self._score_tip.destroy()
-            except: pass
-
-    def _ps_generate(self):
-        # Check transcript or context is provided
-        _trans_val = self._ps_trans.get('1.0','end').strip()
-        _ctx_val = self._ps_ctx.get('1.0','end').strip()
-        _ph_trans = 'Paste transcript here, or use current clip below...'
-        _ph_ctx = 'e.g. hot take · drama breakdown · funny recap'
-        _has_trans = _trans_val and _trans_val != _ph_trans
-        _has_ctx = _ctx_val and _ctx_val != _ph_ctx
-        _has_clip = bool(getattr(self, 'transcript', ''))
-
-        if not _has_trans and not _has_ctx and not _has_clip:
-            import tkinter.messagebox as _mb
-            _mb.showwarning('Post Studio',
-                'Add a transcript or context before generating.\n\n'
-                '• Paste a transcript in the box above\n'
-                '• Or use ⬆ Use Current Clip if you have a clip loaded\n'
-                '• Or type context/angle in the Context box\n\n'
-                'Without content the AI will hallucinate.')
-            return
-
-        self._ps_gen_btn.config(state='disabled', text='⏳ Generating...')
-        import threading as _pst
-        _pst.Thread(target=self._ps_run, daemon=True).start()
-
-    def _ps_run(self):
-        import json as _psj2, re as _psr, traceback as _pstb
-
-        def _log(msg, col=None):
-            c = col or FG2
-            self.log(f'[Post Studio] {msg}', c)
-            # Mirror key steps to main progress bar
-            _pct_map = {
-                'Starting generation': 5,
-                'Transcript:': 10,
-                'X...': 20, 'X via': 30,
-                'TIKTOK...': 35, 'TIKTOK via': 45,
-                'INSTAGRAM...': 50, 'INSTAGRAM via': 62,
-                'YT_SHORTS...': 68, 'YT_SHORTS via': 78,
-                'YOUTUBE...': 82, 'YOUTUBE via': 92,
-                'Generated for': 100,
-            }
-            for _k, _p in _pct_map.items():
-                if _k in str(msg):
-                    self.after(0, lambda m=str(msg)[:50], p=_p:
-                        self.set_progress(f'🚀 Post Studio — {m}', pct=p))
-                    break
-
-        try:
-            _log('Starting generation...')
-            # ── Gather inputs ─────────────────────────────────────────────────
-            _trans = self._ps_trans.get('1.0','end').strip()
-            if _trans in ('', 'Paste transcript here, or use current clip below...'):
-                _trans = getattr(self, 'transcript', '')
-
-            _ctx = self._ps_ctx.get('1.0','end').strip()
-            if _ctx == 'e.g. hot take · drama breakdown · funny recap': _ctx = ''
-
-            _name = self._ps_name.get().strip()
-            _name_placeholders = ('', 'Mizkif, Sophie Rain...', 'mizkif, sophie rain...')
-            if _name in _name_placeholders or _name.lower() == 'mizkif, sophie rain...': _name = ''
-            _name1 = _name.split(',')[0].strip() if _name else ''
-
-            _h_x  = self._ps_handle_entries['x'][0].get().strip()
-            _h_ig = self._ps_handle_entries['instagram'][0].get().strip()
-            _h_tt = self._ps_handle_entries['tiktok'][0].get().strip()
-            _h_yt = self._ps_handle_entries['youtube'][0].get().strip()
-            # Clear placeholder values
-            _h_x  = '' if _h_x  in ('@handle', '')         else _h_x
-            _h_ig = '' if _h_ig in ('@instagram', '')       else _h_ig
-            _h_tt = '' if _h_tt in ('@tiktok', '')          else _h_tt
-            _h_yt = '' if _h_yt in ('YouTube channel', '')  else _h_yt
-
-            _sel = [k for k,v in self._ps_plats.items() if v.get()]
-            if not _sel:
-                _log('⚠ Select at least one platform', YELLOW)
-                self.after(0, lambda: self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS'))
-                return
-
-            _spice = [k for k,v in self._ps_spice.items() if v.get()]
-            _spice_map = {
-                'drama':      'Use drama/tea account energy — shocking but not mean-spirited.',
-                'breaking':   'Frame as BREAKING news — urgent journalistic tone.',
-                'exaggerate': 'Amplify the drama — make it feel bigger than it is while staying factual.',
-                'clickbait':  'Use curiosity gap hooks — make them need to know what happens.',
-            }
-            _spice_txt = ' '.join(_spice_map[s] for s in _spice) if _spice else ''
-
-            # Strip timestamps from transcript — AI doesn't need them and they confuse output
-            import re as _re2
-            # Handles '[HH:MM:SS]', '[HH:MM:SS -> HH:MM:SS]' (Auto Edit) and '[12.34]' (Subtitles);
-            # strip BEFORE cutting to 6000 chars so the limit counts real words
-            _tr = _re2.sub(r'\[[\d:.]+(?:\s*->\s*[\d:.]+)?\]\s*', '', _trans or '').strip()
-            _tr = _re2.sub(r'\s{2,}', ' ', _tr)[:6000]  # collapse extra spaces
-            _who   = _name or 'the person in the video'
-            _angle = _ctx or 'find the most viral/interesting moment'
-
-            # ── Auto-find handles via Gemini if empty ─────────────────────────
-            _placeholders = {'x':'@handle','instagram':'@instagram','tiktok':'@tiktok','youtube':'YouTube channel'}
-            # The StringVars only sync on focus-out, so test the Entry text already read above
-            # (_h_* have placeholders cleared)
-            _needs_handles = bool(_name1) and not (_h_x and _h_ig and _h_tt and _h_yt)
-            if _needs_handles:
-                _log(f'🔍 Looking up handles for {_name1}...', FG2)
-                # Check memory first
-                MEM_PATH = USER_DIR / 'handle_memory.json'
-                _mem = {}
-                try: _mem = _psj2.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
-                except: pass
-                _mkey = _name1.lower().replace(' ','_')
-                if _mkey in _mem:
-                    _mh = _mem[_mkey]
-                    if not _h_x  and _mh.get('x'):        _h_x  = _mh['x']
-                    if not _h_ig and _mh.get('instagram'): _h_ig = _mh['instagram']
-                    if not _h_tt and _mh.get('tiktok'):    _h_tt = _mh['tiktok']
-                    if not _h_yt and _mh.get('youtube'):   _h_yt = _mh['youtube']
-                    for _fk, _fv in (('x',_h_x),('instagram',_h_ig),('tiktok',_h_tt),('youtube',_h_yt)):
-                        if _fv:
-                            self.after(0, lambda k=_fk, v=_fv: self._ps_set_handle(k, v))
-                    _log(f'💾 Loaded handles from memory for {_name1}', GREEN)
-                else:
-                    # Ask Gemini
-                    try:
-                        _gkey0 = self.cfg.get('key_gemini','').strip()
-                        if not _gkey0:
-                            _gkey0 = next((k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()),'')
-                        if _gkey0:
-                            _r0 = _gemini_complete(
-                                _gkey0, 'tiny',
-                                f'Official verified social media handles for "{_name1}"? JSON only: {{"x":"","instagram":"","tiktok":"","youtube":""}}',
-                                80, 0.0, json=True)
-                            _raw0 = _psr.sub(r'```(?:json)?','',_r0).replace('`','').strip()
-                            _s0,_e0 = _raw0.find('{'),_raw0.rfind('}')
-                            if _s0!=-1 and _e0>_s0:
-                                _d0 = _psj2.loads(_raw0[_s0:_e0+1])
-                                if not _h_x  and _d0.get('x'):         _h_x  = _d0['x']
-                                if not _h_ig and _d0.get('instagram'): _h_ig = _d0['instagram']
-                                if not _h_tt and _d0.get('tiktok'):    _h_tt = _d0['tiktok']
-                                if not _h_yt and _d0.get('youtube'):   _h_yt = _d0['youtube']
-                                # Save to memory
-                                _mem[_mkey] = {'x':_h_x,'instagram':_h_ig,'tiktok':_h_tt,'youtube':_h_yt,'name':_name1}
-                                try: MEM_PATH.write_text(_psj2.dumps(_mem,indent=2))
-                                except: pass
-                                # Update UI fields
-                                for _fk, _fv in (('x',_h_x),('instagram',_h_ig),('tiktok',_h_tt),('youtube',_h_yt)):
-                                    if _fv:
-                                        self.after(0, lambda k=_fk, v=_fv: self._ps_set_handle(k, v))
-                                _log(f'✅ Found handles for {_name1}', GREEN)
-                    except Exception as _he0:
-                        _log(f'⚠ Handle lookup failed: {str(_he0)[:40]}', YELLOW)
-
-            # ── Platform messages: system=rules, user=format template ────────────
-            # Shared transcript context block injected into every prompt
-            _angle_block = f"""CONTENT ANGLE (MANDATORY — this is what the post MUST be about):
-{_angle}
-""" if _ctx else ""
-
-            _tc = f"""PERSON: {_who}
-{_angle_block}TRANSCRIPT (ground every post in ONLY what is said here — exact words, no invention):
-{_tr if _tr else '(no transcript — use context/angle only)'}
-{f"TONE: {_spice_txt}" + chr(10) if _spice_txt else ""}CRITICAL RULES:
-- The post MUST reflect the angle/context above if provided
-- Use ONLY topics, phrases, and names from the transcript
-- Do NOT invent events, quotes, or opinions not in the transcript
-- If transcript has no drama, report what was actually said"""
-
-            _platform_msgs = {
-                'x': (
-                    "Write a complete X/Twitter post under 280 chars total. Rules: weave handle into sentence naturally (not at end). Positive tone. Zero links. Exactly 1 hashtag on its own line. End with question. NEVER cut off. Use ONLY words that appear in the transcript.",
-                    f"""{_tc}
-X HANDLE: {_h_x or 'use their name'}
-
-Write the complete post:
-[{_h_x or _who} + punchy statement using exact words from transcript]
-[short direct quote from transcript in quotes]
-[question ending with ?]
-#{(_name1 or 'streaming').lower().replace(' ','')}
-
-⚠️ Paste clip link as reply"""
-                ),
-                'tiktok': (
-                    "Write a complete TikTok caption. Rules: line 1 = SEO search phrase using exact topic from transcript. No hooks. CTA. 3-4 niche hashtags no #fyp. NEVER cut off. Use ONLY words from transcript. Do NOT add on-screen text suggestions.",
-                    f"""{_tc}
-TIKTOK HANDLE: {_h_tt or 'use their name'}
-
-Write the complete caption using ONLY what is in the transcript:
-{_name1.lower() if _name1 else 'streamer'} [exact topic from transcript — read it carefully] explained
-[what he actually said — from transcript]
-do you agree? drop it in the comments 👇
-#{(_name1 or 'clips').lower().replace(' ','')} #[exact topic from transcript] #[niche]"""
-                ),
-                'instagram': (
-                    "Write a complete Instagram caption. Rules: line 1 = [Role] @handle [what happened from transcript] [emoji]. Then 2-3 clean sentences — NO timestamps, NO brackets, NO raw transcript lines. DM-bait. Save-bait. 3-5 hashtags. Use ONLY what is in the transcript.",
-                    f"""{_tc}
-INSTAGRAM HANDLE: {_h_ig if _h_ig else 'NONE — use name only, NO @ symbol'}
-
-Write the complete caption — NO timestamps, NO [00:00:00] format:
-Line 1: [Role] {_h_ig if _h_ig else _who} [what happened] [emoji]
-
-[2-3 clean natural sentences about what he said — rewrite in your own words, no timestamps]
-
-what do you think — is he right? 👇
-save this for when the conversation comes up 📌
-#{(_name1 or 'clips').lower().replace(' ','')} #[exact topic] #drama #clips #[5th]"""
-                ),
-                'yt_shorts': (
-                    "Write a YouTube Shorts title under 60 chars + 1-2 sentence description under 150 chars + 3 hashtags. Use exact topic from transcript. No generic filler.",
-                    f"""{_tc}
-
-Write the complete Shorts entry:
-TITLE: [punchy, keyword-first, under 60 chars — use exact topic from transcript]
-DESCRIPTION: [1-2 sentences, what actually happened, under 150 chars]
-#[person] #[exact topic from transcript] #[niche]"""
-                ),
-                'youtube': (
-                    "Write a complete YouTube video title + description + tags. Title keyword-first under 60 chars. 2-3 COMPLETE sentences. Channel plug. 10 specific tags. Use ONLY what is in the transcript.",
-                    f"""{_tc}
-YOUTUBE HANDLE: {_h_yt or 'use their name'}
-
-Write the full YouTube entry:
-TITLE: [keyword-first, under 60 chars]
-
-DESCRIPTION:
-[Complete sentence 1: who + what happened from transcript]
-[Complete sentence 2: why it matters]
-More clips → @MarsScumbags
-
-TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, clips, MarsScumbags, [4 more specific]"""
-                ),
-            }
-
-
-            # ── Generate all platforms in parallel ────────────────────────────
-            import threading as _pst2
-            _results = {}
-            _lock = _pst2.Lock()
-
-            # Debug: verify transcript is populated
-            _log(f'📋 Transcript: {len(_tr)} chars | Person: {_who} | Platforms: {_sel}')
-            if not _tr:
-                _log('⚠ No transcript — posts may be generic', YELLOW)
-            if not _name:
-                _log('⚠ No person name — add name in the field for better posts', YELLOW)
-
-            # Also add OpenRouter keys to pool
-            _or_keys = []
-            _or_k = self.cfg.get('key_openrouter','').strip()
-            if _or_k: _or_keys.append(_or_k)
-            for _ek3 in self.cfg.get('key_openrouter_extra','').split(','):
-                if _ek3.strip(): _or_keys.append(_ek3.strip())
-
-            # Build _all_keys from Gemini + Groq config
-            _all_keys = []
-            _gk = self.cfg.get('key_gemini','').strip()
-            if _gk: _all_keys.append(('gemini', _gk))
-            for _ek in self.cfg.get('key_gemini_extra','').split(','):
-                if _ek.strip(): _all_keys.append(('gemini', _ek.strip()))
-            _grk = self.cfg.get('key_groq','').strip()
-            if _grk: _all_keys.append(('groq', _grk))
-            for _ek2 in self.cfg.get('key_groq_extra','').split(','):
-                if _ek2.strip(): _all_keys.append(('groq', _ek2.strip()))
-
-            # Build provider pools
-            _gem_keys_list  = [(p,k) for p,k in _all_keys if p == 'gemini']
-            _groq_keys_list = [(p,k) for p,k in _all_keys if p == 'groq']
-            _or_keys_list   = list(dict.fromkeys([('openrouter', k) for k in _or_keys]))
-
-            # Groq primary for ALL platforms — Gemini is busy with transcription
-            # Groq: 334 t/s, 32k output tokens, generous free tier
-            # Gemini: only ~20 req/day free, gets hammered by transcription
-            _x_pool     = _groq_keys_list + _or_keys_list + _gem_keys_list
-            _other_pool = _groq_keys_list + _or_keys_list + _gem_keys_list
-            _all_pool   = _groq_keys_list + _or_keys_list + _gem_keys_list
-            if not _all_pool:
-                _log('❌ No API keys found — add keys in Settings', RED)
-                self.after(0, lambda: self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS'))
-                return
-
-            _n_keys = len(set(k for _,k in _all_pool))
-            _log(f'🔑 {len(_all_pool)} key slot(s) | Groq primary | Gemini backup (reserved for transcription)')
-
-            # Gap based on available unique keys
-            _unique_keys = max(len(_all_pool), 1)
-            _gap = max(0.3, 4.0 / _unique_keys)
-            _log(f'⏱ {_gap:.1f}s between calls')
-
-            import time as _pst_time
-            _results = {}
-            _pool_idx = [0]
-
-            _platform_max_tok  = {'youtube': 1200, 'yt_shorts': 500, 'instagram': 1000, 'x': 700, 'tiktok': 800}
-            _platform_min_len  = {'youtube': 20, 'yt_shorts': 20, 'instagram': 20, 'x': 20, 'tiktok': 20}  # just reject blanks
-
-            def _call_one(provider, key, system_msg, user_msg, max_tok=800):
-                """Single API call. Returns text or raises."""
-                _full = f"{system_msg}\n\n{user_msg}"
-                if provider == 'gemini':
-                    return _gemini_complete(key, 'write', _full, max_tok, 0.4)
-                elif provider == 'openrouter':
-                    # 'write' models from PROVIDERS; null content / 200+error bodies handled inside
-                    return _openrouter_complete(key, 'write',
-                                                [{'role':'system','content':system_msg},
-                                                 {'role':'user',  'content':user_msg}],
-                                                max_tok, timeout=45)
-                else:  # groq
-                    return _groq_complete(key, 'write',
-                                          [{'role':'system','content':system_msg},
-                                           {'role':'user',  'content':user_msg}],
-                                          max_tok, 0.4)
-
-            def _call_platform(pk):
-                _sys_msg, _usr_msg = _platform_msgs[pk]
-                _max_tok = _platform_max_tok.get(pk, 800)
-                _min_len = _platform_min_len.get(pk, 100)
-                _pool = _x_pool if pk == 'x' else _other_pool
-                if not _pool: _pool = _all_pool
-                _log(f'🚀 {pk.upper()}...')
-                for _prov, _key in _pool:
-                    try:
-                        _out = _call_one(_prov, _key, _sys_msg, _usr_msg, max_tok=_max_tok)
-                        if _out and len(_out) >= _min_len:
-                            # Only retry if clearly cut off mid-sentence. Every template ends in
-                            # hashtags/tags, so judge the LAST LINE (a bare '[-1] not in .!?#' test
-                            # doubled the API calls for almost every post)
-                            _tail = _out.rstrip()
-                            _ll = _tail.splitlines()[-1].strip() if _tail else ''
-                            _lt = _ll.split()[-1] if _ll.split() else ''
-                            _looks_cut = bool(_lt) and not ('#' in _ll or _ll.upper().startswith('TAGS')
-                                                            or _lt[-1] in '.!?"”)…' or ord(_lt[-1]) > 0x2000)
-                            if _looks_cut:
-                                _pst_time.sleep(0.5)
-                                try:
-                                    _r2 = _call_one(_prov, _key, _sys_msg, _usr_msg, max_tok=_max_tok)
-                                    if _r2 and len(_r2) > len(_out): _out = _r2
-                                except: pass
-                            _log(f'✅ {pk.upper()} via {_prov} ({len(_out)} chars)', GREEN)
-                            return _out
-                        _log(f'⚠ {pk.upper()} {_prov} too short ({len(_out)}c < {_min_len}) — next', YELLOW)
-                    except Exception as _e:
-                        _es = str(_e)
-                        if any(x in _es for x in ['503','429','UNAVAILABLE','RESOURCE_EXHAUSTED','rate limited','daily']):
-                            _log(f'⚠ {pk.upper()} {_prov} rate limited — next', YELLOW)
-                        else:
-                            _log(f'⚠ {pk.upper()} {_prov}: {_es[:60]}', YELLOW)
-                    _pst_time.sleep(min(_gap, 1.0))
-                _log(f'❌ {pk.upper()} failed all keys', RED)
-                return ''
-
-
-            # Generate sequentially — dynamic gap between platforms
-            for _pk in _sel:
-                if _pk not in _platform_msgs: continue
-                _results[_pk] = _call_platform(_pk)
-                _pst_time.sleep(_gap)
-
-
-            # ── Update output boxes ───────────────────────────────────────────
-            def _update():
-                try:
-                    for pk in _sel:
-                        _txt = _results.get(pk,'')
-                        if pk not in self._ps_out: continue
-                        _b = self._ps_out[pk]['box']
-                        _b.config(state='normal', fg=FG if _txt else FG3)
-                        _b.delete('1.0','end')
-                        _b.insert('1.0', _txt if _txt else f'(No {pk} output — check API keys)')
-                        def _resize(box=_b):
-                            box.update_idletasks()
-                            box.config(height=1)
-                            box.update_idletasks()
-                            _visual = 0
-                            _idx = '1.0'
-                            while True:
-                                _di = box.dlineinfo(_idx)
-                                if _di is None: break
-                                _visual += 1
-                                _next = box.index(f'{_idx} +1 display lines')
-                                if _next == _idx: break
-                                _idx = _next
-                            box.config(height=max(4, _visual + 1))
-                        self.after(100, _resize)
-                        if _txt:
-                            def _run_score(p=pk, t=_txt, gk=[k for _,k in _groq_keys_list], mk=[k for _,k in _gem_keys_list]):
-                                _sc, _rs = self._ps_score_post(p, t, gk, mk)
-                                self._ps_update_score(p, _sc, _rs)
-                            import threading as _sct
-                            _sct.Thread(target=_run_score, daemon=True).start()
-                    if _name1 and any([_h_x,_h_ig,_h_tt,_h_yt]):
-                        try:
-                            MEM_PATH = USER_DIR / 'handle_memory.json'
-                            _m2 = {}
-                            try: _m2 = _psj2.loads(MEM_PATH.read_text()) if MEM_PATH.exists() else {}
-                            except: pass
-                            _m2[_name1.lower().replace(' ','_')] = {
-                                'x':_h_x,'instagram':_h_ig,'tiktok':_h_tt,'youtube':_h_yt,'name':_name1}
-                            MEM_PATH.write_text(_psj2.dumps(_m2,indent=2))
-                        except: pass
-                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
-                    self._ps_status.config(text=f'✅ Generated for: {", ".join(_sel)}', fg=GREEN)
-                    self.set_progress(f'✅ Post Studio — Done!', pct=100)
-                    self.after(3000, lambda: self.set_progress('', pct=0))
-                except Exception as _ue:
-                    import traceback as _utb
-                    print(f'[PostStudio _update ERROR]\n{_utb.format_exc()}')
-                    self.log(f'[Post Studio] ❌ Update error: {str(_ue)[:80]}', RED)
-                    self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS')
-
-            self.after(0, _update)
-
-        except Exception as _e:
-            import traceback as _pstb2
-            _tb = _pstb2.format_exc()
-            print(f'[PostStudio ERROR]\n{_tb}')
-            # Log each line of traceback to app log
-            for _tline in _tb.strip().split('\n')[-4:]:
-                self.log(f'[Post Studio] {_tline}', RED)
-            self.after(0, lambda: self._ps_gen_btn.config(state='normal', text='⚡  GENERATE POSTS'))
 
     def _build_dl_tab(self, p):
         def sec(t):
