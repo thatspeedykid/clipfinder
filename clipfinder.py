@@ -3757,7 +3757,7 @@ def _kick_pick_thumb(thumb, min_width=380):
 
 
 def kick_thumbnail(url, cache_dir=None, size=(192, 108)):
-    """Download a Kick VOD thumbnail (cached on disk) -> PIL RGB image cropped to `size`, or None."""
+    """Download a VOD / clip thumbnail (Kick, Twitch or YouTube; cached on disk) -> PIL RGB image cropped to `size`, or None."""
     try:
         import hashlib, io
         from PIL import Image, ImageOps
@@ -3768,7 +3768,12 @@ def kick_thumbnail(url, cache_dir=None, size=(192, 108)):
             if cpath.exists() and cpath.stat().st_size > 500:
                 data = cpath.read_bytes()
         if data is None:
-            st, data = _kick_get(url, timeout=15, binary=True)
+            if re.match(r'https?://[^/]*kick\.com/', url, re.I):
+                st, data = _kick_get(url, timeout=15, binary=True)
+            else:
+                import requests as _rq
+                _r = _rq.get(url, timeout=15, headers={'User-Agent': _KICK_UA})
+                st, data = _r.status_code, _r.content
             if st != 200 or not data or len(data) < 500:
                 return None
             if cpath is not None:
@@ -3973,6 +3978,172 @@ def kick_list_vods(slug, token=None):
                         'created': (v.get('start_time') or v.get('created_at') or '')[:10],
                         'views': int(v.get('views') or 0), 'thumb': thumb, 'is_live': bool(v.get('is_live'))})
     return out
+
+
+def kick_list_clips(slug, token=None, limit=40):
+    """A channel's clips (newest first) in the same dict shape as kick_list_vods."""
+    st, d = _kick_json(f'https://kick.com/api/v2/channels/{slug}/clips?cursor=0&sort=date&time=all', token)
+    if st == 404:
+        raise KickError(f'Kick channel "{slug}" was not found.')
+    if st != 200 or not isinstance(d, dict):
+        raise KickError(f'Kick clip list failed (HTTP {st}).' +
+                        ('\nKick blocked the request - add a cookies.txt in Downloader settings.' if st == 403 else ''))
+    out = []
+    for c in (d.get('clips') or []):
+        cid = c.get('id')
+        if not cid:
+            continue
+        out.append({'id': cid, 'url': f'https://kick.com/{slug}/clips/{cid}',
+                    'title': c.get('title') or 'Untitled clip', 'duration': _kick_secs(c.get('duration')),
+                    'created': (c.get('created_at') or '')[:10], 'views': int(c.get('views') or c.get('view_count') or 0),
+                    'thumb': c.get('thumbnail_url') or '', 'is_live': False})
+        if len(out) >= limit:
+            break
+    return out
+
+
+class BrowseError(Exception):
+    """A channel browser lookup failed. The message is written for the end user."""
+
+
+_TWITCH_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko'     # Twitch's own public web client id
+
+
+def twitch_list(login, kind='vods', limit=40):
+    """A Twitch channel's past broadcasts ('vods') or clips ('clips') -> (items, note).
+    Uses Twitch's public GraphQL endpoint (no login needed, same data the website shows)."""
+    import requests as _rq
+    login = re.sub(r'[^\w]', '', login or '').lower()
+    if not login:
+        raise BrowseError('Type a Twitch channel name first.')
+    if kind == 'clips':
+        # newest interesting clips first: try the last week, widen until something is found
+        periods = ('LAST_WEEK', 'LAST_MONTH', 'ALL_TIME')
+        sel = ('clips(first:%d, criteria:{period:$p, sort:VIEWS_DESC}){edges{node{slug title durationSeconds createdAt '
+               'viewCount thumbnailURL(width:480,height:272) broadcaster{login}}}}' % limit)
+    else:
+        periods = ('ALL_TIME',)
+        sel = ('videos(first:%d, type:ARCHIVE, sort:TIME){edges{node{id title lengthSeconds createdAt viewCount '
+               'previewThumbnailURL(width:480,height:272)}}}' % limit)
+    q = 'query($login:String!,$p:ClipsPeriod){user(login:$login){login ' + sel + '}}'
+    if kind != 'clips':
+        q = q.replace(',$p:ClipsPeriod', '')
+    hdrs = {'Client-ID': _TWITCH_CLIENT_ID, 'Content-Type': 'application/json'}
+    note = ''
+    for per in periods:
+        var = {'login': login}
+        if kind == 'clips':
+            var['p'] = per
+        r = _rq.post('https://gql.twitch.tv/gql', headers=hdrs, json={'query': q, 'variables': var}, timeout=20)
+        if r.status_code != 200:
+            raise BrowseError(f'Twitch lookup failed (HTTP {r.status_code}).')
+        j = r.json()
+        if isinstance(j, dict) and j.get('errors') and not j.get('data'):
+            raise BrowseError('Twitch lookup failed: ' + str(j['errors'][0].get('message', ''))[:120])
+        user = ((j or {}).get('data') or {}).get('user')
+        if not user:
+            raise BrowseError(f'Twitch channel "{login}" was not found.')
+        edges = ((user.get('clips') if kind == 'clips' else user.get('videos')) or {}).get('edges') or []
+        out = []
+        for e in edges:
+            n = (e or {}).get('node') or {}
+            if kind == 'clips':
+                slug = n.get('slug')
+                if not slug:
+                    continue
+                who = (n.get('broadcaster') or {}).get('login') or login
+                out.append({'id': slug, 'url': f'https://www.twitch.tv/{who}/clip/{slug}', 'title': n.get('title') or 'Untitled clip',
+                            'duration': int(n.get('durationSeconds') or 0), 'created': (n.get('createdAt') or '')[:10],
+                            'views': int(n.get('viewCount') or 0), 'thumb': n.get('thumbnailURL') or '', 'is_live': False})
+            else:
+                vid = n.get('id')
+                if not vid:
+                    continue
+                th = n.get('previewThumbnailURL') or ''
+                out.append({'id': vid, 'url': f'https://www.twitch.tv/videos/{vid}', 'title': n.get('title') or 'Untitled broadcast',
+                            'duration': int(n.get('lengthSeconds') or 0), 'created': (n.get('createdAt') or '')[:10],
+                            'views': int(n.get('viewCount') or 0), 'thumb': '' if '404_processing' in th else th,
+                            'is_live': False})
+        if out:
+            if kind == 'clips':
+                note = {'LAST_WEEK': 'top clips of the last 7 days', 'LAST_MONTH': 'top clips of the last 30 days',
+                        'ALL_TIME': 'top clips of all time'}[per]
+            return out, note
+    return [], ''
+
+
+def youtube_list(channel, section='videos', limit=40):
+    """A YouTube channel tab ('streams' / 'videos' / 'shorts') -> (items, note) via yt-dlp's flat extractor."""
+    import yt_dlp
+    ch = (channel or '').strip()
+    if not ch:
+        raise BrowseError('Type a YouTube @handle or channel link first.')
+    m = re.match(r'https?://(?:www\.|m\.)?youtube\.com/((?:@|channel/|c/|user/)[^/?#]+)', ch, re.I)
+    if m:
+        base = 'https://www.youtube.com/' + m.group(1)
+    elif re.match(r'^UC[\w-]{20,}$', ch):
+        base = 'https://www.youtube.com/channel/' + ch
+    else:
+        base = 'https://www.youtube.com/@' + ch.lstrip('@').replace(' ', '')
+    opts = {'quiet': True, 'no_warnings': True, 'extract_flat': 'in_playlist', 'playlistend': limit,
+            'skip_download': True, 'socket_timeout': 20}
+    try:
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(f'{base}/{section}', download=False)
+    except Exception as e:
+        msg = str(e)
+        if 'does not have a' in msg and 'tab' in msg:
+            return [], f'This channel has no {section.title()} tab.'
+        if 'does not exist' in msg.lower() or '404' in msg or 'not found' in msg.lower():
+            raise BrowseError(f'YouTube channel "{ch}" was not found.')
+        raise BrowseError('YouTube lookup failed: ' + re.sub(r'\x1b\[[0-9;]*m', '', msg).replace('ERROR: ', '')[:160])
+    out = []
+    for e in (info or {}).get('entries') or []:
+        vid = (e or {}).get('id')
+        if not vid:
+            continue
+        if not re.match(r'^[\w-]{11}$', str(vid)):      # nested playlists / shelves are not videos
+            continue
+        ls = e.get('live_status')
+        out.append({'id': vid,
+                    'url': e.get('url') or (f'https://www.youtube.com/shorts/{vid}' if section == 'shorts' else f'https://www.youtube.com/watch?v={vid}'),
+                    'title': e.get('title') or 'Untitled', 'duration': int(e.get('duration') or 0),
+                    'created': (str(e.get('upload_date') or '')[:4] + '-' + str(e.get('upload_date') or '')[4:6] + '-' + str(e.get('upload_date') or '')[6:8]) if e.get('upload_date') else '',
+                    'views': int(e.get('view_count') or 0), 'thumb': f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg',
+                    'is_live': ls == 'is_live'})
+        if len(out) >= limit:
+            break
+    return out, ''
+
+
+BROWSE_PLATFORMS = (('kick', '🎮 Kick', 'Kick username', 'nicklee'),
+                    ('twitch', '🟣 Twitch', 'Twitch channel', 'xqc'),
+                    ('youtube', '▶ YouTube', 'YouTube @handle or link', '@MrBeast'))
+BROWSE_SECTIONS = {'kick':    (('vods', '📼 VODs'), ('clips', '✂ Clips')),
+                   'twitch':  (('vods', '📼 VODs'), ('clips', '✂ Clips')),
+                   'youtube': (('streams', '🔴 Streams'), ('videos', '🎞 Videos'), ('shorts', '📱 Shorts'))}
+
+
+def browse_normalize(platform, text):
+    """Channel name from what the user typed (accepts a pasted channel link)."""
+    t = (text or '').strip()
+    if platform == 'youtube':
+        return t
+    m = re.match(r'(?:https?://)?(?:www\.)?(?:kick\.com|twitch\.tv)/([\w\-]+)', t, re.I)
+    if m:
+        t = m.group(1)
+    return t.lstrip('@').strip().lower()
+
+
+def browse_list(platform, channel, section, token=None):
+    """Dispatch to the platform backend -> (items, note). Raises KickError / BrowseError with user-facing text."""
+    if platform == 'kick':
+        if not channel:
+            raise BrowseError('Type a Kick username first.')
+        return (kick_list_clips(channel, token) if section == 'clips' else kick_list_vods(channel, token)), ''
+    if platform == 'twitch':
+        return twitch_list(channel, 'clips' if section == 'clips' else 'vods')
+    return youtube_list(channel, section)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5160,7 +5331,7 @@ class App(tk.Tk):
                 else:
                     b.config(bg=BG3, fg=ACCENT2, font=('Segoe UI',8))
 
-        for sub_key, sub_lbl in [('ai_clips','✂  AI Clips'), ('kick','🎮  Kick'), ('auto_edit','⚡  Auto Edit')]:
+        for sub_key, sub_lbl in [('ai_clips','✂  AI Clips'), ('auto_edit','⚡  Auto Edit')]:
             sb = tk.Button(sub_bar, text=sub_lbl, font=('Segoe UI',8),
                           relief='flat', bd=0, cursor='hand2',
                           padx=20, pady=6, bg=BG3, fg=FG2,
@@ -5172,11 +5343,6 @@ class App(tk.Tk):
         # AI Clips sub-frame (default)
         ai_clips_frame = tk.Frame(p, bg=BG)
         self._clips_sub_frames['ai_clips'] = ai_clips_frame
-
-        # Kick sub-frame
-        kick_frame = tk.Frame(p, bg=BG)
-        self._clips_sub_frames['kick'] = kick_frame
-        self._build_kick_sub(kick_frame)
 
         # Auto Edit sub-frame
         ae_frame = tk.Frame(p, bg=BG)
@@ -5787,256 +5953,269 @@ class App(tk.Tk):
                  font=FONT_MONO_S, fg=FG2, bg=BG3).pack(pady=30)
 
 
-    def _build_kick_sub(self, p):
-        """Kick VOD browser + direct clip streaming sub-tab."""
-        import threading as _th_kick
+    # ── Channel browser (Downloader tab > "Browse channels") ──────────────────────
+    # Kick / Twitch / YouTube channels with their VODs and clips (YouTube: Streams / Videos / Shorts)
+    # as separate sections, with thumbnails. Backends: kick_list_vods/_clips, twitch_list, youtube_list.
 
-        # ── Header ────────────────────────────────────────────────────────────
-        hdr = tk.Frame(p, bg=BG2); hdr.pack(fill='x', padx=0)
-        tk.Label(hdr, text='🎮  KICK VOD BROWSER', font=('Segoe UI', 10, 'bold'),
-                 fg=ACCENT, bg=BG2).pack(side='left', padx=12, pady=8)
-        tk.Label(hdr, text='Browse VODs · Load into Clip Finder · Direct stream clip',
-                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(side='left')
+    def _dl_set_mode(self, mode):
+        """Downloader tab: 'download' (link box) or 'browse' (channel browser, built on first use)."""
+        if mode == 'browse' and not getattr(self, '_br_built', False):
+            self._br_built = True
+            self._build_browser_panel(self._dl_browse)
+        self._dl_mode = mode
+        if mode == 'browse':
+            self._dl_main.pack_forget()
+            self._dl_browse.pack(fill='both', expand=True)
+        else:
+            self._dl_browse.pack_forget()
+            self._dl_main.pack(fill='both', expand=True)
+        for k, b in self._dl_mode_btns.items():
+            b.config(bg=ACCENT if k == mode else BG3, fg='#000' if k == mode else FG2,
+                     font=('Segoe UI', 9, 'bold') if k == mode else ('Segoe UI', 9))
 
+    def _build_browser_panel(self, p):
+        self._br_platform = self.cfg.get('br_platform', 'kick')
+        if self._br_platform not in BROWSE_SECTIONS:
+            self._br_platform = 'kick'
+        self._br_section = {k: self.cfg.get('br_section_' + k, v[0][0]) for k, v in BROWSE_SECTIONS.items()}
+        self._br_channels = dict(self.cfg.get('br_channels') or {})
+        self._br_cache = {}
+        self._br_req = 0
+        self._br_thumb_gen = 0
+        self._br_thumb_refs = []
+        self._br_thumbs_loaded = 0
+        self._br_ph_img = None
+
+        # platform switch
+        top = tk.Frame(p, bg=BG2); top.pack(fill='x')
+        self._br_plat_btns = {}
+        for key, label, _hint, _ex in BROWSE_PLATFORMS:
+            b = tk.Button(top, text=label, font=('Segoe UI', 9), relief='flat', bd=0, cursor='hand2', padx=18, pady=7,
+                          command=lambda k=key: self._br_set_platform(k))
+            b.pack(side='left', padx=(8 if key == 'kick' else 2, 2), pady=6)
+            self._br_plat_btns[key] = b
+        tk.Label(top, text='Browse a channel, then Load / Edit / Download straight from the list.',
+                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(side='left', padx=10)
         tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
 
-        # ── Search bar ────────────────────────────────────────────────────────
-        search_row = tk.Frame(p, bg=BG2); search_row.pack(fill='x', padx=12, pady=(8,4))
-        tk.Label(search_row, text='Kick username:', font=FONT_SMALL,
-                 fg=FG2, bg=BG2).pack(side='left')
-        _kick_sf = tk.Frame(search_row, bg=BG3)
-        _kick_sf.pack(side='left', fill='x', expand=True, padx=(6,6))
-        self._kick_slug_var = tk.StringVar()
-        _kick_entry = tk.Entry(_kick_sf, textvariable=self._kick_slug_var,
-                               font=FONT_SMALL, bg=BG3, fg=FG,
-                               insertbackground=ACCENT, relief='flat', bd=4)
-        _kick_entry.pack(side='left', fill='x', expand=True)
-        _kick_entry.insert(0, 'xqc')
+        # channel + browse
+        row = tk.Frame(p, bg=BG2); row.pack(fill='x', padx=12, pady=(8, 4))
+        self._br_chan_lbl = tk.Label(row, text='', font=FONT_SMALL, fg=FG2, bg=BG2)
+        self._br_chan_lbl.pack(side='left')
+        ef = tk.Frame(row, bg=BG3); ef.pack(side='left', fill='x', expand=True, padx=(6, 6))
+        self._br_chan_var = tk.StringVar()
+        self._br_entry = tk.Entry(ef, textvariable=self._br_chan_var, font=FONT_SMALL, bg=BG3, fg=FG,
+                                  insertbackground=ACCENT, relief='flat', bd=4)
+        self._br_entry.pack(side='left', fill='x', expand=True)
+        self._br_entry.bind('<Return>', lambda e: self._br_fetch(force=True))
+        self._br_go = tk.Button(row, text='🔍  Browse', font=('Segoe UI', 9, 'bold'), bg=ACCENT, fg='#000', relief='flat',
+                                bd=0, cursor='hand2', padx=12, pady=5, activebackground=ACCENT2,
+                                command=lambda: self._br_fetch(force=True))
+        self._br_go.pack(side='left')
 
-        self._kick_browse_btn = tk.Button(
-            search_row, text='🔍  Browse VODs', font=('Segoe UI', 9, 'bold'),
-            bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=12, pady=5,
-            activebackground=ACCENT2, command=self._kick_fetch_vods)
-        self._kick_browse_btn.pack(side='left')
-
-        # ── Direct clip toggle ────────────────────────────────────────────────
-        opt_row = tk.Frame(p, bg=BG2); opt_row.pack(fill='x', padx=12, pady=(0,6))
-        self._kick_direct_clip = tk.BooleanVar(value=True)
-        tk.Checkbutton(opt_row, text='⚡ Direct clip mode — stream zones from Kick CDN (no full download)',
-                       variable=self._kick_direct_clip,
-                       font=('Segoe UI', 8), fg=FG, bg=BG2,
-                       selectcolor=BG3, activebackground=BG2,
-                       relief='flat', cursor='hand2').pack(side='left')
-
+        # sections (VODs / Clips ...) - rebuilt for each platform
+        self._br_sec_bar = tk.Frame(p, bg=BG2); self._br_sec_bar.pack(fill='x', padx=12, pady=(0, 6))
+        self._br_sec_btns = {}
         tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
 
-        # ── VOD list ─────────────────────────────────────────────────────────
-        list_outer = tk.Frame(p, bg=BG); list_outer.pack(fill='both', expand=True, padx=0)
+        # list
+        outer = tk.Frame(p, bg=BG); outer.pack(fill='both', expand=True)
+        cv = tk.Canvas(outer, bg=BG, bd=0, highlightthickness=0)
+        _make_scrollbar(outer, cv)
+        cv.pack(side='left', fill='both', expand=True)
+        self._br_cv = cv
+        self._br_list = tk.Frame(cv, bg=BG)
+        win = cv.create_window((0, 0), window=self._br_list, anchor='nw')
+        self._br_list.bind('<Configure>', lambda e: cv.configure(scrollregion=cv.bbox('all')))
+        cv.bind('<Configure>', lambda e: cv.itemconfigure(win, width=e.width))
+        _bind_mousewheel(cv, cv); _bind_mousewheel(self._br_list, cv)
 
-        # Scrollable VOD list
-        _kick_cv = tk.Canvas(list_outer, bg=BG, bd=0, highlightthickness=0)
-        _kick_sb = tk.Scrollbar(list_outer, orient='vertical', command=_kick_cv.yview,
-                                bg=BG2, troughcolor=BG3, relief='flat')
-        _kick_cv.configure(yscrollcommand=_kick_sb.set)
-        _kick_sb.pack(side='right', fill='y')
-        _kick_cv.pack(side='left', fill='both', expand=True)
-
-        self._kick_list_frame = tk.Frame(_kick_cv, bg=BG)
-        self._kick_list_win = _kick_cv.create_window((0,0), window=self._kick_list_frame, anchor='nw')
-
-        def _kick_on_frame_configure(e):
-            _kick_cv.configure(scrollregion=_kick_cv.bbox('all'))
-        def _kick_on_canvas_configure(e):
-            _kick_cv.itemconfig(self._kick_list_win, width=e.width)
-        self._kick_list_frame.bind('<Configure>', _kick_on_frame_configure)
-        _kick_cv.bind('<Configure>', _kick_on_canvas_configure)
-
-        # Mousewheel scroll
-        def _kick_scroll(e):
-            _kick_cv.yview_scroll(int(-1*(e.delta/120)), 'units')
-        _kick_cv.bind('<MouseWheel>', _kick_scroll)
-
-        # Status label
-        self._kick_status_lbl = tk.Label(
-            self._kick_list_frame,
-            text='\n  Enter a Kick username and hit Browse VODs\n',
-            font=FONT_SMALL, fg=FG2, bg=BG)
-        self._kick_status_lbl.pack(expand=True, pady=20)
-
-        # ── Bottom bar ────────────────────────────────────────────────────────
         bot = tk.Frame(p, bg=BG2); bot.pack(fill='x', side='bottom')
         tk.Frame(bot, bg=BORDER, height=1).pack(fill='x')
-        self._kick_bot_lbl = tk.Label(bot, text='', font=('Segoe UI', 8),
-                                       fg=FG2, bg=BG2, anchor='w')
-        self._kick_bot_lbl.pack(side='left', padx=10, pady=4)
+        self._br_bot = tk.Label(bot, text='', font=('Segoe UI', 8), fg=FG2, bg=BG2, anchor='w')
+        self._br_bot.pack(side='left', padx=10, pady=4)
+        self._br_set_platform(self._br_platform, fetch=False)
 
-    def _kick_fetch_vods(self):
-        """Fetch VOD list from Kick API for a given username."""
-        import threading as _th_k
-        slug = self._kick_slug_var.get().strip().lower()
-        if not slug: return
-        self._kick_browse_btn.config(state='disabled', text='⏳ Loading...')
-        self._kick_thumb_gen = getattr(self, '_kick_thumb_gen', 0) + 1     # cancel thumbnails still loading
-        self._kick_bot_lbl.config(text=f'Fetching VODs for @{slug}...')
-        for w in self._kick_list_frame.winfo_children(): w.destroy()
-        tk.Label(self._kick_list_frame, text='⏳ Loading VODs...',
-                 font=FONT_SMALL, fg=FG2, bg=BG).pack(pady=20)
+    def _br_set_platform(self, plat, fetch=True):
+        old = getattr(self, '_br_shown_plat', None)
+        if old and old != plat:                    # remember what was typed for the platform we leave
+            self._br_channels[old] = self._br_chan_var.get().strip()
+        self._br_shown_plat = plat
+        self._br_platform = plat
+        self.cfg['br_platform'] = plat
+        for k, b in self._br_plat_btns.items():
+            b.config(bg=ACCENT if k == plat else BG3, fg='#000' if k == plat else FG2,
+                     font=('Segoe UI', 9, 'bold') if k == plat else ('Segoe UI', 9))
+        info = next(x for x in BROWSE_PLATFORMS if x[0] == plat)
+        self._br_chan_lbl.config(text=info[2] + ':')
+        self._br_chan_var.set(self._br_channels.get(plat, '') or info[3])
+        for w in self._br_sec_bar.winfo_children():
+            w.destroy()
+        self._br_sec_btns = {}
+        for key, label in BROWSE_SECTIONS[plat]:
+            b = tk.Button(self._br_sec_bar, text=label, font=('Segoe UI', 9), relief='flat', bd=0, cursor='hand2',
+                          padx=14, pady=4, command=lambda k=key: self._br_set_section(k))
+            b.pack(side='left', padx=(0, 4))
+            self._br_sec_btns[key] = b
+        self._br_paint_sections()
+        cached = self._br_cache.get(self._br_key())
+        if cached is not None:
+            self._br_render(*cached)
+        else:
+            self._br_show_message(f'Enter a {info[2].split(" ")[0]} channel and hit Browse.')
+            self._br_bot.config(text='')
+        if fetch and self._br_chan_var.get().strip() and cached is None and self._br_channels.get(plat):
+            self._br_fetch()
 
-        cookies = (getattr(self, 'v_cookies', None) and self.v_cookies.get().strip()) or self.cfg.get('cookies_file', '').strip()
-        _cookies_ok = cookies and Path(cookies).exists()
-        self._kick_bot_lbl.config(
-            text=f'🍪 Using cookies: {Path(cookies).name}' if _cookies_ok else '⚠ No cookies set — may fail on Kick')
+    def _br_key(self):
+        return (self._br_platform, browse_normalize(self._br_platform, self._br_chan_var.get()),
+                self._br_section[self._br_platform])
 
-        def _fetch():
-            try:
-                _tok = _kick_session_token(cookies if _cookies_ok else '')
-                vods = kick_list_vods(slug, token=_tok)
-                self.after(0, lambda v=vods: self._kick_render_vods(v, slug))
-            except Exception as e:
-                self.after(0, lambda err=e: self._kick_render_error(str(err)))
+    def _br_paint_sections(self):
+        cur = self._br_section[self._br_platform]
+        for k, b in self._br_sec_btns.items():
+            b.config(bg=ACCENT2 if k == cur else BG3, fg='#000' if k == cur else FG2,
+                     font=('Segoe UI', 9, 'bold') if k == cur else ('Segoe UI', 9))
 
-        _th_k.Thread(target=_fetch, daemon=True).start()
+    def _br_set_section(self, key):
+        self._br_section[self._br_platform] = key
+        self.cfg['br_section_' + self._br_platform] = key
+        self._br_paint_sections()
+        cached = self._br_cache.get(self._br_key())
+        if cached is not None:
+            self._br_render(*cached)
+        elif self._br_chan_var.get().strip():
+            self._br_fetch()
 
-    def _kick_render_error(self, err):
-        """Show error in VOD list."""
-        self._kick_browse_btn.config(state='normal', text='🔍  Browse VODs')
-        for w in self._kick_list_frame.winfo_children(): w.destroy()
-        msg = str(err)
-        tk.Label(self._kick_list_frame,
-                 text=f'⚠  Could not load VODs',
-                 font=('Segoe UI', 10, 'bold'), fg=RED, bg=BG).pack(pady=(20,4))
-        tk.Label(self._kick_list_frame,
-                 text=msg, font=FONT_SMALL, fg=RED, bg=BG, wraplength=600,
-                 justify='center').pack()
-        if '403' in msg or 'blocked' in msg.lower():
-            tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=40, pady=12)
-            tk.Label(self._kick_list_frame,
-                     text='💡  Fix: Add a Kick cookies.txt in Settings → Downloader',
-                     font=('Segoe UI', 9, 'bold'), fg=ACCENT, bg=BG).pack()
-            tk.Label(self._kick_list_frame,
-                     text='1. Install "Get cookies.txt LOCALLY" browser extension\n'
-                          '2. Go to kick.com and log in\n'
-                          '3. Export cookies.txt\n'
-                          '4. Add the file path in ClipFinder Settings → Downloader → Cookies',
-                     font=FONT_SMALL, fg=FG2, bg=BG, justify='left').pack(pady=(4,0))
-        self._kick_bot_lbl.config(text='Error loading VODs')
+    def _br_show_message(self, text, color=None, title=None):
+        for w in self._br_list.winfo_children():
+            w.destroy()
+        if title:
+            tk.Label(self._br_list, text=title, font=('Segoe UI', 10, 'bold'), fg=color or FG, bg=BG).pack(pady=(24, 4))
+        tk.Label(self._br_list, text=text, font=FONT_SMALL, fg=color or FG2, bg=BG, wraplength=640,
+                 justify='center').pack(pady=(4 if title else 24, 0))
+        self._br_thumb_gen += 1
 
-    def _kick_render_vods(self, vods, slug):
-        """Render VOD cards in the list frame."""
-        self._kick_browse_btn.config(state='normal', text='🔍  Browse VODs')
-        for w in self._kick_list_frame.winfo_children(): w.destroy()
-
-        if not vods:
-            tk.Label(self._kick_list_frame,
-                     text=f'\n  No VODs found for @{slug}\n  (Channel may be VOD-only members or private)\n',
-                     font=FONT_SMALL, fg=FG2, bg=BG).pack(pady=20)
-            self._kick_bot_lbl.config(text='No VODs found')
+    def _br_fetch(self, force=False):
+        plat = self._br_platform
+        chan = browse_normalize(plat, self._br_chan_var.get())
+        section = self._br_section[plat]
+        if not chan:
+            self._br_show_message('Type a channel name first.', YELLOW)
             return
+        key = (plat, chan, section)
+        self._br_channels[plat] = self._br_chan_var.get().strip()
+        self.cfg['br_channels'] = dict(self._br_channels)
+        try: save_cfg(self.cfg)
+        except Exception: pass
+        if not force and key in self._br_cache:
+            self._br_render(*self._br_cache[key])
+            return
+        self._br_req += 1
+        req = self._br_req
+        self._br_go.config(state='disabled', text='⏳ Loading...')
+        self._br_show_message('⏳ Loading...')
+        self._br_bot.config(text=f'Fetching {section} for {chan}...')
+        cookies = (getattr(self, 'v_cookies', None) and self.v_cookies.get().strip()) or self.cfg.get('cookies_file', '').strip()
+        cookies_ok = bool(cookies) and Path(cookies).exists()
 
-        self._kick_bot_lbl.config(text=f'{len(vods)} VODs found for @{slug}')
+        def _work():
+            try:
+                tok = _kick_session_token(cookies if cookies_ok else '') if plat == 'kick' else None
+                items, note = browse_list(plat, chan, section, tok)
+                self.after(0, lambda: self._br_done(req, key, items, note))
+            except Exception as ex:
+                _why = str(ex)
+                self.after(0, lambda: self._br_fail(req, plat, _why))
+        threading.Thread(target=_work, daemon=True).start()
 
-        thumb_jobs = []      # (label, thumbnail url, badge text, is_live) - filled in by background threads
-        for vod in vods:
-            # Normalised by kick_list_vods(): id, url, title, duration (s), created, views, is_live, thumb
-            title     = vod.get('title') or 'Untitled VOD'
-            duration  = vod.get('duration', 0) or 0  # seconds
-            created   = vod.get('created', '')
-            views     = vod.get('views', 0) or 0
-            vod_url   = vod.get('url') or f'https://kick.com/{slug}/videos/{vod.get("id", "")}'
-            # Duration string
-            dur_h, dur_rem = divmod(int(duration), 3600)
-            dur_m, dur_s   = divmod(dur_rem, 60)
-            dur_str = f'{dur_h}h {dur_m}m' if dur_h else f'{dur_m}m {dur_s}s'
-            if vod.get('is_live'):
-                dur_str = '🔴 live now (recording)'
+    def _br_fail(self, req, plat, msg):
+        if req != self._br_req:
+            return
+        self._br_go.config(state='normal', text='🔍  Browse')
+        tip = ''
+        if plat == 'kick' and ('403' in msg or 'blocked' in msg.lower()):
+            tip = ('\n\nFix: add a Kick cookies.txt in Settings, or update curl-cffi in Settings > Update Center.')
+        self._br_show_message(msg + tip, RED, title='⚠  Could not load the list')
+        self._br_bot.config(text='Error')
 
-            # Card
-            card = tk.Frame(self._kick_list_frame, bg=BG2, cursor='hand2')
-            card.pack(fill='x', padx=8, pady=(4,0))
+    def _br_done(self, req, key, items, note):
+        if req != self._br_req:
+            return
+        self._br_go.config(state='normal', text='🔍  Browse')
+        self._br_cache[key] = (items, note, key)
+        if key == self._br_key():
+            self._br_render(items, note, key)
 
-            # Thumbnail (dark placeholder first, real image fills in from background threads)
-            thumb_lbl = tk.Label(card, image=self._kick_placeholder(), bg=BG2, bd=0, cursor='hand2')
-            thumb_lbl.pack(side='left', padx=(8, 0), pady=8)
-            thumb_jobs.append((thumb_lbl, vod.get('thumb', ''),
-                               f'{dur_h}h {dur_m}m' if dur_h else f'{dur_m}:{dur_s:02d}',
-                               bool(vod.get('is_live'))))
-
-            # Left info
+    def _br_render(self, items, note, key):
+        plat, chan, section = key
+        for w in self._br_list.winfo_children():
+            w.destroy()
+        label = dict(BROWSE_SECTIONS[plat]).get(section, section)
+        if not items:
+            self._br_show_message(note or f'Nothing found in {label} for {chan}.\n(The channel may have none, or they are private.)')
+            self._br_bot.config(text='Nothing found')
+            return
+        self._br_bot.config(text=f'{len(items)} items in {label.split(" ", 1)[-1]} for {chan}' + (f'  -  {note}' if note else ''))
+        jobs = []
+        for it in items:
+            title = it.get('title') or 'Untitled'
+            dur = int(it.get('duration') or 0)
+            dh, rem = divmod(dur, 3600); dm, ds = divmod(rem, 60)
+            dur_str = f'{dh}h {dm}m' if dh else (f'{dm}m {ds}s' if dm else f'{ds}s')
+            if it.get('is_live'):
+                dur_str = '🔴 live now'
+            url = it['url']
+            card = tk.Frame(self._br_list, bg=BG2, cursor='hand2')
+            card.pack(fill='x', padx=8, pady=(4, 0))
+            th = tk.Label(card, image=self._br_placeholder(), bg=BG2, bd=0, cursor='hand2')
+            th.pack(side='left', padx=(8, 0), pady=8)
+            badge = (f'{dh}h {dm}m' if dh else f'{dm}:{ds:02d}') if dur else ''
+            jobs.append((th, it.get('thumb', ''), badge, bool(it.get('is_live'))))
             info = tk.Frame(card, bg=BG2); info.pack(side='left', fill='both', expand=True, padx=10, pady=8)
-            tk.Label(info, text=title, font=('Segoe UI', 9, 'bold'),
-                     fg=FG, bg=BG2, anchor='w', wraplength=440, justify='left').pack(anchor='w')
-            meta_txt = f'🕒 {dur_str}   📅 {created}   👁 {views:,} views' if views else f'🕒 {dur_str}   📅 {created}'
-            tk.Label(info, text=meta_txt, font=('Segoe UI', 8),
-                     fg=FG2, bg=BG2, anchor='w').pack(anchor='w', pady=(2,0))
+            tk.Label(info, text=title, font=('Segoe UI', 9, 'bold'), fg=FG, bg=BG2, anchor='w', wraplength=420,
+                     justify='left').pack(anchor='w')
+            meta = f'🕒 {dur_str}'
+            if it.get('created'):
+                meta += f'   📅 {it["created"]}'
+            if it.get('views'):
+                meta += f'   👁 {int(it["views"]):,} views'
+            tk.Label(info, text=meta, font=('Segoe UI', 8), fg=FG2, bg=BG2, anchor='w').pack(anchor='w', pady=(2, 0))
+            btns = tk.Frame(card, bg=BG2); btns.pack(side='right', padx=8, pady=8)
+            for text, bg, fg, cmd in (
+                    ('▶ Load', ACCENT, '#000', lambda u=url, t=title: self._br_load(u, t)),
+                    ('🎬 Edit', BG3, ACCENT, lambda u=url, t=title: self._ed_load_from_kick(u, t)),
+                    ('⬇ Download', BG3, GREEN, lambda u=url: self._br_download(u)),
+                    ('➕ Queue', BG3, FG2, lambda u=url: self._br_queue(u))):
+                tk.Button(btns, text=text, font=FONT_SMALL, bg=bg, fg=fg, relief='flat', bd=0, cursor='hand2',
+                          padx=10, pady=3, command=cmd).pack(fill='x', pady=(0, 3))
+            th.bind('<Button-1>', lambda e, u=url, t=title: self._br_load(u, t))
 
-            # Right buttons
-            btn_col = tk.Frame(card, bg=BG2); btn_col.pack(side='right', padx=8, pady=8)
+            def _enter(e, c=card): c.config(bg=BG3)
+            def _leave(e, c=card): c.config(bg=BG2)
+            card.bind('<Enter>', _enter); card.bind('<Leave>', _leave)
+            for ch in card.winfo_children():
+                ch.bind('<Enter>', _enter); ch.bind('<Leave>', _leave)
+            tk.Frame(self._br_list, bg=BORDER, height=1).pack(fill='x', padx=8)
+        self._ps_wheel(self._br_list, self._br_cv)
+        self._br_start_thumbs(jobs)
 
-            def _load_vod(url=vod_url, t=title):
-                """Load VOD URL into Clip Finder video field."""
-                self.v_video.set(url)
-                self._video_entry.config(fg=FG)
-                # Switch to AI Clips sub-tab
-                for k, f in self._clips_sub_frames.items():
-                    f.pack_forget()
-                self._clips_sub_frames['ai_clips'].pack(fill='both', expand=True)
-                for k, b in self._clips_sub_btns.items():
-                    b.config(bg=ACCENT if k=='ai_clips' else BG3,
-                             fg='#000' if k=='ai_clips' else FG2,
-                             font=('Segoe UI',8,'bold') if k=='ai_clips' else ('Segoe UI',8))
-                self.log(f'🎮 Loaded Kick VOD: {t}', ACCENT)
-                self._kick_bot_lbl.config(text=f'Loaded: {t}')
-
-            def _direct_clip_vod(url=vod_url, t=title, dur=duration):
-                """Load VOD and enable direct clip mode."""
-                _load_vod(url, t)
-                self._kick_direct_clip.set(True)
-                self.log(f'🎮 Direct clip mode: will stream zones from Kick CDN', ACCENT2)
-
-            thumb_lbl.bind('<Button-1>', lambda e, f=_load_vod: f())      # click the thumbnail = Load
-
-            tk.Button(btn_col, text='▶ Load', font=FONT_SMALL,
-                      bg=ACCENT, fg='#000', relief='flat', bd=0,
-                      cursor='hand2', padx=10, pady=4,
-                      command=_load_vod).pack(fill='x', pady=(0,3))
-            tk.Button(btn_col, text='🎬 Edit', font=FONT_SMALL,
-                      bg=BG3, fg=ACCENT, relief='flat', bd=0,
-                      cursor='hand2', padx=10, pady=4,
-                      command=lambda u=vod_url, t=title: self._ed_load_from_kick(u, t)).pack(fill='x', pady=(0,3))
-            tk.Button(btn_col, text='⚡ Direct Clip', font=FONT_SMALL,
-                      bg=BG3, fg=FG2, relief='flat', bd=0,
-                      cursor='hand2', padx=10, pady=4,
-                      command=_direct_clip_vod).pack(fill='x')
-
-            # Hover highlight
-            def _on_enter(e, c=card): c.config(bg=BG3)
-            def _on_leave(e, c=card): c.config(bg=BG2)
-            card.bind('<Enter>', _on_enter)
-            card.bind('<Leave>', _on_leave)
-            for child in card.winfo_children():
-                child.bind('<Enter>', _on_enter)
-                child.bind('<Leave>', _on_leave)
-
-            tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=8)
-
-        self._kick_start_thumbs(thumb_jobs)
-
-    def _kick_placeholder(self):
-        """Dark 16:9 stand-in shown until a thumbnail has loaded (also the fallback if it never does)."""
-        if getattr(self, '_kick_ph_img', None) is None:
+    def _br_placeholder(self):
+        if self._br_ph_img is None:
             from PIL import Image, ImageTk
-            self._kick_ph_img = ImageTk.PhotoImage(Image.new('RGB', (192, 108), BG3))
-        return self._kick_ph_img
+            self._br_ph_img = ImageTk.PhotoImage(Image.new('RGB', (192, 108), BG3))
+        return self._br_ph_img
 
-    def _kick_start_thumbs(self, jobs):
-        """Load VOD thumbnails in a few background threads (disk-cached, so re-browsing is instant).
-        A generation counter drops results when the list was rebuilt for another channel meanwhile."""
-        import queue as _q, threading as _th, time as _tm
-        gen = self._kick_thumb_gen = getattr(self, '_kick_thumb_gen', 0) + 1
-        self._kick_thumb_refs = []          # PhotoImages must stay referenced or Tk shows blanks
-        self._kick_thumbs_loaded = 0
-        cache = USER_DIR / 'kick_thumbs'
-        try:                                # Kick deletes VODs after ~30 days - drop stale cache files
+    def _br_start_thumbs(self, jobs):
+        """Thumbnails load in a few background threads (disk cached). A generation counter drops results when
+        the list was rebuilt (other channel / section) in the meantime."""
+        import queue as _q, time as _tm
+        self._br_thumb_gen += 1
+        gen = self._br_thumb_gen
+        self._br_thumb_refs = []          # PhotoImages must stay referenced or Tk shows blanks
+        self._br_thumbs_loaded = 0
+        cache = USER_DIR / 'kick_thumbs'   # (folder name kept from the Kick-only version: the uninstaller cleans it)
+        try:                               # VODs expire after a few weeks - drop stale cache files
             for f in cache.glob('*.webp'):
                 if _tm.time() - f.stat().st_mtime > 35 * 86400:
                     f.unlink()
@@ -6047,31 +6226,61 @@ class App(tk.Tk):
             todo.put(j)
 
         def _worker():
-            while gen == self._kick_thumb_gen:
+            while gen == self._br_thumb_gen:
                 try:
                     lbl, url, badge, live = todo.get_nowait()
                 except _q.Empty:
                     return
                 im = kick_thumbnail(url, cache) if url else None
-                if im is not None and gen == self._kick_thumb_gen:
-                    im = kick_thumb_badge(im, badge, live)
-                    self.after(0, lambda l=lbl, i=im, g=gen: self._kick_set_thumb(l, i, g))
-
+                if im is not None and gen == self._br_thumb_gen:
+                    if badge or live:
+                        im = kick_thumb_badge(im, badge, live)
+                    self.after(0, lambda l=lbl, i=im, g=gen: self._br_set_thumb(l, i, g))
         for _ in range(min(4, max(1, len(jobs)))):
-            _th.Thread(target=_worker, daemon=True).start()
+            threading.Thread(target=_worker, daemon=True).start()
 
-    def _kick_set_thumb(self, label, im, gen):
-        """Main-thread half of thumbnail loading."""
-        if gen != getattr(self, '_kick_thumb_gen', -1):
+    def _br_set_thumb(self, label, im, gen):
+        if gen != self._br_thumb_gen:
             return
         try:
             if not label.winfo_exists():
                 return
             from PIL import ImageTk
             ph = ImageTk.PhotoImage(im)
-            self._kick_thumb_refs.append(ph)
+            self._br_thumb_refs.append(ph)
             label.config(image=ph)
-            self._kick_thumbs_loaded += 1
+            self._br_thumbs_loaded += 1
+        except Exception:
+            pass
+
+    # actions on a list item
+    def _br_load(self, url, title):
+        """Put the link in Clip Finder's video field (it downloads it when you hit FIND CLIPS)."""
+        self.v_video.set(url)
+        try:
+            self._video_entry.config(fg=FG)
+        except Exception:
+            pass
+        self._switch_nb('clips')
+        self._switch_sub_clips('ai_clips')
+        self.log(f'📺 Loaded: {title}', ACCENT)
+
+    def _br_download(self, url):
+        if getattr(self, '_dl_go_btn', None) is not None and self._dl_cancel_btn.winfo_manager():
+            self._br_bot.config(text='A download is already running - use ➕ Queue to add this one.', fg=YELLOW)
+            return
+        self.v_dl_url.set(url)
+        self._br_bot.config(text='⬇ Downloading... progress is in the log panel', fg=GREEN)
+        self._dl_start()
+
+    def _br_queue(self, url):
+        try:
+            cur = self._dl_queue_box.get('1.0', 'end').strip().splitlines()
+            if url in cur:
+                self._br_bot.config(text='Already in the download queue', fg=YELLOW)
+                return
+            self._dl_queue_box.insert('end', url + '\n')
+            self._br_bot.config(text=f'➕ Added to the download queue ({len(cur) + 1} link(s)). Switch to "Download links" to start it.', fg=GREEN)
         except Exception:
             pass
 
@@ -12293,6 +12502,21 @@ Return ONLY the JSON array, no other text."""
 
 
     def _build_dl_tab(self, p):
+        # Mode bar: paste links (default) or browse a Kick / Twitch / YouTube channel
+        _mb = tk.Frame(p, bg=BG2); _mb.pack(fill='x')
+        self._dl_mode_btns = {}
+        for _k, _t in (('download', '⬇  Download links'), ('browse', '📺  Browse channels (Kick · Twitch · YouTube)')):
+            _b = tk.Button(_mb, text=_t, font=('Segoe UI', 9), relief='flat', bd=0, cursor='hand2', padx=16, pady=7,
+                           command=lambda k=_k: self._dl_set_mode(k))
+            _b.pack(side='left', padx=(8 if _k == 'download' else 2, 2), pady=6)
+            self._dl_mode_btns[_k] = _b
+        tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
+        self._dl_main = tk.Frame(p, bg=BG); self._dl_main.pack(fill='both', expand=True)
+        self._dl_browse = tk.Frame(p, bg=BG)          # built the first time it is shown
+        self._br_built = False
+        self._dl_mode = 'download'
+        p = self._dl_main                              # the rest of this builder fills the "links" page
+
         def sec(t):
             tk.Label(p, text=t, font=('Segoe UI', 9, 'bold'),
                      fg=ACCENT, bg=BG, anchor='w').pack(anchor='w', padx=20, pady=(14,0))
@@ -12434,6 +12658,7 @@ Return ONLY the JSON array, no other text."""
                   command=lambda: os.startfile(self.v_dl_folder.get())
                   if Path(self.v_dl_folder.get()).exists() else None
                   ).pack(fill='x', padx=20, pady=(8,14))
+        self._dl_set_mode('download')
 
     def _set_dl_quality(self, val):
         self.v_dl_quality.set(val)
@@ -14312,7 +14537,7 @@ Return ONLY the JSON array, no other text."""
                      font=('Segoe UI',8,'bold') if k==key else ('Segoe UI',8))
 
     def _ed_load_from_kick(self, url, title=''):
-        """Called from Kick VOD browser — loads URL into Editor tab."""
+        """Called from the channel browser (any platform) — loads the URL into the Editor tab."""
         self._switch_nb('editor')
         self.after(100, lambda: self._ed_entry.delete(0, 'end'))
         self.after(100, lambda: self._ed_entry.insert(0, url))
@@ -14320,7 +14545,7 @@ Return ONLY the JSON array, no other text."""
         self.after(150, self._ed_load_source)
         if title:
             self.after(200, lambda: self._ed_status_lbl.config(
-                text=f'Loaded from Kick: {title}'))
+                text=f'Loaded: {title}'))
 
     def _build_studio_tab(self, p):
         # ── Top half: two panels side by side ────────────────────────────────
