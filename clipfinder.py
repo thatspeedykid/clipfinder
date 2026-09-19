@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.4.0.0"
+APP_VERSION = "1.4.0.1"
 
 import subprocess
 import sys
@@ -1032,6 +1032,16 @@ def eng_status(name):
     return dict(installed=ok, version=v[-1][0] if v else None, torch=tv[-1][0] if tv else None, path=str(root))
 
 
+def _um_module_cmd(py, module, dirs):
+    """argv prefix that runs `python -m <module>` with `dirs` importable.
+    The EMBEDDED Python (what the installer ships) has a python312._pth file, and with a ._pth file Python
+    IGNORES the PYTHONPATH variable - so an engine / plugin folder can only be reached by putting it on
+    sys.path from inside the interpreter (that is what broke the first Music Removal install)."""
+    boot = ('import sys, runpy; sys.path[:0] = %r; sys.argv[0] = %r; '
+            'runpy.run_module(%r, run_name="__main__", alter_sys=True)' % ([str(d) for d in dirs], module, module))
+    return list(py) + ['-c', boot]
+
+
 def eng_env(name):
     """Environment for running the engine in a subprocess: ONLY the engine's folder on the path."""
     env = dict(_um_os.environ)
@@ -1072,7 +1082,8 @@ def eng_install(name, on_line=None, cancel=None):
         return dict(ok=False, error={'cancelled': 'Cancelled', 'timeout': 'Timed out - try again on a faster connection.'}.get(state, _pm_explain(tail)))
     env = eng_env(name)
     env['PYTHONPATH'] = str(nxt)
-    r = _um_sp.run(py + ['-c', spec['verify'] + '; print("engine-ok")'], capture_output=True, text=True, env=env,
+    r = _um_sp.run(py + ['-c', 'import sys; sys.path[:0] = %r; ' % [str(nxt)] + spec['verify'] + '; print("engine-ok")'],
+                   capture_output=True, text=True, env=env,
                    timeout=240, creationflags=_UM_CNW)
     if 'engine-ok' not in (r.stdout or ''):
         err = ((r.stderr or '').strip().splitlines() or ['smoke test failed'])[-1][:300]
@@ -1103,7 +1114,7 @@ def eng_remove(name):
 def eng_run(name, args, on_line=None, cancel=None, timeout=6 * 3600, cwd=None):
     """Run `python -m <module> args` inside the engine. -> (returncode, output tail, state)."""
     py = pm_python()
-    return _um_run(py + ['-m', ENGINES[name]['module']] + list(args), name, on_line, timeout=timeout,
+    return _um_run(_um_module_cmd(py, ENGINES[name]['module'], [eng_root(name)]) + list(args), name, on_line, timeout=timeout,
                    cancel=cancel, env=eng_env(name), cwd=cwd)
 
 
@@ -13681,7 +13692,7 @@ Return ONLY the JSON array, no other text."""
             _ensure_pkgs_on_path()
 
         # Build gallery-dl command
-        cmd = [_sys_gdl.executable, '-m', 'gallery_dl',
+        cmd = _um_module_cmd([_sys_gdl.executable], 'gallery_dl', [PKGS_DIR]) + [
                '--dest', str(outdir),
                '--filename', '{username}_{id}.{extension}']
 

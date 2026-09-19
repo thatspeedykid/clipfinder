@@ -1,5 +1,10 @@
 # ClipFinder Changelog
 
+## v1.4.0.1 — September 2026
+
+### 🐛 Bug Fixes
+- **Music Removal engine install failed with `No module named 'demucs'`** on installer builds: the embedded Python has a `python312._pth` file, which makes Python ignore `PYTHONPATH`. The engine smoke test and runner now put the engine folder on `sys.path` from inside the interpreter (`_um_module_cmd`). Verified with the real embedded Python (real engine install + real separation run). Same fix for the gallery-dl Instagram fallback.
+
 ## v1.4.0.0 — September 2026 (the revamp)
 
 ### 🔄 Update system (rewritten)
