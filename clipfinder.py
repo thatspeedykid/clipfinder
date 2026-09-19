@@ -6,7 +6,7 @@ When running as EXE: the app launches immediately.
 Use Settings → Update Modules to install AI/transcription packages.
 """
 
-APP_VERSION = "1.3.9.0"
+APP_VERSION = "1.4.0.0"
 
 import subprocess
 import sys
@@ -10346,64 +10346,83 @@ Return ONLY the JSON array, no other text."""
                      ).pack(side='left', fill='x', expand=True, padx=(4,0))
 
 
-    def _get_vertical_vf(self, vid, _ignored=None):
-        """Get ffmpeg -vf filter for 9:16 crop, face-tracked if possible."""
-        try:
+    def _face_detector(self):
+        """(name, detect) for face tracking or None. detect(bgr_frame) -> [(center_x, area), ...] in frame pixels.
+        OpenCV 5 dropped the classic Haar CascadeClassifier, so the default is the small YuNet DNN
+        (FaceDetectorYN, 230 KB model downloaded once); Haar is used when an older OpenCV still has it."""
+        import cv2 as _cv
+        import numpy as _np
+        if hasattr(_cv, 'FaceDetectorYN'):
+            mp = USER_DIR / 'models' / 'face_detection_yunet_2023mar.onnx'
             try:
-                import mediapipe as _mp
-            except ImportError:
-                self.log('[9:16] Installing mediapipe...', FG2)
-                import subprocess as _submp, sys as _sysmp
-                _submp.run([_sysmp.executable, '-m', 'pip', 'install',
-                           'mediapipe', '--quiet', '--no-deps',
-                           '--break-system-packages'], capture_output=True)
-                _submp.run([_sysmp.executable, '-m', 'pip', 'install',
-                           'mediapipe', '--quiet',
-                           '--break-system-packages'], capture_output=True)
-                import mediapipe as _mp
+                if not mp.exists() or mp.stat().st_size < 100_000:
+                    mp.parent.mkdir(parents=True, exist_ok=True)
+                    self.log('[9:16] Downloading the face detector model (230 KB, one time)...', FG2)
+                    _um_download('https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/'
+                                 'face_detection_yunet_2023mar.onnx', mp, timeout=30)
+                buf = _np.frombuffer(mp.read_bytes(), _np.uint8)      # bytes, not a path: non-ASCII user folders
+                det = _cv.FaceDetectorYN.create('onnx', buf, _np.empty(0, _np.uint8), (320, 320), 0.7, 0.3, 5000)
+                def _detect(frame, det=det):
+                    det.setInputSize((frame.shape[1], frame.shape[0]))
+                    _n, faces = det.detect(frame)
+                    return [(float(f[0] + f[2] / 2), float(f[2] * f[3])) for f in (faces if faces is not None else [])]
+                return 'YuNet', _detect
+            except Exception as ex:
+                self.log(f'[9:16] YuNet unavailable ({str(ex)[:60]})', FG2)
+        if hasattr(_cv, 'CascadeClassifier'):
+            xml = Path(_cv.data.haarcascades) / 'haarcascade_frontalface_default.xml'
+            cas = _cv.CascadeClassifier(str(xml))
+            if not cas.empty():
+                def _detect(frame, cas=cas):
+                    gray = _cv.cvtColor(frame, _cv.COLOR_BGR2GRAY)
+                    faces = cas.detectMultiScale(gray, 1.1, 6, minSize=(max(24, int(frame.shape[1] * 0.04)),) * 2)
+                    return [(float(x + w / 2), float(w * h)) for x, y, w, h in faces]
+                return 'Haar', _detect
+        return None
+
+    def _get_vertical_vf(self, vid, _ignored=None):
+        """ffmpeg -vf for a 9:16 crop, following the speaker's face when OpenCV is installed (no package is
+        ever installed here: the old code ran an unpinned `pip install mediapipe` on the export thread, and
+        mediapipe's legacy API no longer exists)."""
+        try:
             _ensure_pkgs_on_path()
             import cv2 as _cv
-            # Sample frames to find average face X position
+            fd = self._face_detector()
+            if fd is None:
+                raise RuntimeError('no face detector available in this OpenCV build')
             cap = _cv.VideoCapture(vid)
             if not cap.isOpened():
-                raise Exception("Cannot open video")
-            total = int(cap.get(_cv.CAP_PROP_FRAME_COUNT)) or 1
-            fps   = cap.get(_cv.CAP_PROP_FPS) or 30
-            w     = int(cap.get(_cv.CAP_PROP_FRAME_WIDTH))
-            h     = int(cap.get(_cv.CAP_PROP_FRAME_HEIGHT))
-            # mediapipe 0.10+ changed API — try both
+                raise RuntimeError('cannot open video')
             try:
-                face_det = _mp.solutions.face_detection.FaceDetection(
-                    model_selection=0, min_detection_confidence=0.5)
-            except AttributeError:
-                raise ImportError("mediapipe solutions API not available in this version")
-            # Sample every ~5 seconds
-            sample_frames = range(0, total, max(1, int(fps * 5)))
-            x_positions = []
-            for fi in list(sample_frames)[:30]:
-                cap.set(_cv.CAP_PROP_POS_FRAMES, fi)
-                ret, frame = cap.read()
-                if not ret: continue
-                rgb = _cv.cvtColor(frame, _cv.COLOR_BGR2RGB)
-                res = face_det.process(rgb)
-                if res.detections:
-                    # Use the first/largest face center X
-                    bb = res.detections[0].location_data.relative_bounding_box
-                    cx = (bb.xmin + bb.width / 2) * w
-                    x_positions.append(int(cx))
-            cap.release()
-            face_det.close()
+                total = int(cap.get(_cv.CAP_PROP_FRAME_COUNT)) or 1
+                fps   = cap.get(_cv.CAP_PROP_FPS) or 30
+                w     = int(cap.get(_cv.CAP_PROP_FRAME_WIDTH))
+                h     = int(cap.get(_cv.CAP_PROP_FRAME_HEIGHT))
+                sc = 640.0 / w if w > 640 else 1.0
+                x_positions = []
+                for fi in list(range(0, total, max(1, int(fps * 5))))[:30]:     # a frame every ~5 s
+                    cap.set(_cv.CAP_PROP_POS_FRAMES, fi)
+                    ret, frame = cap.read()
+                    if not ret:
+                        continue
+                    small = _cv.resize(frame, (int(w * sc), int(h * sc))) if sc != 1.0 else frame
+                    faces = fd[1](small)
+                    if faces:
+                        x_positions.append(int(max(faces, key=lambda f: f[1])[0] / sc))   # the largest face
+            finally:
+                cap.release()
             if x_positions:
-                avg_x = int(sum(x_positions) / len(x_positions))
+                x_positions.sort()
+                mid_x = x_positions[len(x_positions) // 2]        # median: one wrong detection cannot drag the crop
                 crop_w = int(h * 9 / 16)
-                # Clamp so crop stays in frame
-                x_off = max(0, min(avg_x - crop_w // 2, w - crop_w))
-                self.log(f'[9:16] Face-tracked crop: center at x={avg_x}, offset={x_off}', FG2)
+                x_off = max(0, min(mid_x - crop_w // 2, w - crop_w))
+                self.log(f'[9:16] Face-tracked crop ({fd[0]}): center at x={mid_x}, offset={x_off}', FG2)
                 return ['-vf', f'crop={crop_w}:{h}:{x_off}:0,scale=1080:1920']
+            self.log('[9:16] No face found - center crop', FG2)
         except ImportError:
-            self.log('[9:16] mediapipe not ready — using center crop', FG2)
+            self.log('[9:16] OpenCV not installed - center crop', FG2)
         except Exception as ex:
-            self.log(f'[9:16] Face track failed ({ex}) — center crop', FG2)
+            self.log(f'[9:16] Face track failed ({ex}) - center crop', FG2)
         # Fallback: center crop
         return ['-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920']
 
