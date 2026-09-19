@@ -10876,13 +10876,20 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                         (None, 'best'),
                     ]
             if not (is_youtube and quality != 'audio' and info) and not (is_kick and _kick_direct_ok):
-              for _clients, _fmt in client_attempts:
+              for _ci, (_clients, _fmt) in enumerate(client_attempts):
                 try:
                     _opts = dict(ydl_opts)
                     _opts['format'] = _fmt
                     # YouTube with cookiefile causes issues — browser cookies via cookiesfrombrowser is fine
                     if is_youtube and has_cookies and not has_browser:
                         _opts.pop('cookiefile', None)
+                    # Twitch: public VODs download anonymously. A stale or foreign
+                    # auth-token in cookies.txt makes Twitch's GQL metadata API return
+                    # HTTP 401. Try anonymous first; only fall back to cookies (needed
+                    # for subscriber-only VODs) on the later attempt.
+                    if is_twitch and _ci == 0:
+                        _opts.pop('cookiefile', None)
+                        _opts.pop('cookiesfrombrowser', None)
                     if _clients and is_youtube:
                         _opts['extractor_args'] = {'youtube': {
                             'player_client': _clients,
@@ -10936,6 +10943,15 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                             'Or export a cookies.txt file manually using "Get cookies.txt LOCALLY" extension.')
                     continue
             if not info:
+                if is_twitch and last_err and ('401' in str(last_err) or 'unauthorized' in str(last_err).lower()):
+                    raise Exception(
+                        'Twitch VOD download failed (HTTP 401 Unauthorized).\n\n'
+                        'Most common cause: your cookies.txt has an expired Twitch login, which\n'
+                        'Twitch rejects. Public VODs need NO login.\n\n'
+                        'Fix:\n'
+                        '1. Clear the cookies.txt path in Downloader settings (public VODs work without it), OR\n'
+                        '2. Export fresh cookies from a logged-in twitch.tv (for subscriber-only VODs).\n'
+                        '3. If it still fails, update yt-dlp via Settings → Update All Packages.')
                 raise last_err or Exception('All download attempts failed')
 
             # Post-download processing
