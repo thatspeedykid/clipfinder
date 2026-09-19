@@ -1744,6 +1744,32 @@ def yt_js_runtime_opts(status_cb=None, download=True):
     return {'js_runtimes': {'node': {'path': exe}}}
 
 
+# ── Windows DPI awareness ─────────────────────────────────────────────────────
+# Must run BEFORE the first Tk root exists (the setup / update splash windows in the __main__ block
+# create roots before App does). Without it Windows bitmap-stretches the whole UI on 125%/150%
+# displays and every glyph is blurry. Per-monitor v1 (shcore level 2) like a manifest would give us.
+def _enable_dpi_awareness():
+    if sys.platform != 'win32':
+        return 'unsupported'
+    try:
+        import ctypes
+        try:
+            _hr = ctypes.windll.shcore.SetProcessDpiAwareness(2)      # PROCESS_PER_MONITOR_DPI_AWARE
+            if (_hr & 0xFFFFFFFF) in (0, 0x80070005):                  # S_OK / E_ACCESSDENIED (already set)
+                return 'per_monitor'
+        except (AttributeError, OSError):
+            pass
+        try:
+            if ctypes.windll.user32.SetProcessDPIAware():              # Vista..8.0 fallback (system aware)
+                return 'system'
+        except (AttributeError, OSError):
+            pass
+    except Exception:
+        pass
+    return 'unaware'
+
+_DPI_MODE = _enable_dpi_awareness()
+
 # ── Now safe to import everything ─────────────────────────────────────────────
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -1754,26 +1780,320 @@ import warnings
 import traceback
 from pathlib import Path
 
-# ── Theme (matches ClipBait) ──────────────────────────────────────────────────
-BG      = '#08080A'
-BG2     = '#0F0F12'
-BG3     = '#161619'
-BG4     = '#1E1E22'
-ACCENT  = '#FF6B1A'
-ACCENT2 = '#FFB020'
-FG      = '#F2EFE9'
-FG2     = '#A6A099'   # secondary text — raised for readable contrast on near-black bg
-FG3     = '#7E7A73'   # tertiary / faint hints (below FG2 in the hierarchy)
-BORDER  = '#28282C'
-GREEN   = '#2ECC71'
-RED     = '#E74C3C'
+# ── Theme v2 ──────────────────────────────────────────────────────────────────
+# Dark surfaces + one accent. Text colours were checked against WCAG 2.x AA: FG / FG2 / FG3 all reach
+# >= 4.5:1 on BG, BG2 and BG3 (FG3 used to fail on BG2/BG3). The accent is selectable (Settings ->
+# Appearance, stored as cfg['theme_accent']); it is read here, BEFORE any widget exists, so every
+# `fg=ACCENT` / `bg=ACCENT` in the app picks it up. A change therefore needs a restart.
+BG      = '#09090B'
+BG2     = '#111115'
+BG3     = '#1A1A1F'
+BG4     = '#25252B'
+FG      = '#F4F1EB'
+FG2     = '#ADA8A0'   # secondary text
+FG3     = '#918D85'   # tertiary / faint hints (still >= 4.5:1 on BG..BG4)
+BORDER  = '#34343B'
+GREEN   = '#34D17A'
+RED     = '#F45B4D'
 YELLOW  = '#F1C40F'
+
+# name -> (ACCENT, ACCENT2). Every accent is bright enough to be read as text on BG..BG3 (>= 4.5:1) AND to
+# carry the app's hard-coded black button text (>= 4.5:1), so `fg=ACCENT` and `bg=ACCENT, fg='#000'` both stay legal.
+ACCENT_PRESETS = {
+    'Ember':  ('#FF6B1A', '#FFB020'),
+    'Ocean':  ('#3D9BFF', '#7DD3FC'),
+    'Violet': ('#A47BFF', '#D0BAFF'),
+    'Mint':   ('#2EE6A6', '#A7F3D0'),
+}
+THEME_ACCENT = 'Ember'
+try:
+    _tv = json.loads((USER_DIR / 'clipfinder_config.json').read_text(encoding='utf-8')).get('theme_accent', 'Ember')
+    if _tv in ACCENT_PRESETS:
+        THEME_ACCENT = _tv
+except Exception:
+    pass
+ACCENT, ACCENT2 = ACCENT_PRESETS[THEME_ACCENT]
+
+
+def _mix_hex(a, b, t):
+    """Blend colour a toward colour b by t (0..1); '#RRGGBB' in and out."""
+    ca = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    cb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return '#%02X%02X%02X' % tuple(int(round(ca[i] + (cb[i] - ca[i]) * t)) for i in range(3))
+
+
+# Derived tokens (used by the polish helpers below; new code may use them too)
+ACCENT_HOVER  = _mix_hex(ACCENT, '#FFFFFF', 0.18)   # hover fill of an accent button (black text stays >= 4.5:1)
+FOCUS         = ACCENT                              # keyboard-focus ring (>= 3:1 on BG..BG3)
+SELECTION     = _mix_hex(BG3, ACCENT, 0.38)         # text selection fill (FG on it >= 4.5:1)
+SURFACE_HOVER = _mix_hex(BG3, FG, 0.08)             # hover fill for controls on BG3/BG4
+BORDER_STRONG = _mix_hex(BORDER, FG, 0.18)          # hover border / separators that must read
 
 FONT_H2     = ('Segoe UI', 11, 'bold')
 FONT_LABEL  = ('Segoe UI', 10)
 FONT_SMALL  = ('Segoe UI', 9)
 FONT_MONO   = ('Consolas', 10)
 FONT_MONO_S = ('Consolas', 9)
+
+
+# ── Theme v2 helpers: DPI scaling, dark title bar, hover/focus polish, ttk styles ──────────────────
+_UI_SCALE = 1.0      # 1.0 = 100%, 1.25 = 125%, ... (set by _apply_ui_scaling once the root exists)
+
+
+def _ui_px(n):
+    """Scale a hard-coded pixel size (geometry, fixed panel width, bar height) by the display scale.
+    Tk scales point-sized fonts by itself once the process is DPI aware, but never pixel sizes."""
+    return int(round(n * _UI_SCALE))
+
+
+def _apply_ui_scaling(root):
+    """Set Tk's point->pixel factor from the DPI of the window's monitor and remember the pixel scale.
+    CLIPFINDER_UI_SCALE (e.g. 1.5) overrides the detected DPI - only meant for layout testing."""
+    global _UI_SCALE
+    dpi = 0.0
+    try:
+        _ov = os.environ.get('CLIPFINDER_UI_SCALE')
+        if _ov:
+            dpi = 96.0 * float(_ov)
+    except ValueError:
+        dpi = 0.0
+    if not dpi and sys.platform == 'win32' and _DPI_MODE != 'unaware':
+        try:
+            import ctypes
+            _f = ctypes.WinDLL('user32').GetDpiForWindow          # Win10 1607+; raises AttributeError before
+            _f.argtypes = [ctypes.c_void_p]
+            _f.restype = ctypes.c_uint
+            dpi = float(_f(root.winfo_id()) or 0)
+        except Exception:
+            dpi = 0.0
+    if not dpi:
+        try:
+            dpi = float(root.winfo_fpixels('1i'))
+        except Exception:
+            dpi = 96.0
+    dpi = max(96.0, min(dpi, 384.0))
+    try:
+        root.tk.call('tk', 'scaling', dpi / 72.0)
+    except tk.TclError:
+        pass
+    _UI_SCALE = dpi / 96.0
+    return _UI_SCALE
+
+
+def _colorref(hexcolor):
+    h = hexcolor.lstrip('#')
+    return (int(h[4:6], 16) << 16) | (int(h[2:4], 16) << 8) | int(h[0:2], 16)     # 0x00BBGGRR
+
+
+def _style_titlebar(win):
+    """Dark title bar on Windows 10 2004+ / 11 and, on Windows 11, a caption / text / border colour taken
+    from the palette. Call once the window is mapped. Never raises; a no-op on other platforms."""
+    if sys.platform != 'win32':
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = 0
+        try:
+            hwnd = int(win.wm_frame(), 16)                    # decorated top-level HWND
+        except Exception:
+            pass
+        if not hwnd:
+            hwnd = ctypes.WinDLL('user32').GetParent(win.winfo_id())
+        if not hwnd:
+            return False
+        fn = ctypes.WinDLL('dwmapi').DwmSetWindowAttribute
+        fn.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        fn.restype = ctypes.c_long
+
+        def _put(attr, value):
+            v = ctypes.c_uint32(value & 0xFFFFFFFF)
+            try:
+                return fn(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v)) == 0
+            except Exception:
+                return False
+
+        ok = _put(20, 1) or _put(19, 1)                       # IMMERSIVE_DARK_MODE (19 = pre-2004 id)
+        if sys.getwindowsversion().build >= 22000:            # colour attributes exist on Windows 11 only
+            ok = _put(35, _colorref(BG2)) or ok               # DWMWA_CAPTION_COLOR
+            _put(36, _colorref(FG))                           # DWMWA_TEXT_COLOR
+            _put(34, _colorref(BORDER))                       # DWMWA_BORDER_COLOR
+        if ok:                                                # SWP_NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
+            _sp = ctypes.WinDLL('user32').SetWindowPos
+            _sp.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            _sp(hwnd, None, 0, 0, 0, 0, 0x37)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def _install_titlebar_styling(app):
+    """Dark title bar for the main window (once it is mapped) and for every Toplevel dialog (when it maps)."""
+    if sys.platform != 'win32':
+        return
+    def _main_map(e):
+        if e.widget is app and not getattr(app, '_cf_tb_done', False):
+            app._cf_tb_done = True
+            _style_titlebar(app)
+    def _top_map(e):
+        w = e.widget
+        try:
+            if getattr(w, '_cf_tb_done', False) or w.overrideredirect():
+                return
+            w._cf_tb_done = True
+            _style_titlebar(w)
+        except Exception:
+            pass
+    app.bind('<Map>', _main_map, add='+')
+    app.bind_class('Toplevel', '<Map>', _top_map, add='+')
+
+
+# Hover feedback: Tk buttons on Windows have no hover state (activebackground is only shown while the mouse
+# button is held), so the whole UI felt dead. One class-level binding covers every flat button, present and
+# future, whose colours come from the palette; buttons that recolour themselves are left alone (we only undo
+# what we did, and only if the colour is still the one we set).
+_HOVER_BGS = frozenset(c.lower() for c in (BG, BG2, BG3, BG4, BORDER, ACCENT, ACCENT2, GREEN, RED, YELLOW))
+
+
+def _btn_hover_in(e):
+    w = e.widget
+    try:
+        if str(w.cget('state')) == 'disabled' or str(w.cget('relief')) != 'flat' or getattr(w, '_cf_nohover', False):
+            return
+        bg = str(w.cget('bg'))
+        if bg.lower() not in _HOVER_BGS:
+            return
+        st = w.__dict__.get('_cf_hv')
+        if st and bg.lower() == st['hb'].lower():             # Leave never arrived: keep the real originals
+            bg0, fg0, ab0, af0 = st['orig']
+        else:
+            bg0, fg0 = bg, str(w.cget('fg'))
+            ab0, af0 = str(w.cget('activebackground')), str(w.cget('activeforeground'))
+        low = bg0.lower()
+        if low == ACCENT.lower():
+            hb, pb = ACCENT_HOVER, _mix_hex(ACCENT, '#000000', 0.18)
+        elif low in (ACCENT2.lower(), GREEN.lower(), RED.lower(), YELLOW.lower()):
+            hb, pb = _mix_hex(bg0, '#FFFFFF', 0.16), _mix_hex(bg0, '#000000', 0.16)
+        else:
+            hb, pb = _mix_hex(bg0, FG, 0.09), _mix_hex(bg0, FG, 0.17)
+        hf = FG if fg0.lower() in (FG2.lower(), FG3.lower()) else fg0
+        dab = str(w.configure('activebackground')[3]).lower()
+        if ab0.lower() not in (dab, low):                     # the app picked its own active colours: honour them
+            hb = pb = ab0
+            if str(w.configure('activeforeground')[3]).lower() != af0.lower():
+                hf = af0
+        w.configure(bg=hb, fg=hf, activebackground=pb, activeforeground=hf)
+        w.__dict__['_cf_hv'] = {'orig': (bg0, fg0, ab0, af0), 'hb': hb, 'hf': hf, 'pb': pb}
+    except (tk.TclError, IndexError):
+        pass
+
+
+def _btn_hover_out(e):
+    w = e.widget
+    st = w.__dict__.pop('_cf_hv', None)
+    if not st:
+        return
+    try:
+        bg0, fg0, ab0, af0 = st['orig']
+        if str(w.cget('bg')).lower() == st['hb'].lower():     # untouched since Enter -> undo our change
+            w.configure(bg=bg0)
+            if str(w.cget('fg')).lower() == st['hf'].lower():
+                w.configure(fg=fg0)
+        # else: the app restyled the button while it was hovered (tab switch, toggle...): its colours win
+        if str(w.cget('activebackground')).lower() == st['pb'].lower():
+            w.configure(activebackground=ab0)
+        if str(w.cget('activeforeground')).lower() == st['hf'].lower():
+            w.configure(activeforeground=af0)
+    except tk.TclError:
+        pass
+
+
+def _install_button_hover(root):
+    root.bind_class('Button', '<Enter>', _btn_hover_in, add='+')
+    root.bind_class('Button', '<Leave>', _btn_hover_out, add='+')
+
+
+def _apply_widget_defaults(root):
+    """Option-database defaults, applied BEFORE any widget exists (explicit widget options still win):
+    a focus ring on Entry/Text/Spinbox/Listbox/Button (BORDER idle, FOCUS when focused), palette selection
+    colours instead of Windows blue, and themed popup menus."""
+    o = root.option_add
+    for cls in ('Entry', 'Text', 'Spinbox', 'Listbox'):
+        o(f'*{cls}.highlightThickness', 1)
+        o(f'*{cls}.highlightBackground', BORDER)
+        o(f'*{cls}.highlightColor', FOCUS)
+        o(f'*{cls}.selectBackground', SELECTION)
+        o(f'*{cls}.selectForeground', FG)
+        o(f'*{cls}.background', BG3)                # safety net: an input that forgets bg/fg stays dark, not system white
+        o(f'*{cls}.foreground', FG)
+    o('*Text.inactiveSelectBackground', _mix_hex(BG3, ACCENT, 0.22))
+    o('*Spinbox.buttonBackground', BG4)
+    # Buttons already reserve a 1px highlight ring (invisible while idle); only its colour when focused is set,
+    # so Tab-key focus becomes visible without changing any button's size.
+    for cls in ('Button', 'Checkbutton', 'Radiobutton'):
+        o(f'*{cls}.highlightColor', FOCUS)
+    for pat, val in (('*Menu.background', BG3), ('*Menu.foreground', FG), ('*Menu.activeBackground', ACCENT),
+                     ('*Menu.activeForeground', '#000000'), ('*Menu.relief', 'flat'),
+                     ('*Menu.disabledForeground', FG3), ('*Menu.selectColor', ACCENT)):
+        o(pat, val)
+
+
+def _apply_ttk_styles(root):
+    """(Re)configure the ttk styles from the palette. ttk is only used by a couple of progress bars today,
+    but anything added later (Combobox, Scrollbar, Checkbutton, ...) then matches. 'clam' is the only stock
+    engine that honours colour options. The Combobox drop-down is a plain Listbox, hence the option DB."""
+    style = ttk.Style(root)
+    try:
+        style.theme_use('clam')
+    except tk.TclError:
+        pass
+    F, FB = ('Segoe UI', 9), ('Segoe UI', 9, 'bold')
+    style.configure('.', background=BG2, foreground=FG, fieldbackground=BG3, bordercolor=BORDER,
+                    darkcolor=BG3, lightcolor=BG3, troughcolor=BG3, focuscolor=FOCUS,
+                    selectbackground=SELECTION, selectforeground=FG, insertcolor=FG, font=F)
+    style.map('.', foreground=[('disabled', FG3)])
+    style.configure('TButton', background=BG4, foreground=FG, bordercolor=BORDER, lightcolor=BG4, darkcolor=BG4,
+                    padding=(_ui_px(12), _ui_px(6)), relief='flat')
+    style.map('TButton', background=[('pressed', _mix_hex(BG4, FG, 0.17)), ('active', SURFACE_HOVER)],
+              lightcolor=[('active', SURFACE_HOVER)], darkcolor=[('active', SURFACE_HOVER)],
+              bordercolor=[('focus', FOCUS), ('active', BORDER_STRONG)])
+    for s in ('TEntry', 'TCombobox', 'TSpinbox'):
+        style.configure(s, fieldbackground=BG3, foreground=FG, insertcolor=FG, bordercolor=BORDER,
+                        lightcolor=BG3, darkcolor=BG3, padding=(_ui_px(6), _ui_px(4)),
+                        selectbackground=SELECTION, selectforeground=FG)
+        style.map(s, bordercolor=[('focus', FOCUS), ('hover', BORDER_STRONG)],
+                  lightcolor=[('focus', FOCUS)], darkcolor=[('focus', FOCUS)],
+                  fieldbackground=[('disabled', BG2), ('readonly', BG3)],
+                  foreground=[('disabled', FG3), ('readonly', FG)])
+    style.configure('TCombobox', background=BG4, arrowcolor=FG2, borderwidth=1, arrowsize=_ui_px(14))
+    style.map('TCombobox', background=[('active', SURFACE_HOVER), ('pressed', BORDER_STRONG), ('readonly', BG4)],
+              arrowcolor=[('hover', FG), ('disabled', FG3)])
+    for pat, val in (('*TCombobox*Listbox.background', BG3), ('*TCombobox*Listbox.foreground', FG),
+                     ('*TCombobox*Listbox.selectBackground', SELECTION), ('*TCombobox*Listbox.selectForeground', FG),
+                     ('*TCombobox*Listbox.font', F), ('*TCombobox*Listbox.borderWidth', 0),
+                     ('*TCombobox*Listbox.highlightThickness', 0)):
+        root.option_add(pat, val)
+    for orient in ('Vertical', 'Horizontal'):
+        name = f'{orient}.TScrollbar'
+        style.configure(name, background=BG4, troughcolor=BG2, bordercolor=BG2, lightcolor=BG4, darkcolor=BG4,
+                        arrowcolor=FG2, relief='flat', borderwidth=0, arrowsize=_ui_px(12))
+        style.map(name, background=[('pressed', ACCENT), ('active', BORDER_STRONG)],
+                  lightcolor=[('pressed', ACCENT), ('active', BORDER_STRONG)],
+                  darkcolor=[('pressed', ACCENT), ('active', BORDER_STRONG)])
+        style.configure(f'{orient}.TProgressbar', troughcolor=BG3, background=ACCENT, bordercolor=BG3,
+                        lightcolor=ACCENT, darkcolor=ACCENT, thickness=_ui_px(8), borderwidth=0)
+    for kind in ('Checkbutton', 'Radiobutton'):
+        s = f'T{kind}'
+        style.configure(s, background=BG2, foreground=FG, focuscolor=BG2, indicatorbackground=BG3,
+                        indicatorforeground='#000000', upperbordercolor=BORDER_STRONG, lowerbordercolor=BORDER_STRONG)
+        style.map(s, background=[('active', BG2)], foreground=[('disabled', FG3)],
+                  indicatorbackground=[('selected', ACCENT), ('active', SURFACE_HOVER), ('disabled', BG2)],
+                  upperbordercolor=[('selected', ACCENT), ('focus', FOCUS)],
+                  lowerbordercolor=[('selected', ACCENT), ('focus', FOCUS)])
+    style.configure('Horizontal.TScale', background=ACCENT, troughcolor=BG4, bordercolor=BG4,
+                    lightcolor=BG4, darkcolor=BG4, borderwidth=0)
+    return style
+
 
 # ── AI Providers ──────────────────────────────────────────────────────────────
 PROVIDERS = {
@@ -2290,7 +2610,7 @@ def _bind_mousewheel(widget, canvas):
 
 def _make_scrollbar(parent, canvas, orient='vertical'):
     """Create a custom canvas-drawn scrollbar. Returns None (wires directly to canvas)."""
-    SB_W = 12
+    SB_W = _ui_px(12)
     frame = tk.Frame(parent, bg=BG2, width=SB_W)
     frame.pack(side='right' if orient == 'vertical' else 'bottom',
                fill='y' if orient == 'vertical' else 'x')
@@ -2378,8 +2698,8 @@ def save_cfg(d):
 def attach_rightclick(widget, root):
     """Attach a right-click context menu to any widget based on its type."""
     def show_menu(e):
-        menu = tk.Menu(root, tearoff=0, bg='#1A1A1D', fg='#F0EDE8',
-                       activebackground='#E8651A', activeforeground='#000',
+        menu = tk.Menu(root, tearoff=0, bg=BG3, fg=FG,
+                       activebackground=ACCENT, activeforeground='#000',
                        font=('Segoe UI', 9), relief='flat', bd=1)
         wtype = type(widget).__name__
 
@@ -4581,8 +4901,11 @@ def ps_key_pool(keys, extra_keys, extra_enabled):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        _apply_ui_scaling(self)          # DPI: point fonts scale via `tk scaling`, pixel sizes via _ui_px()
         self.title(f'ClipFinder {APP_VERSION} — AI Clip Extractor')
-        self.geometry('1200x860')
+        # Default size 1200x860 at 100%, scaled with the display but never larger than the screen
+        _sw, _sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f'{min(_ui_px(1200), _sw - _ui_px(40))}x{min(_ui_px(860), _sh - _ui_px(90))}')
         # Load previously decommissioned models so we never retry them
         _load_dead_models()
         # Restore Groq TPD state if it hasn't expired yet
@@ -4627,8 +4950,9 @@ class App(tk.Tk):
                     break
         except Exception:
             pass
-        self.minsize(1000, 750)
+        self.minsize(min(_ui_px(1000), _sw - _ui_px(40)), min(_ui_px(750), _sh - _ui_px(90)))
         self.configure(bg=BG)
+        _install_titlebar_styling(self)  # dark caption + border, applied when the window is first mapped
 
         self.cfg = load_cfg()
         global _LIVE_CFG
@@ -4757,6 +5081,9 @@ class App(tk.Tk):
         self.option_add('*Scrollbar.width',             '7')
         self.option_add('*Scrollbar.elementBorderWidth','0')
         self.option_add('*Scrollbar.arrowColor',        BG3)
+        _apply_widget_defaults(self)     # focus rings, selection colours, popup menus (before any widget exists)
+        _apply_ttk_styles(self)          # ttk Combobox / Scrollbar / Progressbar / Checkbutton / ... in the palette
+        _install_button_hover(self)      # hover feedback for every flat palette-coloured tk.Button
         self._build()
         self._refresh_provider()
         self.after(1500, self._refresh_prov_btns)
@@ -4847,13 +5174,13 @@ class App(tk.Tk):
         self.configure(bg=BG)
 
         # ── Header bar ────────────────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=BG2, height=48)
+        hdr = tk.Frame(self, bg=BG2, height=_ui_px(54))
         hdr.pack(fill='x')
         hdr.pack_propagate(False)
-        # Orange left accent stripe
-        tk.Frame(hdr, bg=ACCENT, width=4).pack(side='left', fill='y')
+        # Accent stripe on the left edge
+        tk.Frame(hdr, bg=ACCENT, width=_ui_px(4)).pack(side='left', fill='y')
         # Logo + icon
-        logo_f = tk.Frame(hdr, bg=BG2); logo_f.pack(side='left', padx=(14, 6))
+        logo_f = tk.Frame(hdr, bg=BG2); logo_f.pack(side='left', padx=(_ui_px(14), _ui_px(6)))
         # App icon left of text — load from PNG for sharpness, fallback to ICO
         try:
             from PIL import Image as _PI3, ImageTk as _PT3
@@ -4866,7 +5193,7 @@ class App(tk.Tk):
                 if _ip.exists():
                     _hdr_img = _PI3.open(str(_ip)).convert('RGBA')
                     # Downscale from large source for crisp result
-                    _hdr_frame = _hdr_img.resize((40, 40), _PI3.LANCZOS)
+                    _hdr_frame = _hdr_img.resize((_ui_px(40), _ui_px(40)), _PI3.LANCZOS)
                     break
             if _hdr_frame:
                 self._hdr_icon = _PT3.PhotoImage(_hdr_frame)
@@ -4877,22 +5204,22 @@ class App(tk.Tk):
         tk.Label(logo_f, text='FINDER', font=('Segoe UI', 17, 'bold'),
                  fg=FG, bg=BG2).pack(side='left')
         tk.Label(hdr, text='AI Drama Clip Extractor',
-                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(side='left', padx=4)
+                 font=('Segoe UI', 8), fg=FG2, bg=BG2).pack(side='left', padx=_ui_px(8))
         # Right side: GPU badge + channel tag
         _ms_lbl = tk.Label(hdr, text='@MarsScumbags', font=('Segoe UI', 8, 'bold'),
                  fg=ACCENT2, bg=BG2, cursor='hand2')
-        _ms_lbl.pack(side='right', padx=(4,12))
+        _ms_lbl.pack(side='right', padx=(_ui_px(6), _ui_px(14)))
         _ms_lbl.bind('<Button-1>', lambda e: __import__('webbrowser').open('https://x.com/MarsScumbags'))
-        tk.Label(hdr, text=f'v{APP_VERSION}', font=('Segoe UI', 7),
-                fg=FG3, bg=BG2).pack(side='right', padx=(0,2))
+        tk.Label(hdr, text=f'v{APP_VERSION}', font=('Segoe UI', 8),
+                fg=FG3, bg=BG2).pack(side='right', padx=(0, _ui_px(4)))
         self._gpu_badge = tk.Label(hdr, text='⚡ GPU', font=('Segoe UI', 7, 'bold'),
                  fg='#000', bg=ACCENT, padx=6, pady=1)
-        self._gpu_badge.pack(side='right', padx=(0,6))
-        tk.Frame(self, bg=ACCENT, height=2).pack(fill='x')  # orange line under header
+        self._gpu_badge.pack(side='right', padx=(0, _ui_px(8)))
+        tk.Frame(self, bg=BORDER, height=1).pack(fill='x')  # hairline under the header
 
         # ── Bottom status bar (packed BEFORE body so it always shows) ───────
         tk.Frame(self, bg=BORDER, height=1).pack(side='bottom', fill='x')
-        bot = tk.Frame(self, bg=BG2, height=30)
+        bot = tk.Frame(self, bg=BG2, height=_ui_px(32))
         bot.pack(side='bottom', fill='x')
         bot.pack_propagate(False)
 
@@ -4928,7 +5255,7 @@ class App(tk.Tk):
         sb.pack(fill='x')
 
         # Custom canvas progress bar — full visual control, no ttk theming issues
-        _pb_h = 10
+        _pb_h = _ui_px(8)
         pbar_wrap = tk.Frame(sb, bg=BG3, height=_pb_h)
         pbar_wrap.pack(fill='x')
         pbar_wrap.pack_propagate(False)
@@ -5022,10 +5349,12 @@ class App(tk.Tk):
         tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
 
         # ── Tab bar ───────────────────────────────────────────────────────────
-        nb_bar = tk.Frame(p, bg=BG)
+        nb_bar = tk.Frame(p, bg=BG2)
         nb_bar.pack(fill='x')
         self.nb_frames = {}
-        self.nb_btns   = {}
+        self.nb_btns   = {}      # key -> tk.Button (unchanged API); each sits in a cell with an accent underline
+        self._nb_cells = {}
+        self._nb_inds  = {}
 
         TABS = [
             ('clips',       '✂',  'Clip Finder'),
@@ -5039,13 +5368,24 @@ class App(tk.Tk):
             ('music',       '🎵', 'Music Removal'),
         ]
         for key, icon, label in TABS:
-            b = tk.Button(nb_bar, text=f'{icon}  {label}', font=('Segoe UI', 9),
+            cell = tk.Frame(nb_bar, bg=BG2)
+            cell.pack(side='left', fill='x', expand=True)
+            b = tk.Button(cell, text=f'{icon}  {label}', font=('Segoe UI', 9),
                           relief='flat', bd=0, cursor='hand2',
-                          padx=16, pady=8, bg=BG2, fg=FG2,
+                          padx=_ui_px(16), pady=_ui_px(8), bg=BG2, fg=FG2,
                           activebackground=BG3, activeforeground=FG,
                           command=lambda k=key: self._switch_nb(k))
-            b.pack(side='left', fill='x', expand=True)
+            b.pack(fill='x')
+            ind = tk.Frame(cell, bg=BG2, height=_ui_px(3))     # accent underline of the active tab
+            ind.pack(fill='x', padx=_ui_px(10))
+            ind.pack_propagate(False)
+            # inactive tabs show a faint underline on hover (hover colours of the button itself: _install_button_hover)
+            b.bind('<Enter>', lambda e, k=key: self._nb_hover(k, True), add='+')
+            b.bind('<Leave>', lambda e, k=key: self._nb_hover(k, False), add='+')
             self.nb_btns[key] = b
+            self._nb_cells[key] = cell
+            self._nb_inds[key] = ind
+        self._nb_active = None
 
         tk.Frame(p, bg=BORDER, height=1).pack(fill='x')
 
@@ -5140,7 +5480,7 @@ class App(tk.Tk):
         self.update_idletasks()
         mx = self.winfo_x() + self.winfo_width()  // 2
         my = self.winfo_y() + self.winfo_height() // 2
-        W, H = 520, 420
+        W, H = _ui_px(520), _ui_px(420)
         ov.geometry(f'{W}x{H}+{mx - W//2}+{my - H//2}')
 
         # Set same icon
@@ -5218,6 +5558,12 @@ class App(tk.Tk):
                  font=('Segoe UI', 7), fg=FG3, bg=BG).pack(side='right')
 
         ov.protocol('WM_DELETE_WINDOW', ov.destroy)
+        try:                       # never clip: grow to the content's real size if the scaled fonts need more room
+            ov.update_idletasks()
+            W, H = max(W, ov.winfo_reqwidth()), max(H, ov.winfo_reqheight())
+            ov.geometry(f'{W}x{H}+{mx - W//2}+{my - H//2}')
+        except tk.TclError:
+            pass
 
 
     def _toggle_log(self):
@@ -5239,9 +5585,9 @@ class App(tk.Tk):
                 y = self.winfo_rooty()
                 w = self.winfo_width()
                 h = self.winfo_height()
-                lh = 200
+                lh = _ui_px(200)
                 # Full width flush with main window, sits just above status bar
-                self._log_win.geometry(f'{w}x{lh}+{x}+{y+h-lh-30}')
+                self._log_win.geometry(f'{w}x{lh}+{x}+{y+h-lh-_ui_px(32)}')
             except: pass
         # Log text
         inner = tk.Frame(self._log_win, bg=BG3)
@@ -5292,6 +5638,27 @@ class App(tk.Tk):
         _reposition()
         self.bind('<Configure>', _reposition)
 
+    def _nb_style(self, key):
+        """Main tab bar look: the active tab is FG text on the content colour with an ACCENT underline, the others
+        FG2 on the bar colour. (Settings has no tab button: then every tab shows as inactive.)"""
+        self._nb_active = key
+        for k, b in self.nb_btns.items():
+            act = (k == key)
+            bg = BG if act else BG2
+            b._cf_nohover = act                   # the active tab keeps its colour under the mouse
+            b.config(bg=bg, fg=FG if act else FG2, font=('Segoe UI', 9, 'bold') if act else ('Segoe UI', 9),
+                     activebackground=BG if act else BG3, highlightbackground=bg)
+            self._nb_cells[k].config(bg=bg)
+            self._nb_inds[k].config(bg=ACCENT if act else BG2)
+
+    def _nb_hover(self, key, on):
+        if key == getattr(self, '_nb_active', None):
+            return
+        try:
+            self._nb_inds[key].config(bg=BORDER_STRONG if on else BG2)
+        except (KeyError, tk.TclError):
+            pass
+
     def _switch_nb(self, key):
         # Lazy-build tab on first visit
         if hasattr(self, '_ensure_tab_built'):
@@ -5299,11 +5666,7 @@ class App(tk.Tk):
         for k, f in self.nb_frames.items():
             f.pack_forget()
         self.nb_frames[key].pack(fill='both', expand=True)
-        for k, b in self.nb_btns.items():
-            if k == key:
-                b.config(bg=ACCENT, fg='#000', font=('Segoe UI', 9, 'bold'))
-            else:
-                b.config(bg=BG2, fg=ACCENT2, font=('Segoe UI', 9))
+        self._nb_style(key)
         self.after(100, lambda: apply_rightclick_to_all(self.nb_frames[key], self))
         self.after(150, self._fix_all_scrollbars)
         # Auto-refresh dep status when opening settings
@@ -5468,22 +5831,7 @@ class App(tk.Tk):
         self.v_names.bind('<FocusIn>', _names_in)
         self.v_names.bind('<FocusOut>', _names_out)
 
-        # ttk style — only configure once globally
-        if not getattr(App, '_ttk_styled', False):
-            style = ttk.Style()
-            try: style.theme_use('clam')
-            except: pass
-            for s,v in [('TCombobox',{'fieldbackground':BG3,'background':BG3,'foreground':FG,
-                                       'selectbackground':ACCENT,'selectforeground':'#000',
-                                       'borderwidth':0,'arrowcolor':FG2}),
-                        ('Vertical.TScrollbar',{'background':BG3,'troughcolor':BG2,
-                                                'bordercolor':BG2,'arrowcolor':FG2,
-                                                'relief':'flat','borderwidth':0})]:
-                style.configure(s, **v)
-            style.map('TCombobox', fieldbackground=[('readonly',BG3)],
-                      foreground=[('readonly',FG)], background=[('readonly',BG3)])
-            App._ttk_styled = True
-        style.map('Vertical.TScrollbar', background=[('active',BORDER),('pressed',ACCENT)])
+        # (ttk styles are set once, palette-wide, in _apply_ttk_styles() from App.__init__)
         # Stub widgets needed by _refresh_provider / _refresh_prov_btns
         self._prov_btns = {}
         self._model_btns = {}
@@ -6695,7 +7043,7 @@ class App(tk.Tk):
         tk.Frame(pane, bg=BORDER, width=1).pack(side='left', fill='y')
 
         # ── RIGHT: quick actions ──────────────────────────────────────────────
-        right = tk.Frame(pane, bg=BG, width=170)
+        right = tk.Frame(pane, bg=BG, width=_ui_px(170))
         right.pack(side='left', fill='y', padx=10, pady=8)
         right.pack_propagate(False)
 
@@ -7407,7 +7755,7 @@ class App(tk.Tk):
         import threading as _thr
         win = tk.Toplevel(self)
         win.title('Updating ClipFinder')
-        win.geometry('460x190')
+        win.geometry(f'{_ui_px(460)}x{_ui_px(190)}')
         win.resizable(False, False)
         win.configure(bg=BG)
         win.transient(self)
@@ -7480,7 +7828,7 @@ class App(tk.Tk):
                     return
             except Exception:
                 pass
-        bar = tk.Frame(self, bg='#1e3a1e', height=32)
+        bar = tk.Frame(self, bg='#1e3a1e', height=_ui_px(32))
         bar.pack(side='bottom', fill='x')
         bar.pack_propagate(False)
         self._uc_banner = bar
@@ -11905,7 +12253,7 @@ Return ONLY the JSON array, no other text."""
     def _ps_lbl(self, parent, text, hint=''):
         tk.Label(parent, text=text, font=('Segoe UI', 8, 'bold'), fg=FG2, bg=BG).pack(anchor='w', pady=(8, 1))
         if hint:
-            tk.Label(parent, text=hint, font=('Segoe UI', 7), fg=FG3, bg=BG, wraplength=310,
+            tk.Label(parent, text=hint, font=('Segoe UI', 7), fg=FG3, bg=BG, wraplength=_ui_px(310),
                      justify='left').pack(anchor='w')
 
     def _ps_mem_path(self):
@@ -11933,7 +12281,7 @@ Return ONLY the JSON array, no other text."""
         outer = tk.Frame(p, bg=BG); outer.pack(fill='both', expand=True)
 
         # ── LEFT: inputs (scrolls, the form is tall) ─────────────────────────────
-        lwrap = tk.Frame(outer, bg=BG, width=350)
+        lwrap = tk.Frame(outer, bg=BG, width=_ui_px(350))
         lwrap.pack(side='left', fill='y', padx=(10, 0), pady=8)
         lwrap.pack_propagate(False)
         lcv = tk.Canvas(lwrap, bg=BG, bd=0, highlightthickness=0)
@@ -12021,7 +12369,7 @@ Return ONLY the JSON array, no other text."""
                                      fg='#000', relief='flat', bd=0, cursor='hand2', pady=10,
                                      activebackground=ACCENT2, command=lambda: self._ps_generate('new'))
         self._ps_gen_btn.pack(fill='x', pady=(12, 4))
-        self._ps_status = tk.Label(left, text='', font=('Segoe UI', 8), fg=FG2, bg=BG, wraplength=320, justify='left')
+        self._ps_status = tk.Label(left, text='', font=('Segoe UI', 8), fg=FG2, bg=BG, wraplength=_ui_px(320), justify='left')
         self._ps_status.pack(anchor='w', pady=(0, 10))
 
         # ── RIGHT: iteration bar + results ───────────────────────────────────────
@@ -12560,7 +12908,7 @@ Return ONLY the JSON array, no other text."""
         self._dl_queue_status.pack(side='right')
         q_frame = tk.Frame(p, bg=BG3, highlightbackground=BORDER, highlightthickness=1)
         q_frame.pack(fill='x', padx=20, pady=(0,4))
-        self._dl_queue_box = tk.Text(q_frame, height=10, font=FONT_MONO_S,
+        self._dl_queue_box = tk.Text(q_frame, height=7, font=FONT_MONO_S,
                  bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat',
                  bd=6, wrap='none')
         self._dl_queue_box.pack(side='left', fill='both', expand=True)
@@ -13430,7 +13778,7 @@ Return ONLY the JSON array, no other text."""
 
     def _build_thumb_tab(self, p):
         # Left = scrollable controls panel, Right = image results
-        left_outer = tk.Frame(p, bg=BG, width=300)
+        left_outer = tk.Frame(p, bg=BG, width=_ui_px(300))
         left_outer.pack(side='left', fill='y')
         left_outer.pack_propagate(False)
 
@@ -13565,7 +13913,7 @@ Return ONLY the JSON array, no other text."""
                  font=('Segoe UI',7,'bold'), fg=GREEN if _us_has else FG3, bg=BG).pack(side='left', padx=3)
 
         self.thumb_status_lbl = tk.Label(left, text='', font=FONT_SMALL,
-                                         fg=FG2, bg=BG, wraplength=265, justify='left')
+                                         fg=FG2, bg=BG, wraplength=_ui_px(265), justify='left')
         self.thumb_status_lbl.pack(anchor='w', padx=14, pady=(8,14))
 
         # ── Right: results grid ───────────────────────────────────────────────
@@ -14193,7 +14541,7 @@ Return ONLY the JSON array, no other text."""
                  label='%').pack(side='left')
 
         # ── Right — clip queue ────────────────────────────────────────────────
-        right = tk.Frame(main, bg=BG2, width=300); right.pack(side='right', fill='y')
+        right = tk.Frame(main, bg=BG2, width=_ui_px(300)); right.pack(side='right', fill='y')
         right.pack_propagate(False)
         tk.Frame(main, bg=BORDER, width=1).pack(side='right', fill='y')
 
@@ -16114,6 +16462,35 @@ Return ONLY the JSON array, no other text."""
         _folder_row(s5, 'Clips output folder:', self.v_outdir)
         _folder_row(s5, 'Download folder:', self.v_dl_folder)
 
+        # ── Appearance: accent colour (read once at start-up, so a change needs a restart) ──
+        s_ap = section('🎨  Appearance')
+        _ap_row = tk.Frame(s_ap, bg=BG3); _ap_row.pack(fill='x', pady=3)
+        tk.Label(_ap_row, text='Accent colour:', font=FONT_SMALL, fg=FG2, bg=BG3, width=22, anchor='w').pack(side='left')
+        _ap_btns = {}
+        _ap_note = tk.Label(s_ap, text='Applies the next time ClipFinder starts.', font=('Segoe UI', 8), fg=FG2, bg=BG3)
+        _ap_restart = tk.Button(s_ap, text='↻  Restart now', font=FONT_SMALL, bg=BG4, fg=FG, relief='flat', bd=0,
+                                cursor='hand2', padx=10, pady=3,
+                                command=lambda: (self._save_settings(), self._relaunch_app()))
+        def _pick_accent(name):
+            self.cfg['theme_accent'] = name
+            save_cfg(self.cfg)
+            for _n, _b in _ap_btns.items():
+                _b.config(text=('✓  ' if _n == name else '●  ') + _n, bg=BORDER if _n == name else BG4)
+            if name == THEME_ACCENT:
+                _ap_note.config(text='Applies the next time ClipFinder starts.', fg=FG2)
+                _ap_restart.pack_forget()
+            else:
+                _ap_note.config(text=f'{name} accent saved - restart ClipFinder to apply it.', fg=YELLOW)
+                _ap_restart.pack(anchor='w', pady=(4, 0))
+        for _n, (_a1, _a2) in ACCENT_PRESETS.items():
+            _sel = (_n == THEME_ACCENT)
+            _b = tk.Button(_ap_row, text=('✓  ' if _sel else '●  ') + _n, font=FONT_SMALL, fg=_a1,
+                           bg=BORDER if _sel else BG4, relief='flat', bd=0, cursor='hand2', padx=10, pady=3,
+                           command=lambda n=_n: _pick_accent(n))
+            _b.pack(side='left', padx=(0, 4))
+            _ap_btns[_n] = _b
+        _ap_note.pack(anchor='w', pady=(4, 0))
+
         # ── Update Modules ──
         # Vision Mode Reference Images
         _sec_vision = section('🎯 Vision Mode — Reference Images')
@@ -17603,7 +17980,7 @@ Return ONLY the JSON array, no other text."""
         body.pack(fill='both', expand=True)
 
         # Left: word list + queue (compact)
-        wl_frame = tk.Frame(body, bg=BG, width=220)
+        wl_frame = tk.Frame(body, bg=BG, width=_ui_px(220))
         wl_frame.pack(side='left', fill='y')
         wl_frame.pack_propagate(False)
         tk.Frame(body, bg=BORDER, width=1).pack(side='left', fill='y')
@@ -18253,7 +18630,8 @@ if __name__ == '__main__':
             _s.configure(bg='#111111')
             _s.resizable(False, False)
             _s.attributes('-topmost', True)
-            _sw, _sh = 580, 200
+            _dsc = max(1.0, _s.winfo_fpixels('1i') / 96.0)     # this root is created before App: no _UI_SCALE yet
+            _sw, _sh = int(580 * _dsc), int(200 * _dsc)
             _s.geometry(f'{_sw}x{_sh}+{(_s.winfo_screenwidth() - _sw) // 2}+{(_s.winfo_screenheight() - _sh) // 2}')
             _brd = _tk2.Frame(_s, bg='#ff8c00', padx=1, pady=1); _brd.pack(fill='both', expand=True, padx=8, pady=8)
             _inn = _tk2.Frame(_brd, bg='#111111'); _inn.pack(fill='both', expand=True)
@@ -18261,7 +18639,7 @@ if __name__ == '__main__':
             _sv = _tk2.StringVar(value=f'Installing {len(_entries)} component{"s" if len(_entries) != 1 else ""}...')
             _tk2.Label(_inn, textvariable=_sv, font=('Segoe UI', 9, 'bold'), fg='#dddddd', bg='#111111').pack()
             _tk2.Label(_inn, text=', '.join(e['name'] for e in _entries)[:90], font=('Segoe UI', 8), fg='#888888', bg='#111111').pack()
-            _pb = _ttk2.Progressbar(_inn, length=480, mode='indeterminate'); _pb.pack(pady=(8, 2)); _pb.start(15)
+            _pb = _ttk2.Progressbar(_inn, length=int(480 * _dsc), mode='indeterminate'); _pb.pack(pady=(8, 2)); _pb.start(15)
             _dv = _tk2.StringVar(value='Starting...')
             _tk2.Label(_inn, textvariable=_dv, font=('Consolas', 7), fg='#666666', bg='#111111').pack()
             _cancel = _thr.Event()
