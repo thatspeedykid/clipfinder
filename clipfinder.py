@@ -1773,41 +1773,362 @@ FONT_MONO_S = ('Consolas', 9)
 PROVIDERS = {
     'Google Gemini (Free)': {
         'lib':    'gemini',
-        'models': ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+        # Verified Sep 2026. gemini-2.0-* were shut down 2026-06-01. Order = UI order;
+        # models[0] is the default. 'roles' = same ids ordered per job (see _ai_models).
+        'models': ['gemini-3.5-flash-lite', 'gemini-3.8-flash',
+                   'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+        'roles': {
+            'tiny':    ['gemini-3.5-flash-lite', 'gemini-2.5-flash-lite', 'gemini-2.5-flash'],
+            'write':   ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+            'extract': ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+            'vision':  ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+        },
         'url':    'https://aistudio.google.com/apikey',
         'note':   'Free — no credit card needed',
     },
     'Groq (Free)': {
         'lib':    'groq',
-        # Verified current on Groq (Jul 2026). llama-3.1-70b-versatile and
-        # llama3-8b-8192 were decommissioned — removed. gpt-oss added as the
-        # future-proof successors (llama-3.x versatile/instant deprecate Aug 16 2026).
+        # Verified Sep 2026. llama-3.3-70b-versatile and llama-3.1-8b-instant were
+        # SHUT DOWN 2026-08-16 (also qwen3-32b / llama-4-scout 2026-07-17). Free plan
+        # = 30 RPM, 8K tokens/min per model, so keep each request small (see
+        # _GROQ_MAX_PROMPT_CHARS); gpt-oss are reasoning models (see _groq_kwargs).
         'models': [
-            'llama-3.3-70b-versatile',   # 32k context — smartest working today
-            'openai/gpt-oss-120b',       # future-proof large (post Aug 2026)
-            'llama-3.1-8b-instant',      # fast, low latency
-            'openai/gpt-oss-20b',        # fast future-proof fallback
+            'openai/gpt-oss-120b',       # main: extraction, posts, tweets
+            'openai/gpt-oss-20b',        # fast: scoring / tiny calls / fallback
+            'qwen/qwen3.8-27b',          # preview, multimodal fallback
         ],
+        'roles': {
+            'tiny':    ['openai/gpt-oss-20b', 'openai/gpt-oss-120b'],
+            'write':   ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'],
+            'extract': ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'],
+            'vision':  ['qwen/qwen3.8-27b'],
+        },
         'url':    'https://console.groq.com',
         'note':   'Free — no credit card needed',
     },
     'OpenRouter (Free models)': {
         'lib':    'openrouter',
-        # Verified against OpenRouter free catalog (Jul 2026). Removed dead ids:
-        # qwen3.6-plus (never existed), gemma-3-12b (now Gemma 4), mistral-small-3.1
-        # (no free Mistral tier). Bad ids also self-heal via _DEAD_MODELS at runtime.
+        # Verified against the live OpenRouter catalog (Sep 2026). Gone: llama-3.3-70b
+        # :free, qwen3-next-80b :free, nemotron-nano-9b-v2 :free. openrouter/auto is
+        # PAID (variable price) - the free router is openrouter/free. Free ':free'
+        # models are capped at 20 req/min and 50 req/day (1000/day with $10 credit).
         'models': [
-            'openrouter/auto',                          # OR free router — auto-picks best available
-            'nvidia/nemotron-3-super-120b-a12b:free',   # NVIDIA 120B MoE — 1M context, top free
-            'meta-llama/llama-3.3-70b-instruct:free',   # Llama 3.3 70B — reliable
-            'qwen/qwen3-next-80b-a3b-instruct:free',    # Qwen3-Next 80B
-            'google/gemma-4-31b-it:free',               # Gemma 4 31B
-            'nvidia/nemotron-nano-9b-v2:free',          # fast small fallback
+            'deepseek/deepseek-v4-flash-0731:free',     # 1M ctx, best free extraction (always reasons)
+            'nvidia/nemotron-3-super-120b-a12b:free',   # 262k ctx
+            'nex-agi/nex-n2.5-pro:free',                # 262k ctx, reasoning can be off
+            'google/gemma-4-31b-it:free',               # 262k ctx, no forced reasoning
+            'qwen/qwen3.8-27b:free',                    # multimodal
+            'nex-agi/nex-n2.5-mini:free',               # small / fast
+            'openrouter/free',                          # OR free router - last resort
         ],
+        'roles': {
+            'tiny':    ['nex-agi/nex-n2.5-mini:free', 'google/gemma-4-31b-it:free', 'openrouter/free'],
+            'write':   ['nex-agi/nex-n2.5-pro:free', 'google/gemma-4-31b-it:free', 'openrouter/free'],
+            'extract': ['deepseek/deepseek-v4-flash-0731:free', 'nvidia/nemotron-3-super-120b-a12b:free',
+                        'nex-agi/nex-n2.5-pro:free', 'google/gemma-4-31b-it:free',
+                        'qwen/qwen3.8-27b:free', 'nex-agi/nex-n2.5-mini:free', 'openrouter/free'],
+            'vision':  ['nex-agi/nex-n2.5-pro:free', 'qwen/qwen3.8-27b:free',
+                        'google/gemma-4-31b-it:free', 'openrouter/free'],
+        },
         'url':    'https://openrouter.ai/keys',
         'note':   'Free — no credit card needed',
     },
 }
+
+# ── AI model roles + SDK-shape helpers ────────────────────────────────────────
+# PROVIDERS is the ONE place model ids live. Every runtime list comes from
+# _ai_models(provider, role) which filters out ids marked dead at runtime.
+# Roles: tiny = 50-300 token calls (scoring, handle lookup, image labels),
+#        write = posts/tweets, extract = long-transcript clip JSON, vision = images.
+# The helpers below hide per-model parameter quirks (thinking, reasoning tokens,
+# temperature) and the three response shapes (google-genai / groq+openai / raw
+# OpenRouter JSON), so call sites stay one-liners.
+_GROQ_MAX_PROMPT_CHARS = 13000   # Groq free plan: 8K tokens/min per model (prompt + max output)
+
+def _provider_data(prov):
+    """PROVIDERS entry by display name or by lib key ('gemini'/'groq'/'openrouter')."""
+    d = PROVIDERS.get(prov)
+    if d is not None:
+        return d
+    for _d in PROVIDERS.values():
+        if _d.get('lib') == prov:
+            return _d
+    return {}
+
+def _ai_models(prov, role=None):
+    """Ordered live (not dead) model ids for a provider, best-first for `role`."""
+    data = _provider_data(prov)
+    base = [m for m in data.get('models', []) if m not in _DEAD_MODELS]
+    if role:
+        pref = [m for m in data.get('roles', {}).get(role, []) if m in base]
+        if pref:
+            return pref
+    return base
+
+def _ai_model(prov, role=None):
+    ms = _ai_models(prov, role)
+    return ms[0] if ms else ''
+
+def _pick_model(prov, chosen='', role=None):
+    """`chosen` if it is still a live model of `prov`, else the provider's best live model."""
+    live = _ai_models(prov)
+    if chosen and chosen in live:
+        return chosen
+    ms = _ai_models(prov, role)
+    if not ms:
+        raise ValueError(f'No models left for {prov} (all marked unavailable)')
+    return ms[0]
+
+def _safe_text(resp):
+    """Stripped text from a google-genai response, a groq/openai SDK response or a
+    raw OpenRouter JSON dict. Returns '' (never None) when there is no text."""
+    try:
+        if resp is None:
+            return ''
+        if isinstance(resp, str):
+            return resp.strip()
+        if isinstance(resp, dict):
+            ch = resp.get('choices') or []
+            c0 = ch[0] if ch and isinstance(ch[0], dict) else {}
+            txt = (c0.get('message') or {}).get('content') or c0.get('text')
+            return txt.strip() if isinstance(txt, str) else ''
+        choices = getattr(resp, 'choices', None)
+        if choices:
+            msg = getattr(choices[0], 'message', None)
+            txt = getattr(msg, 'content', None) if msg is not None else None
+            if isinstance(txt, list):   # content-part lists
+                txt = ''.join((p.get('text', '') if isinstance(p, dict) else getattr(p, 'text', '')) or '' for p in txt)
+            return txt.strip() if isinstance(txt, str) else ''
+        try:
+            txt = getattr(resp, 'text', None)   # google-genai: None on empty/blocked/max-tokens
+        except Exception:
+            txt = None
+        if isinstance(txt, str) and txt.strip():
+            return txt.strip()
+        for cand in (getattr(resp, 'candidates', None) or []):
+            parts = getattr(getattr(cand, 'content', None), 'parts', None) or []
+            t = ''.join(p.text for p in parts
+                        if isinstance(getattr(p, 'text', None), str) and not getattr(p, 'thought', False))
+            if t.strip():
+                return t.strip()
+    except Exception:
+        pass
+    return ''
+
+_RATE_RE = re.compile(r'\b(?:429|503|413)\b|rate[ _-]?limit|too many requests|request too large|'
+                      r'quota|resource_exhausted|temporarily|upstream|unavailable|overloaded|\bcapacity\b')
+_NOT_GONE_RE = re.compile(r'\b(?:401|402|403|429)\b|invalid api key|api key not valid|api_key_invalid|'
+                          r'user not found|unauthorized|forbidden')
+_GONE_RE = re.compile(r'\b404\b|model_not_found|not_found|no endpoints|decommission|'
+                      r'no longer (?:supported|available)|has been shut ?down|does not exist')
+
+def _is_rate_limit_error(e):
+    """True for rate-limit / quota / overload errors. (The old bare 'rate' substring also
+    matched 'generateContent' and 'separate' - do not reintroduce it.)"""
+    s = str(e).lower()
+    if 'could not parse' in s:
+        return False
+    return bool(_RATE_RE.search(s))
+
+def _is_model_gone_error(e):
+    """True when the API says this MODEL id is retired/unknown (404, model_not_found,
+    decommissioned). Auth errors such as OpenRouter's 401 'User not found.' are NOT."""
+    s = str(e).lower()
+    if _NOT_GONE_RE.search(s):
+        return False
+    return bool(_GONE_RE.search(s))
+
+def _gemini_ver(model):
+    m = re.search(r'gemini-(\d+)(?:\.(\d+))?', str(model or '').lower())
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
+
+def _gemini_config(model, max_tokens, temperature=None, json=False, think='min'):
+    """GenerateContentConfig kwargs for `model`.
+    Thinking tokens count against max_output_tokens, so the thinking control is per model
+    family and the cap gets headroom for it:
+      2.5-*      thinking_budget=0 (off); think='low' -> 1024
+      3.5-*-lite/3.5/3.6   thinking_level 'minimal' (think='low' -> 'low')
+      3.7/3.8-flash, pro   cannot go below 'low', so they always get 'low' + a bigger cap
+    Gemini 3.x: temperature is omitted (Google recommends the default 1.0).
+    json=True -> response_mime_type application/json."""
+    m = str(model or '').lower()
+    ver = _gemini_ver(m)
+    cap = int(max_tokens)
+    cfg = {}
+    if ver >= (3, 0):
+        lvl = 'low' if (ver >= (3, 7) or 'pro' in m or think == 'low') else 'minimal'
+        cfg['thinking_config'] = {'thinking_level': lvl}
+        cap += 1024 if lvl == 'low' else 256
+    else:
+        if temperature is not None:
+            cfg['temperature'] = temperature
+        if ver >= (2, 5):
+            budget = 1024 if think == 'low' else (128 if 'pro' in m else 0)
+            cfg['thinking_config'] = {'thinking_budget': budget}
+            cap += budget
+    cfg['max_output_tokens'] = min(cap, 65536)
+    if json:
+        cfg['response_mime_type'] = 'application/json'
+    cfg['automatic_function_calling'] = {'disable': True}   # silences the SDK 2.x AFC warning
+    return cfg
+
+_GEMINI_OPTIONAL_CFG = ('thinking_config', 'automatic_function_calling')
+
+def _gemini_generate(client, model, contents, config):
+    """client.models.generate_content; if the SDK/model rejects the optional thinking/AFC
+    keys (older SDK, unexpected model behaviour) retry once without them."""
+    try:
+        return client.models.generate_content(model=model, contents=contents, config=config)
+    except Exception as e:
+        s = str(e).lower()
+        if (any(k in config for k in _GEMINI_OPTIONAL_CFG) and not _RATE_RE.search(s)
+                and any(x in s for x in ('thinking', 'automatic_function_calling', 'extra_forbidden', 'extra inputs'))):
+            cfg2 = {k: v for k, v in config.items() if k not in _GEMINI_OPTIONAL_CFG}
+            return client.models.generate_content(model=model, contents=contents, config=cfg2)
+        raise
+
+def _gemini_complete(key, role, contents, max_tokens, temperature=None, json=False,
+                     think='min', models=None, client=None):
+    """One Gemini text call with model fallback -> stripped text ('' if every model was empty).
+    Rate-limit / retired-model errors move on to the next model and the last one is raised only
+    if nothing answered; any other error raises immediately. The Client is bound to a variable:
+    a temporary Client is garbage-collected and closed before the request runs."""
+    if client is None:
+        from google import genai as _g
+        client = _g.Client(api_key=key)
+    last = None
+    for m in (models or _ai_models('gemini', role)):
+        try:
+            resp = _gemini_generate(client, m, contents, _gemini_config(m, max_tokens, temperature, json, think))
+        except Exception as e:
+            if _is_model_gone_error(e):
+                _mark_model_dead(m)
+            elif not _is_rate_limit_error(e):
+                raise
+            last = e
+            continue
+        t = _safe_text(resp)
+        if t:
+            return t
+    if last is not None:
+        raise last
+    return ''
+
+def _groq_kwargs(model, max_tokens, json=False):
+    """chat.completions kwargs for a Groq model. gpt-oss and qwen3.x are reasoning models whose
+    reasoning tokens count against max_completion_tokens, so they get low effort + headroom.
+    reasoning_format is only valid for qwen (and is mutually exclusive with include_reasoning,
+    which is what gpt-oss uses). json=True -> response_format json_object (prompt must say JSON
+    and must ask for an OBJECT, not a bare array)."""
+    m = str(model or '').lower()
+    cap = int(max_tokens)
+    kw = {}
+    if 'gpt-oss' in m:
+        kw['reasoning_effort'] = 'low'
+        kw['include_reasoning'] = False
+        cap += 512
+    elif 'qwen3' in m:
+        if cap <= 400:
+            kw['reasoning_effort'] = 'none'
+        else:
+            kw['reasoning_effort'] = 'low'
+            kw['reasoning_format'] = 'hidden'
+            cap += 512
+    kw['max_completion_tokens'] = cap
+    if json:
+        kw['response_format'] = {'type': 'json_object'}
+    return kw
+
+_GROQ_OPTIONAL_KW = ('reasoning_effort', 'include_reasoning', 'reasoning_format', 'response_format')
+
+def _groq_chat(client, **kw):
+    """client.chat.completions.create; on a 400 that blames the reasoning/JSON options
+    (not a retired model) retry once without them."""
+    try:
+        return client.chat.completions.create(**kw)
+    except Exception as e:
+        s = str(e).lower()
+        if ('400' in s and not _is_model_gone_error(e)
+                and any(x in s for x in ('reasoning', 'response_format', 'json'))
+                and any(k in kw for k in _GROQ_OPTIONAL_KW)):
+            return client.chat.completions.create(**{k: v for k, v in kw.items() if k not in _GROQ_OPTIONAL_KW})
+        raise
+
+def _groq_complete(key, role, messages, max_tokens, temperature=None, json=False,
+                   models=None, client=None):
+    """One Groq text call with model fallback -> stripped text ('' if every model was empty)."""
+    if client is None:
+        from groq import Groq as _G
+        client = _G(api_key=key)
+    last = None
+    for m in (models or _ai_models('groq', role)):
+        kw = _groq_kwargs(m, max_tokens, json)
+        if temperature is not None:
+            kw['temperature'] = temperature
+        try:
+            resp = _groq_chat(client, model=m, messages=messages, **kw)
+        except Exception as e:
+            if _is_model_gone_error(e):
+                _mark_model_dead(m)
+            elif not _is_rate_limit_error(e):
+                raise
+            last = e
+            continue
+        t = _safe_text(resp)
+        if t:
+            return t
+    if last is not None:
+        raise last
+    return ''
+
+def _openrouter_kwargs(model, max_tokens):
+    """{'max_tokens', 'extra_body'} for an OpenRouter model. Models that always reason get
+    reasoning effort 'low' and headroom (reasoning tokens count against max_tokens on most
+    providers; a too-small cap returns content=None)."""
+    m = str(model or '').lower()
+    cap = int(max_tokens)
+    extra = {}
+    if any(x in m for x in ('deepseek-v4', 'nemotron-3-super', 'qwen3.8')):
+        extra = {'reasoning': {'effort': 'low'}}
+        cap += 4096
+    return {'max_tokens': cap, 'extra_body': extra}
+
+def _openrouter_complete(key, role, messages, max_tokens, temperature=None, models=None, timeout=45):
+    """Raw OpenRouter chat call with model fallback -> stripped text. Handles error bodies that
+    arrive with HTTP 200 and null content. 401/402/daily-cap errors raise immediately (no model
+    can fix them); dead-looking models are skipped for this call only (never persisted: a 404
+    'No endpoints found' can also be an account privacy setting)."""
+    import requests as _rq
+    last = None
+    for m in list(models or _ai_models('openrouter', role))[:3]:
+        kw = _openrouter_kwargs(m, max_tokens)
+        body = {'model': m, 'messages': messages, 'max_tokens': kw['max_tokens']}
+        body.update(kw['extra_body'])
+        if temperature is not None:
+            body['temperature'] = temperature
+        r = _rq.post('https://openrouter.ai/api/v1/chat/completions',
+                     headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json',
+                              'HTTP-Referer': 'https://github.com/thatspeedykid/clipfinder'},
+                     json=body, timeout=timeout)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        err = j.get('error') if isinstance(j, dict) else None
+        if err or r.status_code >= 400:
+            err = err if isinstance(err, dict) else {}
+            msg = str(err.get('message') or (r.text or '')[:120] or 'error')
+            code = r.status_code if r.status_code >= 400 else err.get('code', 0)
+            last = Exception(f'OpenRouter error code: {code} - {msg[:200]}')
+            if str(code) in ('401', '402') or 'per-day' in msg.lower():
+                raise last
+            continue
+        t = _safe_text(j)
+        if t:
+            return t
+    if last is not None:
+        raise last
+    return ''
 
 AUTO_EDIT_PROMPT = """You are a professional video editor for a viral drama/streaming Twitter channel.
 {context_block}
@@ -2216,10 +2537,20 @@ _GPU_ENCODER_CACHE = None
 # Models permanently decommissioned — auto-populated when 400 decommissioned error hit
 # Persisted to config so dead models are never retried across sessions
 _DEAD_MODELS: set = set()
+# A persisted dead mark is only trusted for this long, so a model that comes back (or was
+# marked by a transient/misclassified error) is retried instead of blacklisted forever.
+_DEAD_MODEL_TTL = 7 * 86400
 
 def _mark_model_dead(model: str):
-    """Mark a model as decommissioned — removes from all provider lists permanently."""
+    """Mark a model as decommissioned: removed from the provider lists for this run and
+    remembered in config (with a timestamp) for _DEAD_MODEL_TTL."""
     global _DEAD_MODELS
+    # Never strip a provider's LAST model - keep it so the real API error stays visible
+    for prov_data in PROVIDERS.values():
+        _ms = prov_data.get('models') if isinstance(prov_data, dict) else None
+        if _ms and model in _ms and not [m for m in _ms if m != model]:
+            print(f'[CF] Not removing {model}: it is the only model left for this provider')
+            return
     _DEAD_MODELS.add(model)
     # Remove from PROVIDERS in memory
     for prov_data in PROVIDERS.values():
@@ -2227,23 +2558,43 @@ def _mark_model_dead(model: str):
             if model in prov_data['models']:
                 prov_data['models'].remove(model)
                 print(f'[CF] Removed decommissioned model: {model}')
-    # Persist to config
+    # Persist to config (id -> epoch seconds; 'dead_models' list kept for older builds)
     try:
+        import time as _dm_t
         cfg = load_cfg()
-        dead = cfg.get('dead_models', [])
-        if model not in dead:
-            dead.append(model)
-            cfg['dead_models'] = dead
-            save_cfg(cfg)
+        ts = cfg.get('dead_models_ts')
+        ts = ts if isinstance(ts, dict) else {}
+        ts[model] = _dm_t.time()
+        cfg['dead_models_ts'] = ts
+        cfg['dead_models'] = sorted(ts)
+        save_cfg(cfg)
     except Exception:
         pass
 
 def _load_dead_models():
-    """Load previously decommissioned models from config on startup."""
+    """Load recently-decommissioned models from config on startup. Entries older than
+    _DEAD_MODEL_TTL, entries with no timestamp (legacy permanent list) and entries that are
+    no longer in any provider list are dropped, so a stale list can never blacklist a valid model."""
     try:
+        import time as _dm_t
         cfg = load_cfg()
-        for m in cfg.get('dead_models', []):
-            _mark_model_dead(m)
+        ts = cfg.get('dead_models_ts')
+        ts = ts if isinstance(ts, dict) else {}
+        known = {m for d in PROVIDERS.values() if isinstance(d, dict) for m in d.get('models', [])}
+        now = _dm_t.time()
+        keep = {m: t for m, t in ts.items()
+                if isinstance(t, (int, float)) and now - t < _DEAD_MODEL_TTL and m in known}
+        for m in keep:
+            _owners = [d for d in PROVIDERS.values() if isinstance(d, dict) and m in d.get('models', [])]
+            if any(len(d['models']) <= 1 for d in _owners):
+                continue   # would empty a provider - see _mark_model_dead
+            _DEAD_MODELS.add(m)
+            for d in _owners:
+                d['models'].remove(m)
+        if keep != ts or set(cfg.get('dead_models', [])) != set(keep):
+            cfg['dead_models_ts'] = keep
+            cfg['dead_models'] = sorted(keep)
+            save_cfg(cfg)
     except Exception:
         pass
 _GPU_ENCODER_RESET = False
@@ -7731,10 +8082,9 @@ class App(tk.Tk):
             for try_model in try_models:
                 try:
                     _gemini_contents = 'IMPORTANT: Your entire response must be ONLY a JSON array starting with [. No ```json, no backticks, no text before or after the JSON.\n\n' + self._current_prompt
-                    resp = client.models.generate_content(
-                        model=try_model, contents=_gemini_contents,
-                        config={'temperature': 0.3, 'max_output_tokens': 8192})
-                    return resp.text.strip()
+                    resp = _gemini_generate(client, try_model, _gemini_contents,
+                                            _gemini_config(try_model, 8192, 0.3, json=True, think='low'))
+                    return _safe_text(resp)
                 except Exception as _e:
                     _es = str(_e)
                     # 429 = rate limit, 404 = model dead/not found — both try next model
@@ -7748,13 +8098,10 @@ class App(tk.Tk):
                 from groq import Groq as _G
             except ImportError:
                 raise ImportError('groq package broken — go to Settings → Update All Packages')
-            resp = _G(api_key=key).chat.completions.create(
-                model=model,
-                messages=[{'role': 'user', 'content': self._current_prompt}],
-                temperature=0.3, max_tokens=4096)
-            if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
-                return (resp.choices[0].message.content or '').strip()
-            return ''
+            resp = _groq_chat(_G(api_key=key), model=model,
+                              messages=[{'role': 'user', 'content': self._current_prompt}],
+                              temperature=0.3, **_groq_kwargs(model, 3000))
+            return _safe_text(resp)
         elif lib == 'openrouter':
             _ensure_pkgs_on_path()
             try:
@@ -7765,16 +8112,15 @@ class App(tk.Tk):
             resp = _or.chat.completions.create(
                 model=model,
                 messages=[{'role': 'user', 'content': self._current_prompt}],
-                temperature=0.3, max_tokens=8192)
-            choice = resp.choices[0]
-            raw = choice.message.content.strip()
-            if choice.finish_reason == 'length' and len(raw) > 100:
+                temperature=0.3, **_openrouter_kwargs(model, 8192))
+            raw = _safe_text(resp)
+            if resp.choices and resp.choices[0].finish_reason == 'length' and len(raw) > 100:
                 self.log('[OpenRouter] Truncated — retrying condensed', YELLOW)
                 resp2 = _or.chat.completions.create(
                     model=model,
                     messages=[{'role': 'user', 'content': self._current_prompt[:len(self._current_prompt)//2] + '\n\n[Top 3 clips as JSON only]'}],
-                    temperature=0.3, max_tokens=4096)
-                raw = resp2.choices[0].message.content.strip()
+                    temperature=0.3, **_openrouter_kwargs(model, 4096))
+                raw = _safe_text(resp2)
             return raw
         raise ValueError(f'Unknown lib: {lib}')
 
@@ -7782,7 +8128,8 @@ class App(tk.Tk):
         """Call a single provider, rotating through all configured keys. Returns clip list or raises."""
         data  = PROVIDERS[prov_name]
         lib   = data['lib']
-        model = self.v_model.get() if self.v_provider.get() == prov_name else data['models'][0]
+        # A saved/selected model that is retired or dead falls back to the provider's best live one
+        model = _pick_model(prov_name, self.v_model.get() if self.v_provider.get() == prov_name else '', 'extract')
 
         # Key pool: primary + enabled extras (disabled keys kept in cfg but skipped)
         _primary  = self._keys.get(prov_name, '').strip()
@@ -7930,17 +8277,19 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                 if lib == 'gemini':
                     from google import genai as _g
                     client = _g.Client(api_key=key)
-                    all_models = data['models']
-                    try_models = [model] + [m for m in all_models if m != model]
+                    try_models = [model] + [m for m in _ai_models(prov_name, 'extract') if m != model]
                     last_merr = None
                     raw = None
                     _all_models_rl = True  # assume all rate-limited until one succeeds
                     for try_model in try_models:
                         try:
-                            resp = client.models.generate_content(
-                                model=try_model, contents=prompt,
-                                config={'temperature': 0.3, 'max_output_tokens': 8192})
-                            raw = resp.text.strip()
+                            resp = _gemini_generate(client, try_model, prompt,
+                                                    _gemini_config(try_model, 8192, 0.3, json=True, think='low'))
+                            raw = _safe_text(resp)
+                            if not raw:   # blocked / all tokens spent thinking -> next model
+                                raw = None
+                                last_merr = Exception('Gemini returned an empty response (blocked or out of tokens)')
+                                continue
                             last_merr = None
                             _all_models_rl = False
                             break
@@ -7948,19 +8297,16 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                             _es = str(_e)
                             if '429' in _es or 'RESOURCE_EXHAUSTED' in _es or 'quota' in _es.lower():
                                 last_merr = _e; continue
-                            if '404' in _es or 'not_found' in _es.lower() or 'not found' in _es.lower():
-                                # Model retired/unavailable — mark dead and try next
+                            if _is_model_gone_error(_e):
+                                # Model retired/unavailable (404 / decommissioned) — mark dead and try next
                                 _mark_model_dead(try_model)
-                                continue
-                            if any(x in _es.lower() for x in ['decommissioned', 'no longer support', 'deprecated']):
-                                _mark_model_dead(try_model)
-                                self.log(f'⚠ Gemini model {try_model} decommissioned — removed', YELLOW)
+                                self.log(f'⚠ Gemini model {try_model} unavailable — removed', YELLOW)
                                 continue
                             _all_models_rl = False
                             raise
                     if last_merr is not None:
-                        # All models rate-limited for this key — raise so outer loop tries next key
-                        self.log(f'[Google Gemini (Free)] Key {_ki+1} all models rate-limited', YELLOW)
+                        # All models rate-limited/empty for this key — raise so outer loop tries next key
+                        self.log(f'[Google Gemini (Free)] Key {_ki+1}: no model returned a result', YELLOW)
                         raise last_merr
                     if raw is None:
                         raise Exception('All Gemini models unavailable (404) — update models list')
@@ -7976,21 +8322,31 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                         raise ImportError('groq package broken — go to Settings → Update All Packages')
                     _groq_prompt = prompt
                     # Try each model — rotate on 429 to avoid hammering rate-limited model
-                    all_groq_models = data.get('models', [model])
+                    all_groq_models = _ai_models(prov_name, 'extract') or [model]
                     groq_try_models = [m for m in ([model] + [m for m in all_groq_models if m != model]) if m not in _DEAD_MODELS]
                     raw = None
                     for _gm in groq_try_models:
-                        # Truncate based on model context size — 8b: 4k chars, 70b: 20k chars
-                        _is_small = any(x in _gm for x in ['8b', '8B', 'instant'])
-                        _max_chars = 4000 if _is_small else 20000
-                        _cur_prompt = _groq_prompt[:_max_chars] + '\n[Transcript truncated]' if len(_groq_prompt) > _max_chars else _groq_prompt
+                        # Free plan = 8K tokens/min per model: cap the request, but cut the TRANSCRIPT
+                        # (not the prompt tail, which holds the instructions and the transcript's end)
+                        _max_chars = _GROQ_MAX_PROMPT_CHARS
+                        _cur_prompt = _groq_prompt
+                        if len(_groq_prompt) > _max_chars:
+                            _room = _max_chars - (len(_groq_prompt) - len(transcript_chunk))
+                            if _room < 2000:
+                                self.log(f'[Groq] {_gm}: prompt overhead leaves no room for transcript — skipping model', YELLOW)
+                                continue
+                            self.log(f'[Groq] {_gm}: truncating transcript chunk {len(transcript_chunk):,}->{_room:,} chars (8K tokens/min free limit)', YELLOW)
+                            _cur_prompt = _groq_prompt.replace(
+                                transcript_chunk, transcript_chunk[:_room] + '\n[Transcript truncated]', 1)
                         try:
-                            resp = _G(api_key=key).chat.completions.create(
-                                model=_gm, messages=[{'role':'user','content':_cur_prompt}],
-                                temperature=0.3, max_tokens=4096)
+                            resp = _groq_chat(_G(api_key=key), model=_gm,
+                                              messages=[{'role':'user','content':_cur_prompt}],
+                                              temperature=0.3, **_groq_kwargs(_gm, 2000))
                             if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
-                                raw = (resp.choices[0].message.content or '').strip()
-                                break
+                                raw = _safe_text(resp)
+                                if raw:
+                                    break
+                                raw = None   # empty (reasoning ate the budget) -> next model
                         except Exception as _ge:
                             _ges = str(_ge)
                             if '429' in _ges or '413' in _ges:
@@ -8015,13 +8371,15 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                                     _tpd_cfg2['groq_tpd_until'] = _tpd_t2.time() + 86400
                                     save_cfg(_tpd_cfg2)
                                 break
-                            if '400' in _ges and any(x in _ges.lower() for x in ['decommissioned', 'no longer support', 'deprecated', 'not found', 'does not exist']):
+                            if _is_model_gone_error(_ge) or ('400' in _ges and any(x in _ges.lower() for x in ['decommissioned', 'no longer support', 'deprecated', 'not found', 'does not exist'])):
+                                # 400 model_decommissioned or 404 model_not_found
                                 _mark_model_dead(_gm)
                                 self.log(f'⚠ Model {_gm} decommissioned — removed automatically', YELLOW)
                                 continue
                             raise
                     if raw is None:
-                        raise Exception('All Groq models rate-limited')
+                        # Phrased so _is_key_rl matches and the next key in the pool is tried
+                        raise Exception('429 rate_limit_exceeded: all Groq models rate-limited (or returned no text) for this key')
 
                 elif lib == 'openrouter':
                     _ensure_pkgs_on_path()
@@ -8034,13 +8392,14 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                     import time as _or_time
                     # Clear expired entries
                     self._dead_or_models = {m: exp for m, exp in self._dead_or_models.items() if _or_time.time() < exp}
-                    _or_models = [m for m in data['models'] if m not in self._dead_or_models] or list(data['models'])
+                    _or_all = _ai_models(prov_name, 'extract')
+                    _or_models = [m for m in _or_all if m not in self._dead_or_models] or list(_or_all)
                     _or_raw = None
                     for _orm in _or_models:
                         try:
                             _r = _or.chat.completions.create(
                                 model=_orm, messages=[{'role':'user','content':prompt}],
-                                temperature=0.3, max_tokens=8192)
+                                temperature=0.3, **_openrouter_kwargs(_orm, 8192))
                             # Guard against None choices (OpenRouter error responses)
                             if not _r or not _r.choices or not _r.choices[0] or not _r.choices[0].message:
                                 self._dead_or_models[_orm] = _or_time.time() + 600  # 10 min retry
@@ -8056,20 +8415,21 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                                 _r2 = _or.chat.completions.create(
                                     model=_orm,
                                     messages=[{'role':'user','content':prompt[:len(prompt)//2]+'\n\n[Top 3 clips JSON only]'}],
-                                    temperature=0.3, max_tokens=4096)
-                                if _r2 and _r2.choices and _r2.choices[0] and _r2.choices[0].message:
-                                    _or_raw = (_r2.choices[0].message.content or '').strip()
+                                    temperature=0.3, **_openrouter_kwargs(_orm, 4096))
+                                _or_raw = _safe_text(_r2) or _or_raw
                             break
                         except Exception as _orme:
                             _es = str(_orme).lower()
                             _ec = str(_orme)
-                            if '404' in _ec or 'no endpoints' in _es or 'not found' in _es:
+                            if re.search(r'\b40[12]\b', _ec):
+                                raise   # bad key / no credits: no other model can fix it (and 'User not found.' is not a dead model)
+                            if '404' in _ec or 'no endpoints' in _es:
                                 self._dead_or_models[_orm] = _or_time.time() + 1800  # 30 min
                                 self.log(f'[OpenRouter] {_orm} dead (404), trying next model...', YELLOW)
                                 continue
                             elif ('429' in _ec or 'temporarily' in _es or 'unavailable' in _es
                                   or 'overloaded' in _es or 'provider returned error' in _es
-                                  or 'rate' in _es):
+                                  or 'rate limit' in _es or 'rate_limit' in _es or 'rate-limit' in _es):
                                 # Model is rate-limited or temporarily down — try next model
                                 self._dead_or_models[_orm] = _or_time.time() + 300  # 5 min retry
                                 self.log(f'[OpenRouter] {_orm} temporarily unavailable, trying next model...', YELLOW)
@@ -8103,13 +8463,16 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                     ('quota' in _ks and ('exceeded' in _ks or 'exhausted' in _ks))
                 )
                 # 401 — bad/expired key: auto-pause if we have other keys, else raise
+                # (Gemini reports a bad key as 400 INVALID_ARGUMENT 'API key not valid' / API_KEY_INVALID)
                 _is_auth_err = (
                     '401' in _ks or 'unauthorized' in _ks or 'invalid api key' in _ks or
+                    'api key not valid' in _ks or 'api_key_invalid' in _ks or
                     'authentication' in _ks
                 )
                 # These are never fixable by rotation
+                # (403/forbidden only count when the error is not really a 429 that merely mentions them)
                 _is_hard_fatal = (
-                    '403' in _ks or 'forbidden' in _ks or
+                    (('403' in _ks or 'forbidden' in _ks) and not _is_key_rl) or
                     'could not parse' in _ks or
                     'all openrouter models unavailable' in _ks
                 )
@@ -8361,7 +8724,7 @@ Return ONLY the JSON array, no other text."""
         # Try each key + model combination with progressive frame reduction on failure
         raw = None
         last_vision_err = None
-        vision_models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+        vision_models = _ai_models('gemini', 'vision')
         # Progressive frame counts: try full → half → quarter
         # Each image frame ~1000-2000 tokens, so fewer frames = less likely to hit TPM
         _frame_attempts = [frames_b64, frames_b64[:len(frames_b64)//2], frames_b64[:max(10, len(frames_b64)//4)]]
@@ -8388,16 +8751,15 @@ Return ONLY the JSON array, no other text."""
                         from google import genai as _gv
                         client = _gv.Client(api_key=_vkey)
                         self.log(f'🎯 Trying {_vmodel} with {len(_frames_subset)} frames...', FG2)
-                        resp = client.models.generate_content(
-                            model=_vmodel,
-                            contents=contents,
-                            config={'temperature': 0.2, 'max_output_tokens': 4096}
-                        )
-                        raw = resp.text.strip() if resp.text else None
+                        resp = _gemini_generate(client, _vmodel, contents,
+                                                _gemini_config(_vmodel, 4096, 0.2, json=True))
+                        raw = _safe_text(resp) or None
                         if raw:
                             break
                     except Exception as _ve:
                         _ves = str(_ve)
+                        if _is_model_gone_error(_ve):
+                            _mark_model_dead(_vmodel)
                         if any(x in _ves for x in ['503', '429', 'UNAVAILABLE', 'RESOURCE_EXHAUSTED', '404', 'too large', 'Request payload']):
                             last_vision_err = _ve
                             continue
@@ -8701,16 +9063,16 @@ Return ONLY the JSON array, no other text."""
 
 
             # ── Chunk size based on provider capability ───────────────────────
-            # Gemini 2.0 Flash: 1M token context — can handle entire transcripts
-            # Groq Llama 70B:   128k tokens — handles 4hr video in 2-3 chunks
-            # OpenRouter free:  typically 4k-8k context — needs small chunks
+            # Gemini 3.x/2.5 Flash: 1M token context — can handle entire transcripts
+            # Groq gpt-oss (free plan): 8K tokens/min per model — request must stay tiny (~8k chars of transcript)
+            # OpenRouter free: 262k-1M context models, but only 50 req/day — big chunks, few calls
             _prov_name = primary
             if 'gemini' in _prov_name.lower():
                 CHARS_PER_CHUNK = 120000
             elif 'groq' in _prov_name.lower():
-                CHARS_PER_CHUNK = 48000
+                CHARS_PER_CHUNK = 8000
             else:
-                CHARS_PER_CHUNK = 7500
+                CHARS_PER_CHUNK = 40000
             full_text = self.transcript  # use self.transcript — may have been filtered above
 
             # Heatmap mode: if zones are selected, restrict AI to selected transcript only
@@ -8762,10 +9124,7 @@ Return ONLY the JSON array, no other text."""
             self._current_energy_peaks = _energy_peaks  # available to _call_provider
 
             def _is_rate_err(e):
-                s = str(e).lower()
-                return any(x in s for x in ['429','503','rate','quota','resource_exhausted',
-                                             'rate-limited','temporarily','upstream',
-                                             'unavailable','overloaded','capacity'])
+                return _is_rate_limit_error(e)
 
             # Use app-level rate-limit tracking (self._rl_provs) so Settings panel
             # reflects live state and marks survive between runs for 5 minutes.
@@ -8841,7 +9200,7 @@ Return ONLY the JSON array, no other text."""
                             self.log(f'[{label}] {prov} all models unavailable — marked dead for session', RED)
                             _fatal_err = ex
                             continue
-                        elif '404' in s or 'no endpoints' in s or 'not found' in s:
+                        elif ('404' in s or 'no endpoints' in s or 'not found' in s) and '401' not in s:
                             if not hasattr(self, '_dead_models'):
                                 self._dead_models = set()
                             self._dead_models.add(prov)
@@ -8849,7 +9208,8 @@ Return ONLY the JSON array, no other text."""
                             self.log(f'[{label}] {prov} model unavailable (404) — skipping for session', RED)
                             _fatal_err = ex
                             continue
-                        elif '401' in s or 'invalid api key' in s or 'unauthorized' in s or 'authentication' in s:
+                        elif ('401' in s or 'invalid api key' in s or 'unauthorized' in s or 'authentication' in s
+                              or 'api key not valid' in s or 'api_key_invalid' in s):
                             self.log(f'[{label}] {prov} invalid API key — check Settings', RED)
                             _fatal_err = ex
                             continue
@@ -10238,7 +10598,7 @@ Return ONLY the JSON array, no other text."""
             data  = PROVIDERS[prov]
             lib   = data['lib']
             key   = self._keys.get(prov, '').strip()
-            model = self.v_model.get() if self.v_provider.get() == prov else data['models'][0]
+            model = _pick_model(prov, self.v_model.get() if self.v_provider.get() == prov else '', 'write')
 
             ctx   = self.tweet_context.get('1.0', 'end').strip() if hasattr(self, 'tweet_context') else ''
             tone  = self.tweet_tone.get()
@@ -10261,18 +10621,20 @@ Return ONLY the JSON array, no other text."""
                 try_data  = PROVIDERS[try_prov]
                 try_lib   = try_data['lib']
                 try_key   = self._keys.get(try_prov, '').strip()
-                try_models = ([model] + [m for m in try_data['models'] if m != model]
-                              if try_prov == prov else try_data['models'])
+                try_models = ([model] + [m for m in _ai_models(try_prov, 'write') if m != model]
+                              if try_prov == prov else _ai_models(try_prov, 'write'))
 
                 for try_model in try_models:
                     try:
                         if try_lib == 'gemini':
                             from google import genai as _g
                             client = _g.Client(api_key=try_key)
-                            resp = client.models.generate_content(
-                                model=try_model, contents=prompt,
-                                config={'temperature': 0.85, 'max_output_tokens': 2000})
-                            raw = resp.text.strip()
+                            resp = _gemini_generate(client, try_model, prompt,
+                                                    _gemini_config(try_model, 2000, 0.85))
+                            raw = _safe_text(resp)
+                            if not raw:
+                                raw = None
+                                continue
 
                         elif try_lib == 'groq':
                             _ensure_pkgs_on_path()
@@ -10288,13 +10650,13 @@ Return ONLY the JSON array, no other text."""
                                     f'Groq package broken ({_ge}). '
                                     'Go to Settings → Update Modules → Update All Packages.'
                                 )
-                            resp = _G(api_key=try_key).chat.completions.create(
-                                model=try_model,
-                                messages=[{'role': 'user', 'content': prompt}],
-                                temperature=0.85, max_tokens=2000)
-                            if resp and resp.choices and resp.choices[0] and resp.choices[0].message:
-                                raw = (resp.choices[0].message.content or '').strip()
-                            if not raw: continue
+                            resp = _groq_chat(_G(api_key=try_key), model=try_model,
+                                              messages=[{'role': 'user', 'content': prompt}],
+                                              temperature=0.85, **_groq_kwargs(try_model, 2000))
+                            raw = _safe_text(resp)
+                            if not raw:
+                                raw = None
+                                continue
 
                         elif try_lib == 'openrouter':
                             _ensure_pkgs_on_path()
@@ -10306,11 +10668,11 @@ Return ONLY the JSON array, no other text."""
                                       ).chat.completions.create(
                                 model=try_model,
                                 messages=[{'role': 'user', 'content': prompt}],
-                                temperature=0.85, max_tokens=2000)
-                            if not resp or not resp.choices or not resp.choices[0] or not resp.choices[0].message:
+                                temperature=0.85, **_openrouter_kwargs(try_model, 2000))
+                            raw = _safe_text(resp)
+                            if not raw:
+                                raw = None
                                 continue
-                            raw = (resp.choices[0].message.content or '').strip()
-                            if not raw: continue
 
                         prov = try_prov  # update for display in status
                         model = try_model
@@ -10318,7 +10680,9 @@ Return ONLY the JSON array, no other text."""
 
                     except Exception as _e:
                         err_str = str(_e)
-                        if any(x in err_str for x in ['404', '429', 'RESOURCE_EXHAUSTED',
+                        if try_lib != 'openrouter' and _is_model_gone_error(_e):
+                            _mark_model_dead(try_model)   # retired id: skip it from now on
+                        if any(x in err_str for x in ['404', '429', '503', 'RESOURCE_EXHAUSTED',
                                                         'quota', 'decommission', 'No endpoints']):
                             continue  # try next model
                         raise  # unexpected error, surface it
@@ -11176,11 +11540,11 @@ Return ONLY the JSON array, no other text."""
                                     _gk = [key for _, key in [(p,key) for p,key in
                                            [('groq', self.cfg.get('key_groq','').strip())] +
                                            [('groq', ek.strip()) for ek in self.cfg.get('key_groq_extra','').split(',') if ek.strip()]]
-                                           if _]
+                                           if key]
                                     _mk = [key for _, key in [(p,key) for p,key in
                                            [('gemini', self.cfg.get('key_gemini','').strip())] +
                                            [('gemini', ek.strip()) for ek in self.cfg.get('key_gemini_extra','').split(',') if ek.strip()]]
-                                           if _]
+                                           if key]
                                     _sc, _rs = self._ps_score_post(pk, t, _gk, _mk)
                                     self._ps_update_score(pk, _sc, _rs)
                                 _rt.Thread(target=_do_score, daemon=True).start()
@@ -11277,28 +11641,12 @@ CRITICAL: Post MUST reflect the angle above. Do NOT invent topics not in transcr
             for _prov, _key in _pool:
                 try:
                     if _prov == 'gemini':
-                        # Create fresh client each call — avoid closed client errors
-                        import importlib as _il
-                        _gmod = _il.import_module('google.genai')
-                        _out = ''
-                        for _mdl in ['gemini-2.5-flash', 'gemini-2.5-flash-lite']:
-                            try:
-                                _cl2 = _gmod.Client(api_key=_key)
-                                _r = _cl2.models.generate_content(
-                                    model=_mdl, contents=f"{_sys_msg}\n\n{_usr_msg}",
-                                    config={'temperature':0.5,'max_output_tokens':_max_tok})
-                                _out = (_r.text or '').strip()
-                                if _out: break
-                            except Exception as _me2:
-                                if any(x in str(_me2) for x in ['503','429','UNAVAILABLE','RESOURCE_EXHAUSTED','closed']): continue
-                                raise
+                        # Model list / thinking config / bound client all live in _gemini_complete
+                        _out = _gemini_complete(_key, 'write', f"{_sys_msg}\n\n{_usr_msg}", _max_tok, 0.5)
                     else:
-                        from groq import Groq as _GQ2
-                        _r = _GQ2(api_key=_key).chat.completions.create(
-                            model='llama-3.3-70b-versatile',
-                            messages=[{'role':'system','content':_sys_msg},{'role':'user','content':_usr_msg}],
-                            temperature=0.5, max_tokens=_max_tok)
-                        _out = _r.choices[0].message.content.strip()
+                        _out = _groq_complete(_key, 'write',
+                                              [{'role':'system','content':_sys_msg},{'role':'user','content':_usr_msg}],
+                                              _max_tok, 0.5)
                     if _out and len(_out) > 20:
                         self.log(f'[Post Studio] 🔄 {pk.upper()} regenerated via {_prov} ({len(_out)} chars)', GREEN)
                         return _out
@@ -11370,12 +11718,8 @@ Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too g
         # Use Groq first (fast, cheap)
         for _key in groq_keys:
             try:
-                from groq import Groq as _GQs
-                _r = _GQs(api_key=_key).chat.completions.create(
-                    model='llama-3.3-70b-versatile',
-                    messages=[{'role':'user','content':_prompt}],
-                    temperature=0.1, max_tokens=80)
-                _raw = _r.choices[0].message.content.strip()
+                # tiny role + JSON mode; _groq_kwargs gives the reasoning models headroom
+                _raw = _groq_complete(_key, 'tiny', [{'role':'user','content':_prompt}], 80, 0.1, json=True)
                 _raw = _sr.sub(r'```(?:json)?|```','',_raw).strip()
                 _d = _sj.loads(_raw)
                 return int(_d.get('score',5)), str(_d.get('reason',''))
@@ -11383,11 +11727,7 @@ Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too g
         # Gemini fallback
         for _key in gemini_keys:
             try:
-                from google import genai as _gscore
-                _r = _gscore.Client(api_key=_key).models.generate_content(
-                    model='gemini-2.5-flash', contents=_prompt,
-                    config={'temperature':0.1,'max_output_tokens':80})
-                _raw = (_r.text or '').strip()
+                _raw = _gemini_complete(_key, 'tiny', _prompt, 80, 0.1, json=True)
                 _raw = _sr.sub(r'```(?:json)?|```','',_raw).strip()
                 _d = _sj.loads(_raw)
                 return int(_d.get('score',5)), str(_d.get('reason',''))
@@ -11553,12 +11893,11 @@ Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too g
                         if not _gkey0:
                             _gkey0 = next((k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()),'')
                         if _gkey0:
-                            from google import genai as _gps0
-                            _r0 = _gps0.Client(api_key=_gkey0).models.generate_content(
-                                model='gemini-2.5-flash',
-                                contents=f'Official verified social media handles for "{_name1}"? JSON only: {{"x":"","instagram":"","tiktok":"","youtube":""}}',
-                                config={'temperature':0.0,'max_output_tokens':80})
-                            _raw0 = _psr.sub(r'```(?:json)?','',(_r0.text or '')).replace('`','').strip()
+                            _r0 = _gemini_complete(
+                                _gkey0, 'tiny',
+                                f'Official verified social media handles for "{_name1}"? JSON only: {{"x":"","instagram":"","tiktok":"","youtube":""}}',
+                                80, 0.0, json=True)
+                            _raw0 = _psr.sub(r'```(?:json)?','',_r0).replace('`','').strip()
                             _s0,_e0 = _raw0.find('{'),_raw0.rfind('}')
                             if _s0!=-1 and _e0>_s0:
                                 _d0 = _psj2.loads(_raw0[_s0:_e0+1])
@@ -11725,27 +12064,18 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 """Single API call. Returns text or raises."""
                 _full = f"{system_msg}\n\n{user_msg}"
                 if provider == 'gemini':
-                    from google import genai as _gps_ps
-                    _cl = _gps_ps.Client(api_key=key)
-                    for _mdl in ['gemini-2.5-flash', 'gemini-2.5-flash-lite']:
-                        try:
-                            _r = _cl.models.generate_content(
-                                model=_mdl, contents=_full,
-                                config={'temperature':0.4,'max_output_tokens':max_tok})
-                            _t = (_r.text or '').strip()
-                            if _t: return _t
-                        except Exception as _me:
-                            if any(x in str(_me) for x in ['503','429','UNAVAILABLE','RESOURCE_EXHAUSTED']): continue
-                            raise
-                    raise Exception('Gemini rate limited on all models')
+                    return _gemini_complete(key, 'write', _full, max_tok, 0.4)
+                elif provider == 'openrouter':
+                    # 'write' models from PROVIDERS; null content / 200+error bodies handled inside
+                    return _openrouter_complete(key, 'write',
+                                                [{'role':'system','content':system_msg},
+                                                 {'role':'user',  'content':user_msg}],
+                                                max_tok, timeout=45)
                 else:  # groq
-                    from groq import Groq as _GQ
-                    _r = _GQ(api_key=key).chat.completions.create(
-                        model='llama-3.3-70b-versatile',
-                        messages=[{'role':'system','content':system_msg},
-                                  {'role':'user',  'content':user_msg}],
-                        temperature=0.4, max_tokens=max_tok)
-                    return _r.choices[0].message.content.strip()
+                    return _groq_complete(key, 'write',
+                                          [{'role':'system','content':system_msg},
+                                           {'role':'user',  'content':user_msg}],
+                                          max_tok, 0.4)
 
             def _call_platform(pk):
                 _sys_msg, _usr_msg = _platform_msgs[pk]
@@ -11756,27 +12086,17 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 _log(f'🚀 {pk.upper()}...')
                 for _prov, _key in _pool:
                     try:
-                        if _prov == 'openrouter':
-                            import requests as _rq
-                            _or_r = _rq.post('https://openrouter.ai/api/v1/chat/completions',
-                                headers={'Authorization': f'Bearer {_key}','Content-Type': 'application/json',
-                                         'HTTP-Referer': 'https://github.com/thatspeedykid/clipfinder'},
-                                json={'model': 'meta-llama/llama-3.3-70b-instruct:free',
-                                      'messages': [{'role':'system','content':_sys_msg},{'role':'user','content':_usr_msg}],
-                                      'max_tokens': _max_tok}, timeout=30)
-                            _or_d = _or_r.json()
-                            if 'error' in _or_d:
-                                _or_msg = _or_d['error'].get('message','?')
-                                if any(x in _or_msg for x in ['Provider','provider','upstream','No endpoints']):
-                                    _log(f'⚠ {pk.upper()} OpenRouter unavailable — skipping', YELLOW)
-                                    continue
-                                raise Exception(f"OR: {_or_msg[:60]}")
-                            _out = _or_d.get('choices',[{}])[0].get('message',{}).get('content','').strip()
-                        else:
-                            _out = _call_one(_prov, _key, _sys_msg, _usr_msg, max_tok=_max_tok)
+                        _out = _call_one(_prov, _key, _sys_msg, _usr_msg, max_tok=_max_tok)
                         if _out and len(_out) >= _min_len:
-                            # Only retry if clearly cut off mid-sentence
-                            if _out.rstrip() and _out.rstrip()[-1] not in '.!?#🔑📌👇💡\n':
+                            # Only retry if clearly cut off mid-sentence. Every template ends in
+                            # hashtags/tags, so judge the LAST LINE (a bare '[-1] not in .!?#' test
+                            # doubled the API calls for almost every post)
+                            _tail = _out.rstrip()
+                            _ll = _tail.splitlines()[-1].strip() if _tail else ''
+                            _lt = _ll.split()[-1] if _ll.split() else ''
+                            _looks_cut = bool(_lt) and not ('#' in _ll or _ll.upper().startswith('TAGS')
+                                                            or _lt[-1] in '.!?"”)…' or ord(_lt[-1]) > 0x2000)
+                            if _looks_cut:
                                 _pst_time.sleep(0.5)
                                 try:
                                     _r2 = _call_one(_prov, _key, _sys_msg, _usr_msg, max_tok=_max_tok)
@@ -14538,17 +14858,15 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
 
             self.log(f'Auto Edit: asking AI to select segments for {target_min}min edit...')
             def _is_rate(e):
-                s = str(e).lower()
-                return any(x in s for x in ['429','503','rate','quota','resource_exhausted',
-                                             'temporarily','unavailable','overloaded','capacity'])
+                return _is_rate_limit_error(e)
 
             def _is_access_denied(e):
                 s = str(e).lower()
                 return any(x in s for x in ['403','access denied','forbidden','unauthorized'])
 
             segments = []
-            keyed_provs = [p for p in [self.v_provider.get()] +
-                           list(PROVIDERS.keys()) if self._keys.get(p,'').strip()]
+            keyed_provs = [p for p in dict.fromkeys([self.v_provider.get()] +
+                           list(PROVIDERS.keys())) if self._keys.get(p,'').strip()]
             self.log(f'Trying {len(keyed_provs)} provider(s)...')
             for prov in keyed_provs:
                 try:
@@ -14565,6 +14883,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                         self.log(f'{prov} rate-limited, trying next...', YELLOW)
                     elif '403' in err_str:
                         self.log(f'{prov} 403 access denied — check key or disable VPN', YELLOW)
+                    elif 'api key not valid' in err_str.lower() or 'api_key_invalid' in err_str.lower():
+                        self.log(f'{prov} API key not valid — check Settings', YELLOW)
                     elif '400' in err_str:
                         self.log(f'{prov} 400 bad request — prompt too long, trying next...', YELLOW)
                     elif '401' in err_str:
@@ -14787,15 +15107,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             except ImportError as _ge2:
                 raise ImportError(f'google-genai broken ({_ge2}) — run Update All Packages in Settings.')
             client = _gg.Client(api_key=key)
-            models = PROVIDERS[prov_name]['models']
-            for model in models:
-                try:
-                    resp = client.models.generate_content(model=model, contents=prompt)
-                    return resp.text
-                except Exception as ex:
-                    if any(x in str(ex).lower() for x in ['429','quota','resource_exhausted']):
-                        raise
-                    continue
+            # Walks the Gemini list (429/retired ids move to the next model); never returns None
+            return _gemini_complete(key, 'extract', prompt, 8192, 0.3, json=True, think='low', client=client)
 
         elif prov_name == 'Groq (Free)':
             _ensure_pkgs_on_path()
@@ -14804,25 +15117,15 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             except ImportError:
                 raise ImportError('groq package broken — go to Settings → Update All Packages')
             client = _G(api_key=key)
-            model = PROVIDERS[prov_name]['models'][0]
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{'role':'user','content':prompt}],
-                max_tokens=4096, temperature=0.3)
-            return resp.choices[0].message.content
+            # Whole Groq list with fallback (the old code used models[0] only, which was retired)
+            return _groq_complete(key, 'extract', [{'role':'user','content':prompt}], 3000, 0.3, client=client)
 
         elif prov_name == 'OpenRouter (Free models)':
-            import requests as _r
-            model = self.v_model.get() or PROVIDERS[prov_name]['models'][0]
-            resp  = _r.post('https://openrouter.ai/api/v1/chat/completions',
-                            headers={'Authorization': f'Bearer {key}',
-                                     'Content-Type': 'application/json'},
-                            json={'model': model,
-                                  'messages': [{'role':'user','content':prompt}],
-                                  'max_tokens': 4096},
-                            timeout=60)
-            resp.raise_for_status()
-            return resp.json()['choices'][0]['message']['content']
+            # Only use the selected model when OpenRouter is the selected provider
+            _m0 = _pick_model(prov_name, self.v_model.get() if self.v_provider.get() == prov_name else '', 'extract')
+            return _openrouter_complete(key, 'extract', [{'role':'user','content':prompt}], 4096,
+                                        models=[_m0] + [m for m in _ai_models(prov_name, 'extract') if m != _m0],
+                                        timeout=60)
 
         raise ValueError(f'Unknown provider: {prov_name}')
 
@@ -15390,25 +15693,17 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                         try:
                             _b64 = _sl_b64.b64encode(_f.read_bytes()).decode()
                             _mime = 'image/jpeg' if _f.suffix.lower() in ('.jpg','.jpeg') else 'image/png'
-                            _resp = client.models.generate_content(
-                                model='gemini-2.5-flash',
-                                contents=[
+                            # vision role list; thinking off/minimal and token headroom handled by _gemini_config
+                            _raw = _gemini_complete(
+                                _key, 'vision',
+                                [
                                     'Look at this image and identify what brand, website, logo, or content it shows. '
                                     'Reply with ONLY a short snake_case filename label (2-4 words, underscores, no extension). '
                                     'Examples: stake_casino, roobet_gambling, rainbet_logo, slot_machine_game, kick_streaming. '
                                     'Just the label, nothing else.',
                                     {'inline_data': {'mime_type': _mime, 'data': _b64}}
                                 ],
-                                config={'temperature': 0.1, 'max_output_tokens': 50}
-                            )
-                            # Extract text safely
-                            _raw = ''
-                            try: _raw = (_resp.text or '').strip()
-                            except Exception: pass
-                            if not _raw:
-                                for _part in getattr(_resp, 'parts', []) or []:
-                                    _pt = getattr(_part, 'text', '') or ''
-                                    if _pt.strip(): _raw = _pt.strip(); break
+                                50, 0.1, client=client)
                             if not _raw:
                                 self.after(0, lambda n=_f.name: self.log(f'  ⚠ Gemini returned empty for {n} — skipping', YELLOW))
                                 continue
@@ -15424,7 +15719,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     self.after(0, _refresh_vref_count)
                     self.after(0, lambda: self.log('✅ Scan complete', GREEN))
                 except Exception as _e:
-                    self.after(0, lambda: self.log(f'⚠ Scan failed: {_e}', YELLOW))
+                    self.after(0, lambda err=_e: self.log(f'⚠ Scan failed: {err}', YELLOW))
             _sl_thr.Thread(target=_do_scan, daemon=True).start()
         tk.Button(_vref_row, text='🔍  Scan & Label New Images',
                   font=('Segoe UI', 9, 'bold'), bg='#1a2a3a', fg='#88ccff',
@@ -17028,8 +17323,8 @@ Return ONLY a JSON object: {{"keep": ["word1", "word2"], "remove": ["word3"]}}
 where "keep" = words to censor, "remove" = false positives to skip."""
 
             result_text = None
-            for prov in [p for p in [self.v_provider.get()] +
-                         list(PROVIDERS.keys()) if self._keys.get(p,'').strip()]:
+            for prov in [p for p in dict.fromkeys([self.v_provider.get()] +
+                         list(PROVIDERS.keys())) if self._keys.get(p,'').strip()]:
                 try:
                     result_text = self._call_provider_raw(prov, prompt)
                     break
