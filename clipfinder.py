@@ -11378,10 +11378,13 @@ Return ONLY the JSON array, no other text."""
             _key = val.lower().replace(' ','_').split(',')[0].strip()
             if _key in _mem:
                 _h = _mem[_key]
-                for _pk, _wgt in [('x', self._ps_h_x), ('instagram', self._ps_h_ig),
-                                   ('tiktok', self._ps_h_tt), ('youtube', self._ps_h_yt)]:
-                    if _h.get(_pk,'') and not _wgt.get().strip():
-                        _wgt.set(_h[_pk])
+                for _pk in ('x', 'instagram', 'tiktok', 'youtube'):
+                    # The Entry text is what the user sees/edits (the StringVar is only synced on
+                    # focus-out), so test the Entry and write to the Entry.
+                    _he0, _hv0, _hph0 = self._ps_handle_entries[_pk]
+                    _cur0 = _he0.get().strip()
+                    if _h.get(_pk,'') and (not _cur0 or _cur0 == _hph0):
+                        self._ps_set_handle(_pk, _h[_pk])
                 self._ps_mem_lbl.config(text='💾 remembered', fg=GREEN)
             else:
                 self._ps_mem_lbl.config(text='')
@@ -11583,6 +11586,16 @@ Return ONLY the JSON array, no other text."""
                 _pf.pack_forget()
 
 
+    def _ps_set_handle(self, key, val):
+        """Show `val` in the handle Entry for `key` ('x'/'instagram'/'tiktok'/'youtube') and keep
+        its StringVar in sync. Main thread only (call via self.after from workers)."""
+        try:
+            _he, _hv, _hph = self._ps_handle_entries[key]
+            _he.delete(0, 'end'); _he.insert(0, str(val)); _he.config(fg=FG)
+            _hv.set(str(val))
+        except Exception:
+            pass
+
     def _ps_regen_one(self, pk):
         """Regenerate a single platform post using current inputs."""
         try:
@@ -11608,20 +11621,21 @@ Return ONLY the JSON array, no other text."""
             _spice_map = {'drama':'Drama energy.','breaking':'Breaking news tone.',
                           'exaggerate':'Amplify drama.','clickbait':'Curiosity gap hooks.'}
             _spice_txt = ' '.join(_spice_map[s] for s in _spice)
-            _tr_raw = _trans[:6000] if _trans else ''
-            _tr = _re2.sub(r'\[\d+:\d+:\d+\]\s*', '', _tr_raw).strip()
+            # Strip '[HH:MM:SS]', '[HH:MM:SS -> HH:MM:SS]' and '[12.34]' stamps BEFORE cutting to 6000 chars
+            _tr = _re2.sub(r'\[[\d:.]+(?:\s*->\s*[\d:.]+)?\]\s*', '', _trans or '').strip()[:6000]
             _who   = _name or 'the person in the video'
             _angle = _ctx or 'find the most viral moment'
             _angle_block2 = f"CONTENT ANGLE (MANDATORY): {_angle}\n" if _ctx else ""
             _tc = f"""PERSON: {_who}
 {_angle_block2}TRANSCRIPT (use ONLY these exact words — no invention):
 {_tr if _tr else '(no transcript)'}
-CRITICAL: Post MUST reflect the angle above. Do NOT invent topics not in transcript."""
+{f"TONE: {_spice_txt}" + chr(10) if _spice_txt else ""}CRITICAL: Post MUST reflect the angle above. Do NOT invent topics not in transcript."""
             # Build one prompt for this platform
             _prompts_map = {
                 'x':         (f"Complete X/Twitter post under 280 chars. Handle in sentence. 1 hashtag. End with question. NEVER cut off.", f"{_tc}\nX: {_h_x or _who}\n\nWrite complete post:\n[{_h_x or _who} + statement]\n[quote from transcript]\n[question?]\n#{(_name1 or 'clips').lower()}"),
                 'tiktok':    (f"Complete TikTok caption. Line 1=SEO phrase. No hooks. CTA. 3-4 hashtags. NEVER cut off.", f"{_tc}\nTT: {_h_tt or _who}\n\nWrite complete caption:\n{_name1.lower() or 'streamer'} [topic from transcript] explained\n[what happened]\ndo you agree? drop it in the comments 👇\n#{(_name1 or 'clips').lower()} #[topic] #[niche]"),
                 'instagram': (f"Complete Instagram caption. Line 1: [Role] @handle [what happened] [emoji]. NO timestamps. DM-bait. Save-bait. 3-5 hashtags. NEVER cut off.", f"{_tc}\nIG: {_h_ig if _h_ig else '(no handle — use name without @)'}\n\nLine 1: [Role] {_h_ig if _h_ig else _who} [what happened] [emoji] — use @ ONLY if handle given\n\n[2-3 clean sentences]\n\nwhat do you think — is he right? 👇\nsave this for when the conversation comes up 📌\n#{(_name1 or 'clips').lower()} #[topic] #drama #clips #[5th]"),
+                'yt_shorts': ("Write a YouTube Shorts title under 60 chars + 1-2 sentence description under 150 chars + 3 hashtags. Use exact topic from transcript. No generic filler.", f"{_tc}\n\nWrite the complete Shorts entry:\nTITLE: [punchy, keyword-first, under 60 chars — use exact topic from transcript]\nDESCRIPTION: [1-2 sentences, what actually happened, under 150 chars]\n#{(_name1 or 'person').lower().replace(' ','')} #[exact topic from transcript] #[niche]"),
                 'youtube':   (f"Complete YouTube title + description + 10 tags. Title keyword-first under 60 chars. NEVER cut off.", f"{_tc}\nYT: {_h_yt or _who}\n\nTITLE: [keyword-first under 60 chars]\n\nDESCRIPTION:\n[Sentence 1: who + what happened]\n[Sentence 2: why it matters]\nMore clips → @MarsScumbags\n\nTAGS: {_name1 or 'streaming'}, [topic], drama, streaming, clips, MarsScumbags, [4 more]"),
             }
             if pk not in _prompts_map: return ''
@@ -11857,20 +11871,18 @@ Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too g
 
             # Strip timestamps from transcript — AI doesn't need them and they confuse output
             import re as _re2
-            _tr_raw = _trans[:6000] if _trans else ''
-            _tr = _re2.sub(r'\[\d+:\d+:\d+\]\s*', '', _tr_raw).strip()
-            _tr = _re2.sub(r'\s{2,}', ' ', _tr)  # collapse extra spaces
+            # Handles '[HH:MM:SS]', '[HH:MM:SS -> HH:MM:SS]' (Auto Edit) and '[12.34]' (Subtitles);
+            # strip BEFORE cutting to 6000 chars so the limit counts real words
+            _tr = _re2.sub(r'\[[\d:.]+(?:\s*->\s*[\d:.]+)?\]\s*', '', _trans or '').strip()
+            _tr = _re2.sub(r'\s{2,}', ' ', _tr)[:6000]  # collapse extra spaces
             _who   = _name or 'the person in the video'
             _angle = _ctx or 'find the most viral/interesting moment'
 
             # ── Auto-find handles via Gemini if empty ─────────────────────────
             _placeholders = {'x':'@handle','instagram':'@instagram','tiktok':'@tiktok','youtube':'YouTube channel'}
-            _plat_to_attr = {'x': '_ps_h_x', 'instagram': '_ps_h_ig', 'tiktok': '_ps_h_tt', 'youtube': '_ps_h_yt'}
-            _needs_handles = _name1 and any(
-                not getattr(self, _plat_to_attr[k]).get().strip() or
-                getattr(self, _plat_to_attr[k]).get().strip() == p
-                for k,p in _placeholders.items()
-            )
+            # The StringVars only sync on focus-out, so test the Entry text already read above
+            # (_h_* have placeholders cleared)
+            _needs_handles = bool(_name1) and not (_h_x and _h_ig and _h_tt and _h_yt)
             if _needs_handles:
                 _log(f'🔍 Looking up handles for {_name1}...', FG2)
                 # Check memory first
@@ -11885,6 +11897,9 @@ Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too g
                     if not _h_ig and _mh.get('instagram'): _h_ig = _mh['instagram']
                     if not _h_tt and _mh.get('tiktok'):    _h_tt = _mh['tiktok']
                     if not _h_yt and _mh.get('youtube'):   _h_yt = _mh['youtube']
+                    for _fk, _fv in (('x',_h_x),('instagram',_h_ig),('tiktok',_h_tt),('youtube',_h_yt)):
+                        if _fv:
+                            self.after(0, lambda k=_fk, v=_fv: self._ps_set_handle(k, v))
                     _log(f'💾 Loaded handles from memory for {_name1}', GREEN)
                 else:
                     # Ask Gemini
@@ -11910,10 +11925,9 @@ Respond ONLY with JSON: {"score": 7, "reason": "Missing channel plug, tags too g
                                 try: MEM_PATH.write_text(_psj2.dumps(_mem,indent=2))
                                 except: pass
                                 # Update UI fields
-                                for _fk, _fv, _fw in [('x',_h_x,self._ps_h_x),('ig',_h_ig,self._ps_h_ig),
-                                                       ('tt',_h_tt,self._ps_h_tt),('yt',_h_yt,self._ps_h_yt)]:
+                                for _fk, _fv in (('x',_h_x),('instagram',_h_ig),('tiktok',_h_tt),('youtube',_h_yt)):
                                     if _fv:
-                                        self.after(0, lambda v=_fv, sv=_fw: sv.set(v))
+                                        self.after(0, lambda k=_fk, v=_fv: self._ps_set_handle(k, v))
                                 _log(f'✅ Found handles for {_name1}', GREEN)
                     except Exception as _he0:
                         _log(f'⚠ Handle lookup failed: {str(_he0)[:40]}', YELLOW)
