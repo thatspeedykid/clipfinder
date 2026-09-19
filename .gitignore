@@ -3,12 +3,23 @@ dist/
 build/
 ClipFinder_dist/
 _launcher_build/
+ClipFinder-Setup.exe
+*-Setup.exe
 ClipFinder_Setup.exe
 *_Setup.exe
+SHA256SUMS
+pkgs-freeze.txt
 *.spec
 __pycache__/
 *.pyc
 *.pyo
+
+# Scratch / leftovers of an interrupted build
+_getpip.py
+_py_embed.zip
+_launcher_stub.py
+_launcher_version.txt
+-p/
 
 # User data (never commit)
 clipfinder_config.json
