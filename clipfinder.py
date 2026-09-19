@@ -19,42 +19,9 @@ _cf_pkgs = os.path.join(_cf_appdata, 'ClipFinder', 'pkgs')
 if os.path.isdir(_cf_pkgs) and _cf_pkgs not in sys.path:
     sys.path.insert(0, _cf_pkgs)
 
-# Import shared core logic — AI prompts, transcription, analysis
-# Edit clipfinder_core.py to change AI behavior across all platforms
-# Graceful fallback: if core not found, auto-downloads it from GitHub then restarts
-try:
-    from clipfinder_core import (
-        AUTO_EDIT_PROMPT, AI_PROMPT, INTERVIEW_CLIP_PROMPT,
-        TWEET_PROMPT, TWEET_TONE_PROMPTS,
-        ts, ts_srt,
-        detect_gpu_encoder, detect_encoder_name, get_encoder,
-        _analyze_audio_energy, _analyze_scene_changes,
-        _do_transcribe,
-    )
-    _CORE_LOADED = True
-except ImportError:
-    # Core not found — download it then import it before falling back
-    try:
-        import urllib.request as _ur_core, pathlib as _pl_core
-        _core_dst = _pl_core.Path(__file__).parent / 'clipfinder_core.py'
-        print('[CF] clipfinder_core.py not found — downloading...')
-        _ur_core.urlretrieve(
-            'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py',
-            str(_core_dst))
-        print('[CF] clipfinder_core.py downloaded — importing...')
-        from clipfinder_core import (
-            AUTO_EDIT_PROMPT, AI_PROMPT, INTERVIEW_CLIP_PROMPT,
-            TWEET_PROMPT, TWEET_TONE_PROMPTS,
-            ts, ts_srt,
-            detect_gpu_encoder, detect_encoder_name, get_encoder,
-            _analyze_audio_energy, _analyze_scene_changes,
-            _do_transcribe,
-        )
-        _CORE_LOADED = True
-        print('[CF] clipfinder_core loaded successfully')
-    except Exception as _core_dl_err:
-        print(f'[CF] Could not get clipfinder_core.py: {_core_dl_err} — using inline fallback')
-        _CORE_LOADED = False
+# NOTE: clipfinder_core.py is no longer used. Every name this block used to import (prompts, ts,
+# get_encoder, _do_transcribe, ...) is defined in this file - the core copy was dead code that
+# had drifted from it, and the auto-download of it only added a failure point. Retired in 1.4.0.
 
 # vision_refs folder and default reference images are bootstrapped in _check_first_run()
 
@@ -192,48 +159,17 @@ def _get_pip_executable():
 
 
 def _pip_cmd(packages, extra_args=None, target=None):
-    """Build a pip install command targeting USER_DIR/pkgs."""
-    pip_exe = _get_pip_executable()
-    if pip_exe is None:
+    """Build a pip install command targeting USER_DIR/pkgs (argv list, or None if no Python found)."""
+    py = pm_python()
+    if py is None:
         return None
-    parts = pip_exe.split() if ' ' in pip_exe else [pip_exe]
-    tgt = target or PKGS_DIR
-    cmd = parts + ['-m', 'pip', 'install',
-                   '--target', str(tgt),
-                   '--upgrade',
-                   '--quiet',
-                   '--no-warn-script-location'] + (extra_args or []) + packages
-    return cmd
+    return py + ['-m', 'pip', 'install', '--target', str(target or PKGS_DIR), '--upgrade', '--quiet',
+                 '--no-warn-script-location'] + (extra_args or []) + list(packages)
 
 
 def _pip_cmd_safe(packages, extra_args=None):
-    """Like _pip_cmd but skips packages whose .pyd files are locked (already loaded).
-    Uses --no-deps and catches permission errors gracefully."""
-    pip_exe = _get_pip_executable()
-    if pip_exe is None:
-        return None
-    parts = pip_exe.split() if ' ' in pip_exe else [pip_exe]
-    # Check if any of these packages have locked .pyd files
-    _locked = set()
-    for _pkg in packages:
-        _mod = _pkg.replace('-','_').split('==')[0]
-        for _pyd in PKGS_DIR.glob(f'{_mod}/**/*.pyd'):
-            try:
-                import os as _os3
-                # Try opening exclusively — if locked, skip upgrade
-                with open(_pyd, 'rb'): pass
-            except (PermissionError, OSError):
-                _locked.add(_pkg)
-                break
-    # For locked packages, use --ignore-installed to install alongside
-    _safe_pkgs = [p for p in packages if p not in _locked]
-    if not _safe_pkgs:
-        return None  # all locked, nothing to do
-    cmd = parts + ['-m', 'pip', 'install',
-                   '--target', str(PKGS_DIR),
-                   '--upgrade', '--quiet',
-                   '--no-warn-script-location'] + (extra_args or []) + _safe_pkgs
-    return cmd
+    """Kept for compatibility - same as _pip_cmd."""
+    return _pip_cmd(packages, extra_args)
 
 
 # Packages installed by the app go here — survives across EXE relaunches
@@ -251,6 +187,1120 @@ def _fresh_import(module_name):
         if key in sys.modules:
             del sys.modules[key]
     return _il.import_module(module_name)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UPDATE MANAGER - package updates, isolated engines (Demucs) and app self-update
+# ══════════════════════════════════════════════════════════════════════════════
+# begin-update-manager
+# Why it is built this way (each point is a bug users actually hit):
+#   * `pip install --target PKGS_DIR` fails on Windows whenever ClipFinder (or a second copy) has a
+#     .pyd/.dll from that folder loaded, leaving half-updated packages. So an update is downloaded and
+#     import-tested in a STAGING folder while the app runs, then swapped into PKGS_DIR at the next
+#     start, before anything is imported (pm_apply_staged). A failed swap rolls back.
+#   * `pip --target --upgrade` leaves the old *.dist-info behind. The swap removes the old version's
+#     files using its RECORD, so nothing stale is left.
+#   * Updating pydantic-core (or numpy, torch, ...) as a side effect of updating something else breaks
+#     other packages, so ABI-sensitive packages are never overwritten unless they are the target.
+#   * Demucs needs its own torch/numpy. It lives in an isolated environment (envs/demucs) that the app
+#     never imports; it is only run in a subprocess, so it can be rebuilt and swapped safely.
+#   * One failed package must not abort the rest, pip errors must be visible, and a "done" marker must
+#     never be written for a failed install.
+import os as _um_os, re as _um_re, json as _um_json, time as _um_time, shutil as _um_sh, csv as _um_csv
+import subprocess as _um_sp, threading as _um_thr, urllib.request as _um_ur, urllib.error as _um_ue
+
+STAGE_DIR       = USER_DIR / 'pkgs_staging'
+BACKUP_DIR      = USER_DIR / 'pkgs_backup'
+ENVS_DIR        = USER_DIR / 'envs'
+UPDATE_LOG      = USER_DIR / 'update.log'
+_UM_PYPI_CACHE  = USER_DIR / 'pypi_cache.json'
+CPU_TORCH_INDEX = 'https://download.pytorch.org/whl/cpu'
+APP_REPO        = 'thatspeedykid/clipfinder'
+_UM_UA          = 'ClipFinder-Updater'
+_UM_CNW         = 0x08000000 if _um_os.name == 'nt' else 0        # CREATE_NO_WINDOW
+
+
+def um_log(msg):
+    """Append to update.log (rotated at 1 MB) and echo to the console."""
+    line = f'{_um_time.strftime("%Y-%m-%d %H:%M:%S")}  {msg}'
+    try:
+        if UPDATE_LOG.exists() and UPDATE_LOG.stat().st_size > 1_000_000:
+            UPDATE_LOG.replace(UPDATE_LOG.with_name('update.log.1'))
+        with open(UPDATE_LOG, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception:
+        pass
+    try:
+        print(f'[CF] {msg}')
+    except Exception:
+        pass
+
+
+# ── versions ─────────────────────────────────────────────────────────────────
+def _pm_norm(name):
+    return _um_re.sub(r'[-_.]+', '_', str(name)).lower()
+
+
+def _pm_vkey(v):
+    """Sortable key for a version string. 1.0 == 1.0.0; pre-releases sort before the release."""
+    m = _um_re.match(r'\s*v?(\d+(?:\.\d+)*)(.*)$', str(v).split('+')[0])       # drop the local part (2.14.0+cpu)
+    if not m:
+        return ((0,), 0)
+    rel = [int(x) for x in m.group(1).split('.')]
+    while len(rel) > 1 and rel[-1] == 0:
+        rel.pop()
+    tail = m.group(2).lower()
+    pre = 0 if _um_re.match(r'^[.\-_]?(a|b|c|rc|alpha|beta|pre|preview)[.\-_]?\d*', tail) or 'dev' in tail else 1
+    return (tuple(rel), pre)
+
+
+def _pm_satisfies(ver, spec):
+    """True if `ver` satisfies a specifier string such as '>=2.24,<3' (empty spec = always)."""
+    if not spec:
+        return True
+    vk = _pm_vkey(ver)
+    for clause in [c.strip() for c in str(spec).split(',') if c.strip()]:
+        m = _um_re.match(r'^(===|==|!=|~=|>=|<=|>|<)\s*(\S+)$', clause)
+        if not m:
+            continue
+        op, want = m.groups()
+        if want.endswith('.*'):                                   # ==1.2.* / !=1.2.*
+            pre = tuple(int(x) for x in want[:-2].split('.') if x.isdigit())
+            has = vk[0][:len(pre)] == pre
+            if (op == '==' and not has) or (op == '!=' and has):
+                return False
+            continue
+        wk = _pm_vkey(want)
+        if op in ('==', '===') and vk != wk: return False
+        if op == '!=' and vk == wk: return False
+        if op == '>=' and vk < wk: return False
+        if op == '<=' and vk > wk: return False
+        if op == '>' and vk <= wk: return False
+        if op == '<' and vk >= wk: return False
+        if op == '~=':
+            rel = list(wk[0]) + [0]
+            if vk < wk or vk[0][:max(1, len(wk[0]) - 1)] != wk[0][:max(1, len(wk[0]) - 1)]:
+                return False
+    return True
+
+
+# ── registry ─────────────────────────────────────────────────────────────────
+# policy: 'latest'  keep on the newest release (sites/APIs change constantly)
+#         'compat'  newest release that still satisfies `spec` (major-version fence for the SDKs)
+#         'keep'    install when missing / outside `spec`, never bump automatically (ABI-sensitive)
+# required: installed automatically at start-up when missing; optional ones are offered in Settings.
+PKG_REGISTRY = [
+    dict(name='yt-dlp', extras='default,curl-cffi', mod='yt_dlp', group='Downloader', policy='latest',
+         spec='>=2026.8.19', required=True, desc='Video downloader. Sites change constantly, so this one is kept on the newest release'),
+    dict(name='curl-cffi', mod='curl_cffi', group='Downloader', policy='compat', spec='>=0.10,<0.17',
+         required=True, desc='Browser impersonation for Kick / TikTok (yt-dlp accepts only 0.10 - 0.16)'),
+    dict(name='requests', mod='requests', group='Downloader', policy='keep', spec='>=2.32.2,<3',
+         required=True, desc='HTTP client'),
+    dict(name='google-genai', mod='google.genai', group='AI providers', policy='compat', spec='>=2.24,<3',
+         required=True, desc='Gemini provider'),
+    dict(name='groq', mod='groq', group='AI providers', policy='compat', spec='>=1.7,<2',
+         required=True, desc='Groq provider'),
+    dict(name='openai', mod='openai', group='AI providers', policy='compat', spec='>=3.16,<4',
+         required=True, desc='OpenRouter / OpenAI-compatible provider'),
+    dict(name='faster-whisper', mod='faster_whisper', group='Transcription', policy='keep', spec='>=1.2.1,<2',
+         required=True, desc='Transcription engine (CPU / NVIDIA)'),
+    dict(name='openai-whisper', mod='whisper', group='Transcription', policy='keep', spec='==20250625',
+         required=False, no_deps=True, needs=['torch'], desc='Fallback transcription engine (needs PyTorch)'),
+    dict(name='torch', mod='torch', group='Transcription', policy='keep', spec='>=2.1', required=False,
+         index=CPU_TORCH_INDEX, timeout=5400, desc='PyTorch (CPU) - only needed by the openai-whisper fallback'),
+    dict(name='Pillow', mod='PIL', group='Media', policy='keep', spec='>=10', required=True, desc='Image processing'),
+    dict(name='numpy', mod='numpy', group='Media', policy='keep', spec='>=1.26,<2.6', required=True,
+         desc='Numeric processing'),
+    dict(name='opencv-contrib-python', alt=['opencv-python', 'opencv-python-headless', 'opencv-contrib-python-headless'],
+         mod='cv2', group='Media', policy='keep', spec='>=4.8', required=True, timeout=3600,
+         desc='Video frame analysis, face tracking, upscaling'),
+    dict(name='imagehash', mod='imagehash', group='Media', policy='keep', spec='>=4.3', required=True,
+         desc='Duplicate image detection'),
+    dict(name='soundfile', mod='soundfile', group='Media', policy='keep', spec='>=0.12', required=True,
+         desc='Audio read/write (Censor tab)'),
+    dict(name='fonttools', mod='fontTools', group='Media', policy='keep', spec='>=4.40', required=True,
+         desc='Font handling (Burn Subtitles)'),
+    dict(name='ddgs', mod='ddgs', group='Tools', policy='latest', spec='>=9', required=True,
+         desc='Web image search (Thumbnail Finder). Scrapes search engines, so keep it fresh'),
+    dict(name='python-vlc', mod=None, group='Tools', policy='keep', spec='>=3.0.21203', required=False,
+         desc='Inline video player in the Editor (also needs VLC media player installed)'),
+]
+
+# Never overwritten as a side effect of updating something else (ABI / DLL sensitive).
+_PM_PROTECT = {'numpy', 'torch', 'torchaudio', 'scipy', 'numba', 'llvmlite', 'onnxruntime', 'ctranslate2', 'av',
+               'opencv_python', 'opencv_contrib_python', 'opencv_python_headless', 'opencv_contrib_python_headless',
+               'mediapipe', 'pillow', 'tokenizers'}
+# Distributions that must move together (a new pydantic with an old pydantic_core raises SystemError).
+_PM_GROUPS = [{'pydantic', 'pydantic_core'}, {'numba', 'llvmlite'},
+              {'opencv_python', 'opencv_contrib_python', 'opencv_python_headless', 'opencv_contrib_python_headless'}]
+_PM_SKIP_TOP = {'bin', 'Scripts', 'share', 'include', '__pycache__'}
+
+
+def pm_entry(name):
+    n = _pm_norm(name)
+    for e in PKG_REGISTRY:
+        if _pm_norm(e['name']) == n or n in [_pm_norm(a) for a in e.get('alt', [])]:
+            return e
+    return None
+
+
+def pm_requirement(e):
+    """pip requirement string for a registry entry, e.g. 'yt-dlp[default,curl-cffi]>=2026.8.19'."""
+    extras = f'[{e["extras"]}]' if e.get('extras') else ''
+    return f'{e["name"]}{extras}{e.get("spec", "")}'
+
+
+# ── what is installed ─────────────────────────────────────────────────────────
+_DIST_RE = _um_re.compile(r'^(?P<n>.+?)-(?P<v>\d[^-]*)\.dist-info$')
+
+
+def pm_installed(root=None):
+    """{normalised name: [(version, dist-info path), ...]} sorted oldest -> newest."""
+    root = _PathBase(root or PKGS_DIR)
+    out = {}
+    try:
+        for p in root.iterdir():
+            m = _DIST_RE.match(p.name)
+            if m and p.is_dir():
+                out.setdefault(_pm_norm(m.group('n')), []).append((m.group('v'), p))
+    except OSError:
+        return {}
+    return {n: sorted(vs, key=lambda t: _pm_vkey(t[0])) for n, vs in out.items()}
+
+
+def pm_version(e, inst=None):
+    """Installed version of a registry entry (also matches its `alt` distributions), or None."""
+    inst = inst if inst is not None else pm_installed()
+    for n in [e['name']] + list(e.get('alt', [])):
+        vs = inst.get(_pm_norm(n))
+        if vs:
+            return vs[-1][0]
+    return None
+
+
+# ── PyPI (cached) ─────────────────────────────────────────────────────────────
+def _pm_pyok(req):
+    """Does the running Python satisfy a release's requires_python?"""
+    if not req:
+        return True
+    return _pm_satisfies('%d.%d.%d' % sys.version_info[:3], req)
+
+
+def pm_pypi_releases(name, timeout=10, max_age=6 * 3600, force=False):
+    """{version: requires_python} of the installable (non-yanked, final) releases, or None if unreachable.
+    Cached on disk so the Settings page and the start-up check do not hammer PyPI."""
+    key = _pm_norm(name)
+    cache = {}
+    try:
+        cache = _um_json.loads(_UM_PYPI_CACHE.read_text(encoding='utf-8')) if _UM_PYPI_CACHE.exists() else {}
+    except Exception:
+        cache = {}
+    ent = cache.get(key)
+    if ent and not force and _um_time.time() - ent.get('t', 0) < max_age:
+        return ent['v']
+    try:
+        req = _um_ur.Request(f'https://pypi.org/pypi/{name}/json', headers={'User-Agent': _UM_UA})
+        with _um_ur.urlopen(req, timeout=timeout) as r:
+            data = _um_json.loads(r.read().decode('utf-8'))
+        rels = {}
+        for ver, files in (data.get('releases') or {}).items():
+            if not files or all(f.get('yanked') for f in files):
+                continue
+            if _pm_vkey(ver)[1] == 0:                     # skip pre-releases
+                continue
+            rels[ver] = next((f.get('requires_python') for f in files if f.get('requires_python')), '') or ''
+        cache[key] = {'t': _um_time.time(), 'v': rels}
+        try:
+            _UM_PYPI_CACHE.write_text(_um_json.dumps(cache), encoding='utf-8')
+        except Exception:
+            pass
+        return rels
+    except Exception:
+        return ent['v'] if ent else None                 # stale cache beats nothing when offline
+
+
+def pm_best_version(name, spec='', force=False):
+    """Newest release that satisfies `spec` and can be installed on this Python, or None."""
+    rels = pm_pypi_releases(name, force=force)
+    if not rels:
+        return None
+    ok = [v for v, rp in rels.items() if _pm_satisfies(v, spec) and _pm_pyok(rp)]
+    return max(ok, key=_pm_vkey) if ok else None
+
+
+def pm_plan(entries=None, online=True, force=False):
+    """One row per registry entry:
+       state = 'missing' | 'below' (installed but outside the allowed range) | 'outdated' | 'ok'
+       plus installed / latest versions, so the UI and the start-up sync share one decision."""
+    entries = entries if entries is not None else PKG_REGISTRY
+    inst = pm_installed()
+    rows = []
+    lock = _um_thr.Lock()
+
+    def _one(e):
+        cur = pm_version(e, inst)
+        row = dict(e, installed=cur, latest=None, state='ok')
+        if online:
+            row['latest'] = pm_best_version(e['name'], e.get('spec', '') if e['policy'] == 'compat' else '', force=force)
+        if cur is None:
+            row['state'] = 'missing'
+        elif e.get('spec') and not _pm_satisfies(cur, e['spec']):
+            row['state'] = 'below'
+        elif row['latest'] and _pm_vkey(row['latest']) > _pm_vkey(cur):
+            row['state'] = 'outdated' if e['policy'] in ('latest', 'compat') else 'newer'
+        with lock:
+            rows.append(row)
+
+    if online and len(entries) > 1:
+        ts = [_um_thr.Thread(target=_one, args=(e,), daemon=True) for e in entries]
+        for t in ts: t.start()
+        for t in ts: t.join(timeout=25)
+    else:
+        for e in entries: _one(e)
+    order = {e['name']: i for i, e in enumerate(entries)}
+    return sorted(rows, key=lambda r: order.get(r['name'], 999))
+
+
+# ── running pip & friends ─────────────────────────────────────────────────────
+def _um_kill(p):
+    try:
+        if _um_os.name == 'nt':
+            _um_sp.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], capture_output=True, creationflags=_UM_CNW)
+        else:
+            p.kill()
+    except Exception:
+        try: p.kill()
+        except Exception: pass
+
+
+def _um_run(cmd, tag='', on_line=None, timeout=3600, cancel=None, env=None, cwd=None):
+    """Run cmd, stream its output to update.log / on_line, honour a timeout and a cancel Event.
+    -> (returncode, last lines, state) with state 'ok' | 'timeout' | 'cancelled'."""
+    import collections
+    p = _um_sp.Popen(cmd, stdout=_um_sp.PIPE, stderr=_um_sp.STDOUT, stdin=_um_sp.DEVNULL, text=True,
+                     encoding='utf-8', errors='replace', bufsize=1, creationflags=_UM_CNW, env=env, cwd=cwd)
+    tail = collections.deque(maxlen=60)
+    state = {'v': 'ok'}
+    done = _um_thr.Event()
+
+    def _watch():
+        t0 = _um_time.time()
+        while not done.is_set():
+            if cancel is not None and cancel.is_set():
+                state['v'] = 'cancelled'; _um_kill(p); return
+            if _um_time.time() - t0 > timeout:
+                state['v'] = 'timeout'; _um_kill(p); return
+            done.wait(0.4)
+
+    w = _um_thr.Thread(target=_watch, daemon=True)
+    w.start()
+    try:
+        for raw in p.stdout:
+            line = _um_re.sub(r'\x1b\[[0-9;]*m', '', raw).strip()
+            if not line:
+                continue
+            tail.append(line)
+            um_log(f'{tag} {line[:300]}')
+            if on_line:
+                try: on_line(line)
+                except Exception: pass
+        rc = p.wait()
+    finally:
+        done.set()
+    return rc, '\n'.join(tail), state['v']
+
+
+def pm_python():
+    """argv prefix of the interpreter to use for pip / helper scripts (never the frozen launcher EXE)."""
+    exe = _PathBase(sys.executable)
+    if exe.name.lower() in ('python.exe', 'python3.exe', 'python', 'python3', 'pythonw.exe'):
+        if exe.name.lower() == 'pythonw.exe' and (exe.parent / 'python.exe').exists():
+            return [str(exe.parent / 'python.exe')]
+        return [str(exe)]
+    import shutil as _sh
+    py = _sh.which('py')
+    if py:
+        try:
+            if _um_sp.run([py, '-3.12', '--version'], capture_output=True, timeout=8, creationflags=_UM_CNW).returncode == 0:
+                return [py, '-3.12']
+        except Exception:
+            pass
+    for name in ('python3.12', 'python3.12.exe', 'python.exe', 'python3.exe', 'python', 'python3'):
+        found = _sh.which(name)
+        if found and _PathBase(found).resolve() != exe.resolve():
+            return [found]
+    for pat in (r'C:\Python312\python.exe', r'C:\Program Files\Python312\python.exe',
+                _um_os.environ.get('LOCALAPPDATA', '') + r'\Programs\Python\Python312\python.exe'):
+        if _PathBase(pat).exists():
+            return [pat]
+    return None
+
+
+_PIP_FLAGS = ['--disable-pip-version-check', '--no-input', '--progress-bar', 'off',
+              '--no-warn-script-location', '--prefer-binary']
+
+
+def pm_ensure_pip(on_line=None):
+    py = pm_python()
+    if not py:
+        return False
+    if _um_sp.run(py + ['-m', 'pip', '--version'], capture_output=True, creationflags=_UM_CNW).returncode == 0:
+        return True
+    um_log('pip missing - bootstrapping with ensurepip')
+    rc, _, _ = _um_run(py + ['-m', 'ensurepip', '--upgrade'], 'ensurepip', on_line, timeout=300)
+    return rc == 0
+
+
+def _pm_explain(tail):
+    """Turn the tail of a pip log into a short message a user can act on."""
+    t = tail or ''
+    tl = t.lower()
+    if 'resolutionimpossible' in tl or 'conflict' in tl:
+        return 'Version conflict between packages (see update.log). Try "Repair".'
+    if 'could not find a version' in tl or 'no matching distribution' in tl:
+        return 'No matching release for this Python version (see update.log).'
+    if any(x in tl for x in ('connection', 'timed out', 'getaddrinfo', 'max retries', 'ssl')):
+        return 'Network problem while downloading - check your connection and try again.'
+    if 'access is denied' in tl or 'permission' in tl:
+        return 'A file is in use. Close other ClipFinder windows and try again.'
+    if 'no space left' in tl or 'disk full' in tl:
+        return 'Not enough disk space.'
+    last = [l for l in t.splitlines() if l.strip()][-1:] or ['pip failed']
+    return last[0][:200]
+
+
+def pm_constraints():
+    """Constraints file pinning the protected packages to what is installed, so a joint resolve never
+    picks an incompatible numpy/torch/... (they are downloaded but skipped at swap time)."""
+    lines = []
+    for n, vs in pm_installed().items():
+        if n in _PM_PROTECT and vs:
+            lines.append(f'{n.replace("_", "-")}=={vs[-1][0].split("+")[0]}')
+    STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    f = STAGE_DIR / '_constraints.txt'
+    f.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return f if lines else None
+
+
+def pm_verify(mod, dirs, timeout=240):
+    """Import `mod` in a fresh interpreter whose sys.path starts with `dirs`. -> (ok, error text)."""
+    if not mod:
+        return True, ''
+    py = pm_python()
+    if not py:
+        return False, 'no Python interpreter found'
+    code = ('import sys; sys.path[:0] = %r; import importlib; m = importlib.import_module(%r); '
+            'print(getattr(m, "__version__", ""))' % ([str(d) for d in dirs], mod))
+    env = dict(_um_os.environ)
+    env['PYTHONNOUSERSITE'] = '1'
+    env.pop('PYTHONPATH', None)
+    try:
+        r = _um_sp.run(py + ['-c', code], capture_output=True, text=True, timeout=timeout, env=env,
+                       creationflags=_UM_CNW)
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+    if r.returncode == 0:
+        return True, (r.stdout or '').strip()
+    return False, ((r.stderr or r.stdout or '').strip().splitlines() or ['import failed'])[-1][:300]
+
+
+def pm_stage(entries, on_line=None, cancel=None):
+    """Download `entries` (registry dicts) into a fresh staging folder in ONE pip transaction, so the
+    resolver picks one consistent set. Entries with no_deps (source-only wheels) are staged separately.
+    Verifies every module imports from the staged copy. -> list of result dicts (one per transaction)."""
+    if not pm_ensure_pip(on_line):
+        return [dict(ok=False, names=[e['name'] for e in entries], error='pip is not available for this Python')]
+    joint = [e for e in entries if not e.get('no_deps')]
+    solo = [e for e in entries if e.get('no_deps')]
+    results = []
+    for group in ([joint] if joint else []) + [[e] for e in solo]:
+        if cancel is not None and cancel.is_set():
+            break
+        results.append(_pm_stage_group(group, on_line, cancel))
+    return results
+
+
+def _pm_stage_group(group, on_line, cancel):
+    names = [e['name'] for e in group]
+    batch = STAGE_DIR / (_um_time.strftime('%Y%m%d-%H%M%S') + '-' + _pm_norm(names[0])[:24])
+    _um_sh.rmtree(batch, ignore_errors=True)
+    batch.mkdir(parents=True, exist_ok=True)
+    py = pm_python()
+    cmd = py + ['-m', 'pip', 'install', '--target', str(batch), '--upgrade'] + _PIP_FLAGS
+    indexes = {e['index'] for e in group if e.get('index')}
+    for ix in indexes:
+        cmd += ['--extra-index-url', ix]
+    if any(e.get('no_deps') for e in group):
+        cmd += ['--no-deps']
+    cons = pm_constraints()
+    if cons and not any(e.get('no_deps') for e in group):
+        cmd += ['-c', str(cons)]
+    cmd += [pm_requirement(e) for e in group]
+    timeout = max([e.get('timeout', 1800) for e in group] + [1800])
+    um_log('staging ' + ', '.join(pm_requirement(e) for e in group))
+    rc, tail, state = _um_run(cmd, 'pip', on_line, timeout=timeout, cancel=cancel)
+    if rc != 0 and state == 'ok':                         # one retry: most failures are network hiccups
+        um_log('pip failed - retrying once')
+        _um_sh.rmtree(batch, ignore_errors=True); batch.mkdir(parents=True, exist_ok=True)
+        rc, tail, state = _um_run(cmd, 'pip', on_line, timeout=timeout, cancel=cancel)
+    if state == 'cancelled':
+        _um_sh.rmtree(batch, ignore_errors=True)
+        return dict(ok=False, names=names, error='Cancelled')
+    if state == 'timeout':
+        _um_sh.rmtree(batch, ignore_errors=True)
+        return dict(ok=False, names=names, error='Timed out - the download was too slow. Try again.')
+    if rc != 0:
+        _um_sh.rmtree(batch, ignore_errors=True)
+        return dict(ok=False, names=names, error=_pm_explain(tail))
+    inst = pm_installed(batch)
+    versions = {e['name']: pm_version(e, inst) for e in group}
+    for e in group:                                       # the exact thing we asked for must be there
+        if versions[e['name']] is None:
+            _um_sh.rmtree(batch, ignore_errors=True)
+            return dict(ok=False, names=names, error=f'{e["name"]} was not installed by pip (see update.log)')
+    for e in group:
+        if e.get('mod'):
+            ok, err = pm_verify(e['mod'], [batch, PKGS_DIR])          # staged copy first, live deps behind it
+            if not ok:
+                _um_sh.rmtree(batch, ignore_errors=True)
+                um_log(f'verify failed for {e["name"]}: {err}')
+                return dict(ok=False, names=names, error=f'{e["name"]} downloaded but does not import: {err}')
+    (batch / '.ready').write_text(_um_json.dumps({'targets': names, 'versions': versions,
+                                                  'time': _um_time.time()}), encoding='utf-8')
+    um_log(f'staged OK: {versions}')
+    return dict(ok=True, names=names, versions=versions, batch=str(batch))
+
+
+# ── swap staged packages into PKGS_DIR (run before anything is imported) ──────
+def _pm_record_files(dist_info):
+    """Files (posix paths relative to the packages root) a distribution owns, from its RECORD."""
+    out = []
+    rec = _PathBase(dist_info) / 'RECORD'
+    try:
+        with open(rec, newline='', encoding='utf-8') as f:
+            for row in _um_csv.reader(f):
+                if not row or not row[0]:
+                    continue
+                p = row[0].replace('\\', '/')
+                if p.startswith('../') or p.startswith('/') or ':' in p.split('/')[0]:
+                    continue
+                if p.split('/')[0] in _PM_SKIP_TOP:
+                    continue
+                out.append(p)
+    except OSError:
+        pass
+    return out
+
+
+def _pm_merge(batch, info):
+    """Move one staged batch into PKGS_DIR. All-or-nothing: any failure (typically a locked .pyd) rolls the
+    already-moved files back. -> result dict."""
+    targets = {_pm_norm(n) for n in info.get('targets', [])}
+    staged = pm_installed(batch)
+    live = pm_installed(PKGS_DIR)
+    take = set()
+    for n, vs in staged.items():
+        sv = vs[-1][0]
+        if n in targets:
+            take.add(n)
+        elif n not in live:
+            take.add(n)                                          # dependency we simply did not have yet
+        elif n in _PM_PROTECT:
+            continue                                             # never disturb ABI-sensitive packages
+        elif _pm_vkey(sv) > _pm_vkey(live[n][-1][0]):
+            take.add(n)                                          # newer dependency
+    for grp in _PM_GROUPS:                                       # pydantic + pydantic_core move together
+        if take & grp:
+            take |= {n for n in grp if n in staged}
+    if not take:
+        return dict(ok=True, targets=sorted(targets), moved=0)
+    stamp = _um_time.strftime('%Y%m%d-%H%M%S')
+    bdir = BACKUP_DIR / stamp
+    ops = []                                                     # ('b', live, backup) / ('i', live)
+    try:
+        # 1) take the OLD versions out of the way (their own files only)
+        for n in sorted(take):
+            for ver, dpath in live.get(n, []):
+                rels = [r for r in _pm_record_files(dpath) if not r.startswith(dpath.name + '/')]
+                for rel in rels:
+                    src = PKGS_DIR / rel
+                    if src.is_file():
+                        dst = bdir / rel
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        _um_os.replace(src, dst)
+                        ops.append(('b', src, dst))
+                if dpath.exists():                               # dist-info dir (and anything RECORD missed)
+                    dst = bdir / dpath.name
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    _um_os.replace(dpath, dst)
+                    ops.append(('b', dpath, dst))
+        # 2) put the NEW files in
+        for n in sorted(take):
+            dpath = staged[n][-1][1]
+            for rel in [r for r in _pm_record_files(dpath) if not r.startswith(dpath.name + '/')]:
+                src = batch / rel
+                if not src.is_file():
+                    continue
+                dst = PKGS_DIR / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():                                 # untracked leftover: back it up too
+                    bk = bdir / rel
+                    bk.parent.mkdir(parents=True, exist_ok=True)
+                    _um_os.replace(dst, bk)
+                    ops.append(('b', dst, bk))
+                _um_os.replace(src, dst)
+                ops.append(('i', dst))
+            dst = PKGS_DIR / dpath.name
+            _um_os.replace(dpath, dst)
+            ops.append(('i', dst))
+        # 3) prove the merged result works before we commit to it
+        for e in [pm_entry(t) for t in info.get('targets', [])]:
+            if e and e.get('mod'):
+                ok, err = pm_verify(e['mod'], [PKGS_DIR])
+                if not ok:
+                    raise RuntimeError(f'{e["name"]} does not import after the update: {err}')
+    except Exception as ex:
+        for op in reversed(ops):                                 # rollback
+            try:
+                if op[0] == 'i':
+                    p = op[1]
+                    if p.is_dir(): _um_sh.rmtree(p, ignore_errors=True)
+                    elif p.exists(): p.unlink()
+                else:
+                    op[1].parent.mkdir(parents=True, exist_ok=True)
+                    _um_os.replace(op[2], op[1])
+            except Exception:
+                pass
+        um_log(f'swap failed and was rolled back: {ex}')
+        return dict(ok=False, targets=sorted(targets), error=str(ex))
+    for d in sorted({op[1].parent for op in ops if op[0] == 'b'}, key=lambda p: -len(p.parts)):
+        try:                                                     # tidy empty package folders left behind
+            while d != PKGS_DIR and d.is_dir() and not any(d.iterdir()):
+                d.rmdir(); d = d.parent
+        except Exception:
+            pass
+    return dict(ok=True, targets=sorted(targets), moved=len([o for o in ops if o[0] == 'i']),
+                versions=info.get('versions', {}))
+
+
+_UM_LOCK_FD = None
+
+
+def um_acquire_instance_lock():
+    """Hold an OS-level lock for the lifetime of this process. -> False if another ClipFinder already
+    holds it. (Windows lets you rename a DLL that is loaded, so a swap would NOT fail under a running
+    copy - it would just leave that copy with a half-changed package set. Hence this lock.)"""
+    global _UM_LOCK_FD
+    if _UM_LOCK_FD is not None:
+        return True
+    try:
+        import msvcrt
+    except ImportError:
+        return True
+    try:
+        fd = open(USER_DIR / '.instance.lock', 'a+b')
+        fd.seek(0)
+        msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        _UM_LOCK_FD = fd
+        return True
+    except Exception:
+        return False
+
+
+def um_release_instance_lock():
+    """Give the lock up (call right before starting the replacement process on a self-restart)."""
+    global _UM_LOCK_FD
+    try:
+        if _UM_LOCK_FD is not None:
+            _UM_LOCK_FD.close()
+    except Exception:
+        pass
+    _UM_LOCK_FD = None
+
+
+def pm_apply_staged():
+    """Swap every verified staged batch into PKGS_DIR, but only when no other ClipFinder is running.
+    Batches that cannot be swapped stay staged and are retried on the next start."""
+    results = []
+    try:
+        if not um_acquire_instance_lock():                       # always take the lock: we ARE the running instance
+            if pm_pending():
+                um_log('another ClipFinder is running - staged updates wait for the next start')
+            return results
+        if not STAGE_DIR.exists():
+            return results
+        for batch in sorted(p for p in STAGE_DIR.iterdir() if p.is_dir()):
+            ready = batch / '.ready'
+            if not ready.exists():                               # aborted download: discard
+                _um_sh.rmtree(batch, ignore_errors=True)
+                continue
+            try:
+                info = _um_json.loads(ready.read_text(encoding='utf-8'))
+            except Exception:
+                _um_sh.rmtree(batch, ignore_errors=True)
+                continue
+            res = _pm_merge(batch, info)
+            results.append(res)
+            if res['ok']:
+                _um_sh.rmtree(batch, ignore_errors=True)
+                um_log(f'applied update: {res.get("versions")}')
+            else:
+                info['tries'] = info.get('tries', 0) + 1
+                if info['tries'] >= 3:                           # do not retry forever
+                    _um_sh.rmtree(batch, ignore_errors=True)
+                    um_log(f'giving up on staged batch {batch.name}: {res.get("error")}')
+                else:
+                    ready.write_text(_um_json.dumps(info), encoding='utf-8')
+    except Exception as e:
+        um_log(f'pm_apply_staged error: {e}')
+    if results:
+        try:
+            import importlib as _il
+            _il.invalidate_caches()
+        except Exception:
+            pass
+    return results
+
+
+def pm_pending():
+    """Names staged and waiting for the next start."""
+    out = []
+    try:
+        for b in STAGE_DIR.iterdir():
+            r = b / '.ready'
+            if b.is_dir() and r.exists():
+                out += _um_json.loads(r.read_text(encoding='utf-8')).get('targets', [])
+    except Exception:
+        pass
+    return out
+
+
+def pm_cleanup_backups(keep_days=3):
+    """Drop old swap backups (run once the app has started fine)."""
+    try:
+        for d in BACKUP_DIR.iterdir():
+            if d.is_dir() and _um_time.time() - d.stat().st_mtime > keep_days * 86400:
+                _um_sh.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def pm_check_conflicts():
+    """Requirement conflicts among the installed packages -> list of text lines (empty = consistent)."""
+    py = pm_python()
+    if not py:
+        return ['no Python interpreter found']
+    code = r'''
+import sys, json
+sys.path[:0] = [%r]
+from importlib.metadata import distributions
+try:
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.version import Version
+except Exception as e:
+    print(json.dumps(['cannot check: ' + str(e)])); raise SystemExit
+dists = {}
+for d in distributions(path=[%r]):
+    dists[d.metadata['Name'].lower().replace('_', '-')] = d
+bad = []
+for name, d in dists.items():
+    for r in (d.requires or []):
+        try: req = Requirement(r)
+        except Exception: continue
+        if req.marker is not None and not req.marker.evaluate({'extra': ''}): continue
+        dep = dists.get(req.name.lower().replace('_', '-'))
+        if dep is None:
+            continue
+        if req.specifier and not req.specifier.contains(Version(dep.version), prereleases=True):
+            bad.append('%%s requires %%s but %%s is installed' %% (name, r.split(';')[0].strip(), dep.version))
+print(json.dumps(bad))
+''' % (str(PKGS_DIR), str(PKGS_DIR))
+    try:
+        r = _um_sp.run(py + ['-c', code], capture_output=True, text=True, timeout=120, creationflags=_UM_CNW)
+        return _um_json.loads((r.stdout or '[]').strip().splitlines()[-1])
+    except Exception as e:
+        return [f'conflict check failed: {e}']
+
+
+# ── start-up sync: bring the REQUIRED packages to a working state ────────────
+_UM_SYNC_STATE = USER_DIR / 'sync_state.json'
+
+
+def pm_sync_needs():
+    """Required packages that are missing or outside their allowed version range (offline, instant)."""
+    plan = pm_plan([e for e in PKG_REGISTRY if e.get('required')], online=False)
+    return [r for r in plan if r['state'] in ('missing', 'below')]
+
+
+def _um_sync_state():
+    try:
+        return _um_json.loads(_UM_SYNC_STATE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def pm_sync_should_skip(cool_off=3 * 3600):
+    """After a failed sync do not make the user wait again on every launch (e.g. while offline)."""
+    st = _um_sync_state()
+    return bool(st.get('fail_ts')) and _um_time.time() - st['fail_ts'] < cool_off
+
+
+def pm_startup_sync(entries=None, status_cb=None, cancel=None):
+    """Stage + apply the given entries (default: everything required that is missing / out of range).
+    Never raises. -> dict(ok, changed=[names], failed=[(name, reason)], restart)."""
+    out = dict(ok=True, changed=[], failed=[], restart=False)
+    try:
+        entries = entries if entries is not None else pm_sync_needs()
+        if not entries:
+            return out
+        um_log('start-up sync: ' + ', '.join(e['name'] for e in entries))
+        results = pm_stage(entries, on_line=status_cb, cancel=cancel)
+        for r in results:
+            if r['ok']:
+                out['changed'] += r['names']
+            else:
+                out['failed'] += [(n, r.get('error', '')) for n in r['names']]
+        if out['changed']:
+            pm_apply_staged()
+            still = set(_pm_norm(n) for n in pm_pending())
+            loaded = [e for e in entries if e['name'] in out['changed'] and e.get('mod')
+                      and e['mod'].split('.')[0] in sys.modules]
+            out['restart'] = bool(still or loaded)                 # a loaded module must be re-imported fresh
+        out['ok'] = not out['failed']
+        try:
+            if out['ok']:
+                _UM_SYNC_STATE.write_text(_um_json.dumps({'ok_ts': _um_time.time()}), encoding='utf-8')
+            else:
+                _UM_SYNC_STATE.write_text(_um_json.dumps({'fail_ts': _um_time.time(), 'failed': out['failed']}), encoding='utf-8')
+        except Exception:
+            pass
+    except Exception as e:
+        um_log(f'start-up sync error: {e}')
+        out.update(ok=False, failed=[('sync', str(e))])
+    return out
+
+
+def pm_repair_entries():
+    """Turn requirement conflicts among the installed packages into things to (re)install.
+    Rule: if the package being required is safe to change (e.g. pydantic-core), install the version the
+    dependent needs; if it is ABI-sensitive (numpy, torch...), upgrade the DEPENDENT instead (numba for a
+    numpy it cannot handle). -> list of registry-like dicts, [] when everything is consistent."""
+    out = {}
+    for line in pm_check_conflicts():
+        m = _um_re.match(r'^(\S+) requires (.+?) but (\S+) is installed$', line)
+        if not m:
+            continue
+        dependent, req = m.group(1), m.group(2).strip()
+        nm = _um_re.match(r'[A-Za-z0-9_.\-]+', req)
+        if not nm:
+            continue
+        dep = nm.group(0)
+        if _pm_norm(dep) in _PM_PROTECT:
+            target, spec = dependent, ''
+        else:
+            target, spec = dep, req[len(dep):].strip()
+        out[_pm_norm(target)] = dict(name=target, spec=spec, mod=None, group='repair', policy='keep',
+                                     required=False, desc=f'repair: {line}')
+    return list(out.values())
+
+
+# ── isolated engines (Demucs) ─────────────────────────────────────────────────
+ENGINES = {
+    'demucs': dict(
+        title='Music Removal engine (Demucs)',
+        reqs=['demucs>=4.1,<5',
+              'numpy>=2,<2.6'],           # demucs imports numpy but does not declare it as a dependency
+        index=CPU_TORCH_INDEX,
+        verify='import demucs, torch, numpy, sphn',
+        module='demucs',
+        timeout=5400),
+}
+
+
+def eng_root(name):
+    return ENVS_DIR / name
+
+
+def eng_status(name):
+    """{'installed', 'version', 'torch', 'path', 'size_mb'} without importing anything."""
+    root = eng_root(name)
+    inst = pm_installed(root) if root.exists() else {}
+    mod = ENGINES[name]['module']
+    v = inst.get(_pm_norm(mod))
+    tv = inst.get('torch')
+    ok = bool(v) and (root / mod).exists()
+    return dict(installed=ok, version=v[-1][0] if v else None, torch=tv[-1][0] if tv else None, path=str(root))
+
+
+def eng_env(name):
+    """Environment for running the engine in a subprocess: ONLY the engine's folder on the path."""
+    env = dict(_um_os.environ)
+    env['PYTHONPATH'] = str(eng_root(name))
+    env['PYTHONNOUSERSITE'] = '1'
+    env['TORCH_HOME'] = str(USER_DIR / 'models' / 'torch')
+    env['HF_HOME'] = str(USER_DIR / 'models' / 'hf')
+    env['PYTHONIOENCODING'] = 'utf-8'
+    for k in ('PYTHONHOME', 'PYTHONSTARTUP'):
+        env.pop(k, None)
+    return env
+
+
+def eng_install(name, on_line=None, cancel=None):
+    """Build (or rebuild) an engine in a side folder, smoke-test it, then swap it in. The current working
+    engine is kept untouched until the new one has proven itself, and restored if anything fails."""
+    spec = ENGINES[name]
+    if not pm_ensure_pip(on_line):
+        return dict(ok=False, error='pip is not available for this Python')
+    root, nxt, prev = eng_root(name), ENVS_DIR / f'{name}_next', ENVS_DIR / f'{name}_prev'
+    ENVS_DIR.mkdir(parents=True, exist_ok=True)
+    for d in (nxt, prev):
+        _um_sh.rmtree(d, ignore_errors=True)
+    nxt.mkdir(parents=True)
+    py = pm_python()
+    cmd = py + ['-m', 'pip', 'install', '--target', str(nxt), '--upgrade'] + _PIP_FLAGS
+    if spec.get('index'):
+        cmd += ['--extra-index-url', spec['index']]
+    cmd += spec['reqs']
+    um_log(f'building engine {name}: {spec["reqs"]}')
+    rc, tail, state = _um_run(cmd, f'pip[{name}]', on_line, timeout=spec.get('timeout', 3600), cancel=cancel)
+    if rc != 0 and state == 'ok':
+        um_log('engine build failed - retrying once')
+        _um_sh.rmtree(nxt, ignore_errors=True); nxt.mkdir(parents=True)
+        rc, tail, state = _um_run(cmd, f'pip[{name}]', on_line, timeout=spec.get('timeout', 3600), cancel=cancel)
+    if rc != 0 or state != 'ok':
+        _um_sh.rmtree(nxt, ignore_errors=True)
+        return dict(ok=False, error={'cancelled': 'Cancelled', 'timeout': 'Timed out - try again on a faster connection.'}.get(state, _pm_explain(tail)))
+    env = eng_env(name)
+    env['PYTHONPATH'] = str(nxt)
+    r = _um_sp.run(py + ['-c', spec['verify'] + '; print("engine-ok")'], capture_output=True, text=True, env=env,
+                   timeout=240, creationflags=_UM_CNW)
+    if 'engine-ok' not in (r.stdout or ''):
+        err = ((r.stderr or '').strip().splitlines() or ['smoke test failed'])[-1][:300]
+        _um_sh.rmtree(nxt, ignore_errors=True)
+        um_log(f'engine {name} failed its smoke test: {err}')
+        return dict(ok=False, error=f'Installed but failed its self-test: {err}')
+    try:
+        if root.exists():
+            _um_os.replace(root, prev)
+        _um_os.replace(nxt, root)
+    except Exception as e:
+        try:
+            if prev.exists() and not root.exists():
+                _um_os.replace(prev, root)
+        except Exception:
+            pass
+        return dict(ok=False, error=f'Could not swap the new engine in ({e}). Close other ClipFinder windows and retry.')
+    _um_sh.rmtree(prev, ignore_errors=True)
+    st = eng_status(name)
+    um_log(f'engine {name} ready: {st}')
+    return dict(ok=True, **st)
+
+
+def eng_remove(name):
+    _um_sh.rmtree(eng_root(name), ignore_errors=True)
+
+
+def eng_run(name, args, on_line=None, cancel=None, timeout=6 * 3600, cwd=None):
+    """Run `python -m <module> args` inside the engine. -> (returncode, output tail, state)."""
+    py = pm_python()
+    return _um_run(py + ['-m', ENGINES[name]['module']] + list(args), name, on_line, timeout=timeout,
+                   cancel=cancel, env=eng_env(name), cwd=cwd)
+
+
+# ── app self-update ───────────────────────────────────────────────────────────
+def app_version_key(v):
+    return _pm_vkey(str(v).lstrip('vV'))
+
+
+def app_latest_release(timeout=12):
+    """Newest published release: {'version', 'tag', 'notes', 'assets': {name: url}, 'url'} or None.
+    Uses the GitHub API and falls back to the (un-rate-limited) releases/latest redirect."""
+    try:
+        req = _um_ur.Request(f'https://api.github.com/repos/{APP_REPO}/releases/latest',
+                             headers={'User-Agent': _UM_UA, 'Accept': 'application/vnd.github+json'})
+        with _um_ur.urlopen(req, timeout=timeout) as r:
+            d = _um_json.loads(r.read().decode('utf-8'))
+        tag = d.get('tag_name', '')
+        return dict(version=tag.lstrip('vV'), tag=tag, notes=d.get('body') or '',
+                    assets={a['name']: a['browser_download_url'] for a in d.get('assets', [])},
+                    url=d.get('html_url', f'https://github.com/{APP_REPO}/releases/latest'))
+    except Exception as e:
+        um_log(f'GitHub API release lookup failed ({e}) - trying redirect')
+    try:
+        class _NoRedirect(_um_ur.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+        op = _um_ur.build_opener(_NoRedirect)
+        req = _um_ur.Request(f'https://github.com/{APP_REPO}/releases/latest', headers={'User-Agent': _UM_UA})
+        try:
+            op.open(req, timeout=timeout)
+        except _um_ue.HTTPError as h:
+            loc = h.headers.get('Location', '')
+            m = _um_re.search(r'/tag/(v?[\d.]+)', loc)
+            if m:
+                tag = m.group(1)
+                return dict(version=tag.lstrip('vV'), tag=tag, notes='', assets={},
+                            url=f'https://github.com/{APP_REPO}/releases/tag/{tag}')
+    except Exception as e:
+        um_log(f'release redirect lookup failed: {e}')
+    return None
+
+
+def _um_download(url, dest, timeout=30, on_bytes=None):
+    """Stream a URL to `dest` (with a real timeout - urlretrieve has none and hangs forever offline)."""
+    req = _um_ur.Request(url, headers={'User-Agent': _UM_UA})
+    tmp = _PathBase(str(dest) + '.part')
+    with _um_ur.urlopen(req, timeout=timeout) as r, open(tmp, 'wb') as f:
+        total = int(r.headers.get('Content-Length') or 0)
+        got = 0
+        while True:
+            chunk = r.read(64 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            got += len(chunk)
+            if on_bytes:
+                on_bytes(got, total)
+    _um_os.replace(tmp, dest)
+    return dest
+
+
+def app_source_version(text):
+    m = _um_re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', text, _um_re.M)
+    return m.group(1) if m else None
+
+
+def app_download(rel, work_dir, on_status=None):
+    """Download and VALIDATE the new clipfinder.py for release `rel`. Returns the file path; raises
+    RuntimeError with a readable message if anything is wrong (nothing is installed here)."""
+    import ast as _ast
+    work = _PathBase(work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    tag = rel['tag'] or f'v{rel["version"]}'
+    urls = []
+    if rel.get('assets', {}).get('clipfinder.py'):
+        urls.append(rel['assets']['clipfinder.py'])
+    urls.append(f'https://raw.githubusercontent.com/{APP_REPO}/{tag}/clipfinder.py')
+    last = None
+    dest = work / 'clipfinder.py.new'
+    for u in urls:
+        try:
+            if on_status: on_status(f'Downloading {tag}...')
+            _um_download(u, dest)
+            text = dest.read_text(encoding='utf-8')
+            _ast.parse(text)                                     # must be valid Python
+            compile(text, 'clipfinder.py', 'exec')
+            ver = app_source_version(text)
+            if ver is None or 'if __name__' not in text:
+                raise ValueError('the downloaded file does not look like ClipFinder')
+            if app_version_key(ver) != app_version_key(rel['version']):
+                raise ValueError(f'release {tag} contains clipfinder.py {ver}, which is not the version it advertises')
+            if len(text) < 200_000:
+                raise ValueError('the downloaded file is suspiciously small')
+            return dest
+        except Exception as e:
+            last = e
+            um_log(f'update download from {u} failed: {e}')
+    raise RuntimeError(f'Could not download a valid update: {last}')
+
+
+def app_install(new_file, target, backup_dir=None):
+    """Atomically replace `target` with `new_file`, keeping the previous version for rollback."""
+    target = _PathBase(target)
+    backup_dir = _PathBase(backup_dir or (USER_DIR / 'app_backups'))
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    old_ver = 'old'
+    try:
+        old_ver = app_source_version(target.read_text(encoding='utf-8')) or 'old'
+    except Exception:
+        pass
+    keep = backup_dir / f'clipfinder-{old_ver}.py'
+    if target.exists():
+        _um_sh.copy2(target, keep)
+    staged = target.with_name(target.name + '.new')
+    _um_sh.copy2(new_file, staged)
+    _um_os.replace(staged, target)                               # atomic on the same volume
+    try:                                                         # keep only the two newest backups
+        olds = sorted(backup_dir.glob('clipfinder-*.py'), key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in olds[2:]:
+            p.unlink()
+    except Exception:
+        pass
+    (USER_DIR / 'update_pending.json').write_text(_um_json.dumps(
+        {'from': old_ver, 'to': app_source_version(_PathBase(target).read_text(encoding='utf-8')),
+         'time': _um_time.time(), 'attempts': 0, 'target': str(target), 'backup': str(keep)}), encoding='utf-8')
+    return keep
+
+
+def app_rollback():
+    """Restore the previous clipfinder.py saved by app_install(). -> (ok, message)."""
+    try:
+        info = _um_json.loads((USER_DIR / 'update_pending.json').read_text(encoding='utf-8'))
+        bak, target = _PathBase(info['backup']), _PathBase(info['target'])
+    except Exception:
+        baks = sorted((USER_DIR / 'app_backups').glob('clipfinder-*.py'), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not baks:
+            return False, 'No previous version is saved.'
+        bak, target = baks[0], _PathBase(__file__)
+    if not bak.exists():
+        return False, 'The saved previous version is missing.'
+    tmp = target.with_name(target.name + '.rb')
+    _um_sh.copy2(bak, tmp)
+    _um_os.replace(tmp, target)
+    try:
+        (USER_DIR / 'update_pending.json').unlink()
+    except Exception:
+        pass
+    return True, f'Restored {bak.name}'
+
+
+def app_startup_guard():
+    """Called at start-up. If an update was installed but the new version failed to reach a healthy
+    running state twice, put the previous version back automatically."""
+    f = USER_DIR / 'update_pending.json'
+    try:
+        if not f.exists():
+            return None
+        info = _um_json.loads(f.read_text(encoding='utf-8'))
+        info['attempts'] = info.get('attempts', 0) + 1
+        if info['attempts'] > 2:
+            ok, msg = app_rollback()
+            um_log(f'auto-rollback after failed start: {msg}')
+            return 'rolled_back' if ok else None
+        f.write_text(_um_json.dumps(info), encoding='utf-8')
+    except Exception:
+        pass
+    return None
+
+
+def app_mark_healthy():
+    """Called once the window has been up for a few seconds: the update is confirmed good."""
+    try:
+        (USER_DIR / 'update_pending.json').unlink()
+    except Exception:
+        pass
+
+
+def app_set_registry_version(version):
+    """Keep Windows' Add/Remove Programs entry in step with a self-update (best effort)."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r'Software\Microsoft\Windows\CurrentVersion\Uninstall\ClipFinder', 0,
+                            winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, 'DisplayVersion', 0, winreg.REG_SZ, str(version))
+            winreg.SetValueEx(k, 'DisplayName', 0, winreg.REG_SZ, f'ClipFinder {version}')
+    except Exception:
+        pass
+
+
+def app_relaunch_cmd(script):
+    """argv that starts the app again from `script` (never the frozen launcher)."""
+    py = pm_python() or [sys.executable]
+    if py[0].lower().endswith('python.exe') and _PathBase(py[0]).with_name('pythonw.exe').exists():
+        py = [str(_PathBase(py[0]).with_name('pythonw.exe'))] + py[1:]      # no console window
+    return py + [str(script)] + sys.argv[1:]
+# end-update-manager
 
 
 def _dist_version(pip_name):
@@ -314,6 +1364,9 @@ def _ensure_pkgs_on_path():
                 try: del _sys_bust.modules[_k]
                 except: pass
 
+# Swap in package updates that were downloaded + verified last session. This has to happen here,
+# before anything below imports from PKGS_DIR, and only when no other ClipFinder is running.
+pm_apply_staged()
 _ensure_pkgs_on_path()  # run immediately at import time
 
 # Add portable Node.js to PATH if installed
@@ -356,56 +1409,10 @@ def _run_pip_safe(packages):
         print(f'[CF] pip install warning: {e}')
 
 def auto_install():
-    """Install missing lightweight packages on first run.
-
-    EXE mode  -> installs only REQUIRED_LIGHT via the real python.exe.
-                 Heavy packages are deferred to Settings -> Update Modules.
-                 NEVER calls sys.executable directly (that would re-launch the EXE).
-    Script mode -> installs everything then restarts via os.execv.
-    """
-    _frozen = getattr(sys, 'frozen', False)
-    target = REQUIRED_LIGHT if _frozen else REQUIRED
-
-    import importlib.util as _ilu
-    missing = []
-    for mod, pkg in target.items():
-        # Presence check WITHOUT importing. find_spec() locates a module but does
-        # not execute it, so heavy libs (torch via openai-whisper, cv2, numpy, …)
-        # are never loaded at boot. Using __import__ here made every launch freeze
-        # ~5s while it imported the entire ML stack just to see if it existed.
-        try:
-            if _ilu.find_spec(mod) is None:
-                missing.append(pkg)
-        except (ImportError, ModuleNotFoundError, ValueError):
-            # parent package missing, or name isn't a package → treat as missing
-            missing.append(pkg)
-
-    if not missing:
-        return
-
-    print(f'[CF] Missing packages: {", ".join(missing)}')
-
-    if _frozen:
-        # EXE mode: use _run_pip_safe which finds the real python.exe
-        _run_pip_safe(missing)
-    else:
-        # Script mode — install then continue (no restart to avoid loops)
-        try:
-            cmd = _pip_cmd(missing)
-            if cmd:
-                subprocess.check_call(cmd)
-                _ensure_pkgs_on_path()  # reload path so new packages are found
-        except Exception as e:
-            print(f'[CF] pip install warning: {e}')
-
-    # Try importing newly installed packages into current process
-    import importlib
-    for pkg in missing:
-        mod_name = pkg.replace('-', '_').split('==')[0]
-        try:
-            importlib.import_module(mod_name)
-        except Exception:
-            pass
+    """Kept for compatibility. Missing/outdated packages are handled by the update manager in
+    _prelaunch_install() (with a progress window) - installing silently at import time froze the
+    start for minutes and ignored failures."""
+    return
 
 
 # Skip auto_install for embedded Python — packages pre-bundled in site-packages
@@ -16070,322 +17077,103 @@ where "keep" = words to censor, "remove" = false positives to skip."""
     # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
-    def _prelaunch_install():
-        import subprocess as _sp2, sys as _sys2, tempfile as _tf2, os as _os2, threading as _thr3
-        _CNW = 0x08000000
-        _flag  = USER_DIR / 'pending_update.flag'
-        _stamp = USER_DIR / 'install_done.stamp'
-        # curl-cffi pinned to 0.7.4 (remote stability fix); python-vlc kept from local work
-        _ALL = [('setuptools', 'setuptools'), ('faster_whisper', 'faster-whisper'), ('whisper', 'openai-whisper'), ('google.genai', 'google-genai'), ('groq', 'groq'), ('openai', 'openai'), ('yt_dlp', 'yt-dlp==2026.3.17'), ('curl_cffi', 'curl-cffi==0.7.4'), ('PIL.Image', 'Pillow'), ('cv2', 'opencv-python'), ('imagehash', 'imagehash'), ('mediapipe', 'mediapipe'), ('soundfile', 'soundfile'), ('numpy', 'numpy'), ('requests', 'requests'), ('demucs', 'demucs'), ('torch', 'torch'), ('torchaudio', 'torchaudio'), ('pydantic_core', 'pydantic-core'), ('pydantic', 'pydantic'), ('fontTools', 'fonttools'), ('ddgs', 'ddgs'), ('yt_dlp_plugins', 'bgutil-ytdlp-pot-provider'), ('vlc', 'python-vlc')]
-        _force = _flag.exists() or not _stamp.exists()
-        if not _force:
-            _miss = []
-            for _m, _p in _ALL:
-                if _m == 'yt_dlp_plugins':
-                    # bgutil installs a yt_dlp_plugins folder + dist-info in PKGS_DIR
-                    _found = (PKGS_DIR / 'yt_dlp_plugins').exists()
-                    if not _found:
-                        try:
-                            _found = any('bgutil' in _d.name.lower()
-                                        for _d in PKGS_DIR.iterdir() if _d.is_dir())
-                        except: pass
-                    if not _found:
-                        _miss.append(_p)
-                else:
-                    # Check dist-info first for heavy packages, then try import
-                    _pip_name = _p.split('==')[0].replace('-','_').lower()
-                    _has_distinfo = False
-                    try:
-                        _has_distinfo = any(
-                            _d.is_dir() and _d.name.lower().startswith(_pip_name) and 'dist-info' in _d.name
-                            for _d in PKGS_DIR.iterdir()
-                        )
-                    except: pass
-                    if not _has_distinfo:
-                        try: __import__(_m.split('.')[0])
-                        except: _miss.append(_p)
-            try: import pydantic_core.core_schema
-            except:
-                if 'pydantic-core' not in [x.split()[0] for x in _miss]: _miss.append('pydantic-core')
-            if not _miss: return
-        _req = set()
-        if _flag.exists():
-            try: _req = set(_flag.read_text().strip().splitlines())
-            except: pass
-            try: _flag.unlink()
-            except: pass
-        if 'all' in _req or not _stamp.exists():
-            _todo = [p for _, p in _ALL]
-        else:
-            # Map pinned packages — never install unpinned versions of these
-            _PINNED = {p.split('==')[0].lower(): p for _, p in _ALL if '==' in p}
-            _todo = []
-            for _req_pkg in _req:
-                _base = _req_pkg.split('==')[0].lower()
-                # Use pinned version if available, otherwise use as-is
-                _todo.append(_PINNED.get(_base, _req_pkg))
-            for _m, _p in _ALL:
-                _pip_name = _p.split('==')[0].replace('-','_').lower()
-                _has_distinfo = False
-                try:
-                    _has_distinfo = any(
-                        _d.is_dir() and _d.name.lower().startswith(_pip_name) and 'dist-info' in _d.name
-                        for _d in PKGS_DIR.iterdir()
-                    )
-                except: pass
-                if not _has_distinfo:
-                    try: __import__(_m.split('.')[0])
-                    except:
-                        if _p not in _todo: _todo.append(_p)
-        if not _todo: _stamp.touch(); return
-        _lines = [
-            'import subprocess, sys',
-            'pkgs_dir = ' + repr(str(PKGS_DIR)),
-            'todo = ' + repr(_todo),
-            'total = len(todo)',
-            'for i, pkg in enumerate(todo):',
-            '    parts = pkg.split()',
-            '    print(f"PROGRESS:{i}:{total}:{parts[0]}", flush=True)',
-            '    cmd = [sys.executable, "-m", "pip", "install"] + parts + ["--target", pkgs_dir, "--upgrade", "--quiet", "--no-warn-script-location"]',
-            '    subprocess.run(cmd, timeout=300, creationflags=0x08000000)',
-            'print("DONE", flush=True)',
-        ]
-        _tf = _tf2.mktemp(suffix='_cf.py')
+    def _self_restart(reason=''):
+        """Start a fresh copy of ClipFinder and exit this one (used after updates)."""
+        import subprocess as _sp_rs, os as _os_rs
+        if _os_rs.environ.get('CF_RESTARTED'):                   # never loop
+            return False
         try:
-            with open(_tf, 'w', encoding='utf-8') as _f: _f.write('\n'.join(_lines))
+            um_release_instance_lock()                          # the new process must be able to take it
+            env = dict(_os_rs.environ, CF_RESTARTED='1')
+            _sp_rs.Popen(app_relaunch_cmd(__file__), env=env, close_fds=True,
+                         creationflags=0x00000008 | 0x00000200)  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            um_log(f'restarting ClipFinder ({reason})')
+            return True
+        except Exception as _e:
+            um_log(f'restart failed: {_e}')
+            return False
+
+    def _prelaunch_install():
+        """Install required packages that are missing or outside their allowed version range.
+
+        Shows a small progress window ONLY when there is something to do, so a normal launch has no
+        delay at all. It installs only what is needed (the old version wiped and re-downloaded every
+        package - including multi-GB torch - after each app update, aborted the whole batch when a
+        single pip call timed out, hid pip's errors, and wrote its "done" stamp even on failure)."""
+        import threading as _thr, queue as _q, time as _t
+        _legacy = USER_DIR / 'pending_update.flag'               # written by older builds of the Update buttons
+        try:
+            if _legacy.exists():
+                _legacy.unlink()
+        except Exception:
+            pass
+        _entries = pm_sync_needs()
+        if not _entries or pm_sync_should_skip():
+            return False
+        try:
             import tkinter as _tk2, tkinter.ttk as _ttk2
             _s = _tk2.Tk()
-            _s.title('ClipFinder — Setting Up')
+            _s.title('ClipFinder - updating components')
             _s.configure(bg='#111111')
             _s.resizable(False, False)
             _s.attributes('-topmost', True)
-            _sw, _sh = 540, 175
-            _sx = (_s.winfo_screenwidth()-_sw)//2
-            _sy = (_s.winfo_screenheight()-_sh)//2
-            _s.geometry(str(_sw)+'x'+str(_sh)+'+'+str(_sx)+'+'+str(_sy))
+            _sw, _sh = 580, 200
+            _s.geometry(f'{_sw}x{_sh}+{(_s.winfo_screenwidth() - _sw) // 2}+{(_s.winfo_screenheight() - _sh) // 2}')
             _brd = _tk2.Frame(_s, bg='#ff8c00', padx=1, pady=1); _brd.pack(fill='both', expand=True, padx=8, pady=8)
             _inn = _tk2.Frame(_brd, bg='#111111'); _inn.pack(fill='both', expand=True)
-            _tk2.Label(_inn, text='✂  ClipFinder', font=('Segoe UI',13,'bold'), fg='#ff8c00', bg='#111111').pack(pady=(12,2))
-            _sv = _tk2.StringVar(value='Installing '+str(len(_todo))+' package'+('s' if len(_todo)!=1 else '')+'...')
-            _tk2.Label(_inn, textvariable=_sv, font=('Segoe UI',9), fg='#cccccc', bg='#111111').pack()
-            _pb = _ttk2.Progressbar(_inn, length=460, mode='indeterminate'); _pb.pack(pady=(8,2), padx=20); _pb.start(15)
-            _bv = _tk2.StringVar(value='Starting...')
-            _tk2.Label(_inn, textvariable=_bv, font=('Segoe UI',7), fg='#666', bg='#111111').pack()
-            _tk2.Label(_inn, text='⚠  May appear frozen — this is normal. Takes 3–5 min on first launch only.',
-                font=('Segoe UI',7), fg='#ff8c00', bg='#111111').pack(pady=(2,0))
-            _tk2.Label(_inn, text='ClipFinder will open automatically when done.',
-                font=('Segoe UI',7), fg='#444', bg='#111111').pack()
+            _tk2.Label(_inn, text='\u2702  ClipFinder', font=('Segoe UI', 13, 'bold'), fg='#ff8c00', bg='#111111').pack(pady=(10, 0))
+            _sv = _tk2.StringVar(value=f'Installing {len(_entries)} component{"s" if len(_entries) != 1 else ""}...')
+            _tk2.Label(_inn, textvariable=_sv, font=('Segoe UI', 9, 'bold'), fg='#dddddd', bg='#111111').pack()
+            _tk2.Label(_inn, text=', '.join(e['name'] for e in _entries)[:90], font=('Segoe UI', 8), fg='#888888', bg='#111111').pack()
+            _pb = _ttk2.Progressbar(_inn, length=480, mode='indeterminate'); _pb.pack(pady=(8, 2)); _pb.start(15)
+            _dv = _tk2.StringVar(value='Starting...')
+            _tk2.Label(_inn, textvariable=_dv, font=('Consolas', 7), fg='#666666', bg='#111111').pack()
+            _cancel = _thr.Event()
+            _tk2.Button(_inn, text='Skip - start ClipFinder anyway', font=('Segoe UI', 8), bg='#222222', fg='#aaaaaa',
+                        relief='flat', bd=0, padx=10, pady=3, cursor='hand2', command=_cancel.set).pack(pady=(6, 4))
             _s.update()
-            _n = len(_todo)
-            _proc = _sp2.Popen([_sys2.executable, _tf], stdout=_sp2.PIPE, stderr=_sp2.DEVNULL,
-                text=True, bufsize=1, creationflags=_CNW)
-
-            # Read stdout in a thread, update UI via queue (not after() — mainloop not running yet)
-            import queue as _q2
-            _updates = _q2.Queue()
-            def _read():
-                for _ln in _proc.stdout:
-                    _ln = _ln.strip()
-                    if _ln.startswith('PROGRESS:'):
-                        try:
-                            _, _i, _t, _nm = _ln.split(':', 3)
-                            _updates.put((int(_i), int(_t), _nm))
-                        except: pass
-                _updates.put(None)  # signal done
-            _thr3.Thread(target=_read, daemon=True).start()
-
-            # Poll loop — keeps tkinter alive and drains the update queue
-            while True:
+            _lines, _res = _q.Queue(), {}
+            _w = _thr.Thread(target=lambda: _res.update(r=pm_startup_sync(_entries, status_cb=_lines.put, cancel=_cancel)), daemon=True)
+            _w.start()
+            _t0 = _t.time()
+            while _w.is_alive():
                 try:
-                    _msg = _updates.get_nowait()
-                    if _msg is None:
-                        break
-                    _pi, _pt, _pn = _msg
-                    _pb.stop(); _pb.config(mode='determinate')
-                    _pb['value'] = int(_pi / _pt * 100)
-                    _sv.set(f'Installing ({_pi+1}/{_pt})...')
-                    _bv.set(_pn)
-                except _q2.Empty:
+                    while True:
+                        _dv.set(str(_lines.get_nowait())[:96])
+                except _q.Empty:
                     pass
                 _s.update()
-                _sp2.time.sleep(0.05) if hasattr(_sp2, 'time') else None
-                import time as _t2; _t2.sleep(0.05)
+                _t.sleep(0.05)
+                if _t.time() - _t0 > 45 * 60:                    # never hold the user hostage
+                    _cancel.set()
+            _r = _res.get('r') or {}
+            _pb.stop()
+            if _r.get('failed') and not _cancel.is_set():
+                _sv.set('Some components could not be installed - ClipFinder will start anyway')
+                _dv.set('; '.join(f'{n}: {why}' for n, why in _r['failed'])[:140])
+                _pb['mode'] = 'determinate'; _pb['value'] = 100
+                _s.update(); _t.sleep(3.5)
+            else:
+                _sv.set('Done')
+                _s.update(); _t.sleep(0.4)
+            _s.destroy()
+            return bool(_r.get('restart'))
+        except Exception as _e:
+            um_log(f'pre-launch installer error: {_e}')
+            return False
 
-            _proc.wait()
-            _pb['value'] = 100
-            _sv.set('Done! Launching ClipFinder...')
-            _bv.set('ClipFinder will open automatically')
-            _s.update()
+    # A self-update that could not start twice in a row is rolled back automatically.
+    if app_startup_guard() == 'rolled_back':
+        if _self_restart('rolled back a failed update'):
+            sys.exit(0)
 
-            # Install Node.js + bgutil PO token plugin for YouTube 1080p
-            try:
-                _sv.set('Setting up YouTube 1080p support...')
-                _bv.set('Downloading portable Node.js...')
-                _pb.config(mode='indeterminate'); _pb.start(15)
-                _s.update()
+    # Install anything required that is missing. If a package that is already loaded in this process was
+    # replaced, start again so everything imports cleanly from the new files.
+    if _prelaunch_install():
+        if _self_restart('components updated'):
+            sys.exit(0)
 
-                def _bgutil_cb(msg):
-                    _bv.set(msg[:80])
-                    _s.update()
-
-                ensure_bgutil(status_cb=_bgutil_cb)
-                _pb.stop(); _pb['value'] = 100
-                _sv.set('Done! Launching ClipFinder...')
-                _bv.set('YouTube 1080p ready')
-                _s.update()
-            except Exception as _be:
-                _bv.set(f'bgutil skipped: {_be}')
-                _s.update()
-
-            # Auto-install CUDA torch if NVIDIA GPU detected
-            try:
-                import subprocess as _sp_nv2
-                _nv2 = _sp_nv2.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
-                                    capture_output=True, text=True, timeout=5)
-                _has_nv = _nv2.returncode == 0 and _nv2.stdout.strip()
-                # Check if CUDA torch already installed
-                _cuda_ok = False
-                try:
-                    import torch as _torch_chk
-                    _cuda_ok = _torch_chk.cuda.is_available()
-                except: pass
-                if _has_nv and not _cuda_ok:
-                    _sv.set('NVIDIA GPU detected — installing CUDA support...')
-                    _bv.set(f'GPU: {_nv2.stdout.strip()[:50]} — installing torch+cu121 (~2.5GB)')
-                    _pb.config(mode='indeterminate'); _pb.start(10)
-                    _s.update()
-                    import sys as _sys_nv
-                    # Use --ignore-installed to avoid locked DLL conflicts
-                    # Don't upgrade existing torch — install fresh to PKGS_DIR only
-                    _cuda_cmd = [_sys_nv.executable, '-m', 'pip', 'install',
-                                 'torch', 'torchaudio',
-                                 '--index-url', 'https://download.pytorch.org/whl/cu121',
-                                 '--target', str(PKGS_DIR), '-q',
-                                 '--ignore-installed']
-                    _sp_nv2.run(_cuda_cmd, capture_output=True)
-                    _pb.stop()
-                    _bv.set('✅ CUDA torch installed — restart ClipFinder to activate')
-                    _s.update()
-            except Exception as _nve:
-                pass  # non-critical, skip silently
-
-            # ── Download clipfinder_core.py and vision_refs ───────────────────
-            try:
-                import urllib.request as _ur_pl
-                # Core file
-                _core_dst = Path(__file__).parent / 'clipfinder_core.py'
-                if not _core_dst.exists():
-                    _ur_pl.urlretrieve(
-                        'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py',
-                        str(_core_dst))
-                # Vision reference images
-                _vr_dir = USER_DIR / 'vision_refs'
-                _vr_dir.mkdir(exist_ok=True)
-                for _rn, _ru in {
-                    'stake_casino.png':   'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/stake_casino.png',
-                    'roobet_casino.png':  'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/roobet_casino.png',
-                    'rainbet_casino.png': 'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/vision_refs/rainbet_casino.png',
-                }.items():
-                    if not (_vr_dir / _rn).exists():
-                        _ur_pl.urlretrieve(_ru, str(_vr_dir / _rn))
-            except Exception:
-                pass
-
-            _stamp.touch()
-            _s.after(1200, _s.destroy); _s.mainloop()
-        except Exception: pass
-        finally:
-            try: _os2.unlink(_tf)
-            except: pass
-    # ── Version-based update trigger ─────────────────────────────────────────
-    # On first launch of a new version, delete install_done.stamp so
-    # _prelaunch_install runs fully and picks up any new packages/files
-    _version_stamp = USER_DIR / 'version.stamp'
-    _install_stamp = USER_DIR / 'install_done.stamp'
-    try:
-        _stamped_ver = _version_stamp.read_text().strip() if _version_stamp.exists() else ''
-        if _stamped_ver != APP_VERSION:
-            # New version detected — force full reinstall on next prelaunch
-            if _install_stamp.exists():
-                _install_stamp.unlink()
-            _version_stamp.write_text(APP_VERSION)
-            print(f'[CF] New version {APP_VERSION} detected — triggering full update')
-    except Exception:
-        pass
-
-    _prelaunch_install()
-
-    # ── Require clipfinder_core.py — download and restart if missing ──────────
-    # Core is REQUIRED. Without it the app runs in degraded inline-fallback mode.
-    # Always check and download on startup so auto-updaters get it automatically.
-    _core_path = Path(__file__).parent / 'clipfinder_core.py'
-    _core_needs_update = False
-
-    # Check if core exists
-    if not _core_path.exists():
-        _core_needs_update = True
-
-    # Also check if core is outdated (older than clipfinder.py itself)
-    if _core_path.exists():
-        try:
-            _cf_mtime = Path(__file__).stat().st_mtime
-            _core_mtime = _core_path.stat().st_mtime
-            if _cf_mtime > _core_mtime + 60:  # clipfinder.py is >1min newer than core
-                _core_needs_update = True
-                print('[CF] clipfinder_core.py is outdated — updating...')
-        except Exception:
-            pass
-
-    if _core_needs_update:
-        print('[CF] Downloading clipfinder_core.py...')
-        try:
-            import tkinter as _tk_boot
-            _splash = _tk_boot.Tk()
-            _splash.title('ClipFinder — Updating...')
-            _splash.geometry('400x120')
-            _splash.configure(bg='#1a1a1a')
-            _splash.resizable(False, False)
-            _splash.overrideredirect(True)
-            _splash.update_idletasks()
-            _sw = _splash.winfo_screenwidth()
-            _sh = _splash.winfo_screenheight()
-            _splash.geometry(f'400x120+{(_sw-400)//2}+{(_sh-120)//2}')
-            _tk_boot.Label(_splash, text='CLIP FINDER', font=('Segoe UI', 14, 'bold'),
-                           fg='#FF6B00', bg='#1a1a1a').pack(pady=(20,4))
-            _status_var = _tk_boot.StringVar(value='Downloading core module...')
-            _tk_boot.Label(_splash, textvariable=_status_var, font=('Segoe UI', 9),
-                           fg='#aaaaaa', bg='#1a1a1a').pack()
-            _splash.update()
-        except Exception:
-            _splash = None
-
-        try:
-            import urllib.request as _ur_boot
-            _ur_boot.urlretrieve(
-                'https://raw.githubusercontent.com/thatspeedykid/clipfinder/main/clipfinder_core.py',
-                str(_core_path))
-            print('[CF] clipfinder_core.py downloaded successfully')
-            if _splash:
-                _status_var.set('Done! Loading ClipFinder...')
-                _splash.update()
-                import time as _t_boot; _t_boot.sleep(0.8)
-                _splash.destroy()
-            # Import the freshly downloaded core without restarting
-            try:
-                import importlib.util as _ilu
-                _spec = _ilu.spec_from_file_location('clipfinder_core', str(_core_path))
-                _core_mod = _ilu.module_from_spec(_spec)
-                _spec.loader.exec_module(_core_mod)
-                print('[CF] clipfinder_core loaded successfully')
-            except Exception as _ie:
-                print(f'[CF] Core import after download failed: {_ie} — using inline fallback')
-        except Exception as _boot_err:
-            print(f'[CF] Core download failed: {_boot_err}')
-            if _splash:
-                try: _splash.destroy()
-                except Exception: pass
-
-    # ── Bootstrap vision_refs + default reference images (background) ─────────
+    # -- Bootstrap default reference images (background) ----------------------
     _vr_dir = USER_DIR / 'vision_refs'
     _vr_dir.mkdir(parents=True, exist_ok=True)
     _ref_urls = {
@@ -16395,11 +17183,10 @@ if __name__ == '__main__':
     }
     import threading as _ref_thr
     def _dl_default_refs():
-        import urllib.request as _ur_ref
         for _rn, _ru in _ref_urls.items():
             if not (_vr_dir / _rn).exists():
                 try:
-                    _ur_ref.urlretrieve(_ru, str(_vr_dir / _rn))
+                    _um_download(_ru, _vr_dir / _rn, timeout=20)
                     print(f'[CF] Downloaded reference image: {_rn}')
                 except Exception:
                     pass
