@@ -16326,11 +16326,20 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                       command=_clear_cooldowns).pack(side='right', padx=4)
 
         # Auto-refresh every 5 minutes — just enough to reflect cooldown expiry
-        self.after(300000, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
+        if getattr(self, '_prov_periodic_id', None):
+            try: self.after_cancel(self._prov_periodic_id)
+            except Exception: pass
+        self._prov_periodic_id = self.after(300000, lambda: self._refresh_provider_status() if hasattr(self,'_prov_status_frame') else None)
 
 
     def _auto_select_provider(self):
         """Auto-select best available provider based on configured keys."""
+        # Keep the user's chosen provider when it already has a saved key
+        cur = self.v_provider.get()
+        if self._keys.get(cur, '').strip():
+            self.v_key.set(self._keys[cur])
+            self._refresh_prov_btns()
+            return
         priority = ['Google Gemini (Free)', 'Groq (Free)', 'OpenRouter (Free models)']
         for pname in priority:
             if self._keys.get(pname, '').strip():
@@ -16948,7 +16957,11 @@ sys.exit(main())
     def _censor_start(self):
         if self._censor_running: return
         # Read from queue box — same as run queue
-        lines = [l.strip() for l in self.censor_queue_box.get('1.0','end').splitlines() if l.strip()]
+        # strip surrounding quotes (Explorer "Copy as path" pastes quoted paths)
+        lines = [l.strip().strip('"') for l in self.censor_queue_box.get('1.0','end').splitlines() if l.strip().strip('"')]
+        _missing = [l for l in lines if not Path(l).exists()]
+        if _missing:
+            self.log(f'[Censor] ⚠️ Skipping {len(_missing)} path(s) that do not exist: {_missing}', YELLOW)
         videos = [l for l in lines if Path(l).exists()]
         if not videos:
             messagebox.showerror('No videos', 'Add at least one valid video to the queue.')
@@ -16973,312 +16986,361 @@ sys.exit(main())
             style    = self.censor_style.get()
             mp3_path = self.censor_mp3_var.get().strip()
             words    = [w.lower() for w in self._censor_words if w.strip()]
+            _fwc_cache = {}   # faster-whisper model reused across the queue
+            _ok = 0; _clean = 0; _failed = []
 
             for vi, vid in enumerate(video_list):
-                vid_name = Path(vid).name
-                self._censor_set_status(f'[{vi+1}/{len(video_list)}] Transcribing {vid_name}...')
-                self.log(f'[Censor] Transcribing: {vid_name}')
-                def _censor_prog(pct, msg, vi=vi, n=len(video_list)):
-                    if pct is not None:
-                        lbl = f'[{vi+1}/{n}] Transcribing... {pct}%'
-                        self.after(0, lambda m=lbl, p=pct:
-                            self.set_progress(m, step=2, total=4, pct=p))
+                try:
+                    vid_name = Path(vid).name
+                    self._censor_set_status(f'[{vi+1}/{len(video_list)}] Transcribing {vid_name}...')
+                    self.log(f'[Censor] Transcribing: {vid_name}')
+                    def _censor_prog(pct, msg, vi=vi, n=len(video_list)):
+                        if pct is not None:
+                            lbl = f'[{vi+1}/{n}] Transcribing... {pct}%'
+                            self.after(0, lambda m=lbl, p=pct:
+                                self.set_progress(m, step=2, total=4, pct=p))
 
-                # ── Step 1: Transcribe with word timestamps ───────────────────
-                # For censor, use at least 'small' model for better accuracy
-                _censor_model = self.v_whisper.get()
-                if _censor_model in ('auto', ''):
-                    _censor_model = 'small'  # censor needs accuracy
-                _model_order  = ['tiny','base','small','medium']
-                if self.censor_deep_var.get():
-                    _censor_model = 'medium'  # deep mode: best accuracy
-                elif _model_order.index(_censor_model) < _model_order.index('small'):
-                    _censor_model = 'small'   # minimum small for censor accuracy
+                    # ── Step 1: Transcribe with word timestamps ───────────────────
+                    # For censor, use at least 'small' model for better accuracy
+                    _censor_model = self.v_whisper.get()
+                    if _censor_model in ('auto', ''):
+                        _censor_model = 'small'  # censor needs accuracy
+                    _model_order  = ['tiny','base','small','medium']
+                    if self.censor_deep_var.get():
+                        _censor_model = 'medium'  # deep mode: best accuracy
+                    elif _model_order.index(_censor_model) < _model_order.index('small'):
+                        _censor_model = 'small'   # minimum small for censor accuracy
 
-                # Check if we can reuse existing transcript (no need to re-transcribe)
-                _can_reuse = (Path(vid) == Path(self.v_video.get()) and
-                              bool(self._whisper_segments) and
-                              sum(1 for s in self._whisper_segments if s.get('words')) > 0)
-                if _can_reuse:
-                    self.log(f'[Censor] Will reuse current transcript — skipping re-transcription')
-                else:
-                    self.log(f'[Censor] Using whisper model: {_censor_model}')
-                n_vids = len(video_list)
-                self.set_progress(f'[{vi+1}/{n_vids}] Transcribing {vid_name}...',
-                                 step=1, total=4, pct=0)
-                if _can_reuse:
-                    self.log(f'[Censor] Reusing existing transcript ({len(self._whisper_segments)} segs)')
-                    result = {'segments': self._whisper_segments, 'language': 'en'}
-                else:
-                    # For censor we MUST have word timestamps — use faster-whisper directly
-                    # whisper.cpp doesn't return word-level timestamps in its JSON output
-                    self.log(f'[Censor] Using faster-whisper (word timestamps required)')
-                    try:
-                        _FW = _fresh_import('faster_whisper').WhisperModel  # fix: was _FWC (typo)
-                        # Respect GPU toggle — same as main transcription
-                        _cen_use_gpu = getattr(self, 'v_use_gpu_whisper', None)
-                        _cen_use_gpu = _cen_use_gpu.get() if _cen_use_gpu else True
-                        _cen_dev, _cen_compute, _cen_dev_label = _detect_whisper_device(use_gpu=_cen_use_gpu)
-                        self.log(f'[Censor] Device: {_cen_dev_label}')
-                        _fwc = _FW(_censor_model, device=_cen_dev, compute_type=_cen_compute,
-                                   download_root=str(_app_path('whisper_models')))
-                        # Extract audio first
-                        import tempfile as _tmpc
-                        _wav_tmp = str(Path(_tmpc.gettempdir()) / 'cf_censor_fw.wav')
-                        subprocess.run([ff, '-y', '-i', vid, '-vn', '-ar', '16000',
-                                       '-ac', '1', '-f', 'wav', _wav_tmp],
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        _segs_iter, _info = _fwc.transcribe(
-                            _wav_tmp, word_timestamps=True,
-                            initial_prompt='Transcribe every word exactly as spoken including profanity.',
-                            language=None, vad_filter=True)
-                        _segs = []
-                        for _seg in _segs_iter:
-                            _sd = {'start': _seg.start, 'end': _seg.end, 'text': _seg.text}
-                            if _seg.words:
-                                _sd['words'] = [{'word': w.word, 'start': w.start, 'end': w.end}
-                                               for w in _seg.words]
-                            _segs.append(_sd)
-                        result = {'segments': _segs, 'language': _info.language}
-                        try: Path(_wav_tmp).unlink()
-                        except: pass
-                        self.log(f'[Censor] faster-whisper done: {len(_segs)} segs with word timestamps')
-                    except Exception as _fwe:
-                        self.log(f'[Censor] faster-whisper failed ({_fwe}), falling back to whisper.cpp')
-                        result = _do_transcribe(vid, _censor_model,
-                            initial_prompt='Transcribe every word exactly as spoken including profanity.',
-                            ffmpeg_path=ff, use_word_timestamps=True,
-                            progress_cb=_censor_prog)
-                segs = result.get('segments', [])
-                has_words = sum(1 for s in segs if s.get('words'))
-                total_words = sum(len(s.get('words',[])) for s in segs)
-                self.log(f'[Censor] {len(segs)} segments, {has_words} with word timestamps ({total_words} total words)')
-                if not has_words:
-                    self.log('[Censor] ⚠️ No word timestamps — will use segment-level detection', YELLOW)
-                # Log each segment's text so we can verify all speech is captured
-                for _si, _seg in enumerate(segs):
-                    _wc = len(_seg.get('words', []))
-                    self.log(f'[Censor] seg{_si+1} [{_seg["start"]:.1f}s]: "{_seg.get("text","").strip()}" ({_wc} words)')
-
-                # ── Step 2: Find banned word timestamps ───────────────────────
-                self._censor_set_status(f'[{vi+1}/{len(video_list)}] Scanning for banned words...')
-                self.set_progress(f'[{vi+1}/{len(video_list)}] Scanning for banned words...',
-                                 step=2, total=4, pct=25)
-                hits = []  # list of (start, end, word)
-
-                # Phonetic aliases — ONLY words that are clearly wrong transcriptions
-                # of profanity, NOT actual normal words people say
-                _PHONETIC = {
-                    'fuck':        ['f*ck','fck','fuuuck','fuhh','ffff'],
-                    'shit':        ['sh*t','shiit','shiiit'],
-                    'bitch':       ['biatch','biotch','b*tch'],
-                    'ass':         ['arse','a**'],
-                    'motherfucker':['motherf','mfer','mf'],
-                    'nigga':       ['n*gga','niggas'],
-                    'nigger':      ['n*gger'],
-                }
-                # Build flat lookup: alias -> canonical banned word
-                _alias_map = {}
-                for _canon, _aliases in _PHONETIC.items():
-                    for _a in _aliases:
-                        _alias_map[''.join(c for c in _a.lower() if c.isalpha())] = _canon
-
-                def _word_matches_banned(w_clean, banned_list):
-                    """Check if a transcribed word matches any banned word."""
-                    # Minimum length — never match single chars or 2-char words
-                    if len(w_clean) < 2: return None
-
-                    # Check phonetic aliases first
-                    if w_clean in _alias_map:
-                        _canon = _alias_map[w_clean]
-                        if any(''.join(c for c in _b.lower() if c.isalpha()) == _canon
-                               for _b in banned_list):
-                            return _canon
-
-                    for _b in banned_list:
-                        b = ''.join(c for c in _b.lower() if c.isalpha())
-                        # Skip banned words shorter than 3 chars (too many false positives)
-                        if len(b) < 3 or not w_clean: continue
-                        if len(b) <= 3:
-                            # Very short (3 chars like "ass"): exact match OR
-                            # starts compound word: "asshole", "asses" — not "asset", "classic"
-                            if w_clean == b:
-                                return _b
-                            # Only allow compound if next char is h,e,i,s (asshole/asses)
-                            if (w_clean.startswith(b + 'h') or
-                                w_clean.startswith(b + 'es') or
-                                w_clean.startswith(b + 'in')):
-                                return _b
-                        elif len(b) <= 5:
-                            # Medium (fuck, shit, bitch): startswith catches fucking/shithead
-                            if w_clean == b or w_clean.startswith(b):
-                                return _b
-                            # Contained in compound (motherfucker, bullshit)
-                            if b in w_clean and len(w_clean) <= len(b) + 8:
-                                return _b
-                        else:
-                            # Long words: exact or starts-with only
-                            if w_clean == b or w_clean.startswith(b):
-                                return _b
-                    return None
-
-                for seg in segs:
-                    seg_words = seg.get('words', [])
-                    if seg_words:
-                        for wd in seg_words:
-                            w_raw   = wd.get('word', '')
-                            w_clean = ''.join(c for c in w_raw.lower() if c.isalpha())
-                            if not w_clean: continue
-                            matched = _word_matches_banned(w_clean, words)
-                            if matched:
-                                hits.append((
-                                    max(0.0, wd['start'] - 0.15),  # start 0.15s early
-                                    wd['end'] + 0.1,
-                                    w_clean
-                                ))
+                    # Check if we can reuse existing transcript (no need to re-transcribe)
+                    _can_reuse = (Path(vid) == Path(self.v_video.get()) and
+                                  not self.censor_deep_var.get() and
+                                  bool(self._whisper_segments) and
+                                  sum(1 for s in self._whisper_segments if s.get('words')) > 0)
+                    if _can_reuse:
+                        self.log(f'[Censor] Will reuse current transcript — skipping re-transcription')
                     else:
-                        # No word timestamps — estimate position within segment
-                        seg_text   = seg.get('text', '').lower()
-                        seg_clean  = ''.join(c if c.isalpha() else ' ' for c in seg_text)
-                        seg_tokens = seg_clean.split()
-                        seg_dur    = seg['end'] - seg['start']
-                        for _ti, tok in enumerate(seg_tokens):
-                            if _word_matches_banned(tok, words):
-                                # Estimate position proportionally within segment
-                                frac   = _ti / max(len(seg_tokens), 1)
-                                word_t = seg['start'] + frac * seg_dur
-                                # Start beep 0.15s early, cover full word + 0.1s tail
-                                hits.append((max(0, word_t - 0.15), word_t + 0.6, tok))
-                # ── Step 3: AI context pass (optional) ───────────────────────
-                if self.censor_ai_pass.get() and hits:
-                    self._censor_set_status('AI context pass...')
-                    self.set_progress('AI filtering false positives...', step=3, total=4, pct=50)
-                    hits = self._censor_ai_filter(segs, hits)
+                        self.log(f'[Censor] Using whisper model: {_censor_model}')
+                    n_vids = len(video_list)
+                    self.set_progress(f'[{vi+1}/{n_vids}] Transcribing {vid_name}...',
+                                     step=1, total=4, pct=0)
+                    if _can_reuse:
+                        self.log(f'[Censor] Reusing existing transcript ({len(self._whisper_segments)} segs)')
+                        result = {'segments': self._whisper_segments, 'language': 'en'}
+                    else:
+                        # For censor we MUST have word timestamps — use faster-whisper directly
+                        # whisper.cpp doesn't return word-level timestamps in its JSON output
+                        self.log(f'[Censor] Using faster-whisper (word timestamps required)')
+                        try:
+                            _FW = _fresh_import('faster_whisper').WhisperModel  # fix: was _FWC (typo)
+                            # Respect GPU toggle — same as main transcription
+                            _cen_use_gpu = getattr(self, 'v_use_gpu_whisper', None)
+                            _cen_use_gpu = _cen_use_gpu.get() if _cen_use_gpu else True
+                            _cen_dev, _cen_compute, _cen_dev_label = _detect_whisper_device(use_gpu=_cen_use_gpu)
+                            self.log(f'[Censor] Device: {_cen_dev_label}')
+                            # Load the model once and reuse it for every queued video
+                            _fwc_key = (_censor_model, _cen_dev, _cen_compute)
+                            if _fwc_cache.get('key') != _fwc_key:
+                                _fwc_cache.clear()
+                                _fwc_cache['model'] = _FW(_censor_model, device=_cen_dev, compute_type=_cen_compute,
+                                                          download_root=str(_app_path('whisper_models')))
+                                _fwc_cache['key'] = _fwc_key
+                            _fwc = _fwc_cache['model']
+                            # Extract audio first
+                            import tempfile as _tmpc
+                            _fd_w, _wav_tmp = _tmpc.mkstemp(suffix='.wav', prefix='cf_censor_')
+                            os.close(_fd_w)
+                            try:
+                                _rw = subprocess.run([ff, '-y', '-i', vid, '-vn', '-ar', '16000',
+                                                     '-ac', '1', '-f', 'wav', _wav_tmp],
+                                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                if _rw.returncode != 0:
+                                    raise RuntimeError('ffmpeg audio extract failed: ' + (_rw.stderr or b'').decode(errors='replace')[-200:])
+                                _segs_iter, _info = _fwc.transcribe(
+                                    _wav_tmp, word_timestamps=True,
+                                    initial_prompt='Transcribe every word exactly as spoken including profanity.',
+                                    language=None, vad_filter=True)
+                                _segs = []
+                                for _seg in _segs_iter:
+                                    _sd = {'start': _seg.start, 'end': _seg.end, 'text': _seg.text}
+                                    if _seg.words:
+                                        _sd['words'] = [{'word': w.word, 'start': w.start, 'end': w.end}
+                                                       for w in _seg.words]
+                                    _segs.append(_sd)
+                                result = {'segments': _segs, 'language': _info.language}
+                            finally:
+                                try: os.unlink(_wav_tmp)
+                                except OSError: pass
+                            self.log(f'[Censor] faster-whisper done: {len(_segs)} segs with word timestamps')
+                        except Exception as _fwe:
+                            _fwc_cache.clear()  # drop the model so a failed/CUDA-broken one is not reused
+                            self.log(f'[Censor] faster-whisper failed ({_fwe}), falling back to whisper.cpp')
+                            result = _do_transcribe(vid, _censor_model,
+                                initial_prompt='Transcribe every word exactly as spoken including profanity.',
+                                ffmpeg_path=ff, use_word_timestamps=True,
+                                progress_cb=_censor_prog)
+                    segs = result.get('segments', [])
+                    has_words = sum(1 for s in segs if s.get('words'))
+                    total_words = sum(len(s.get('words',[])) for s in segs)
+                    self.log(f'[Censor] {len(segs)} segments, {has_words} with word timestamps ({total_words} total words)')
+                    if not has_words:
+                        self.log('[Censor] ⚠️ No word timestamps — will use segment-level detection', YELLOW)
+                    # Log each segment's text so we can verify all speech is captured
+                    for _si, _seg in enumerate(segs):
+                        _wc = len(_seg.get('words', []))
+                        self.log(f'[Censor] seg{_si+1} [{_seg["start"]:.1f}s]: "{_seg.get("text","").strip()}" ({_wc} words)')
 
-                self.log(f'[Censor] Found {len(hits)} words to censor: {[h[2] for h in hits]}', YELLOW if hits else GREEN)
-                for _ht in hits:
-                    self.log(f'[Censor]   "{_ht[2]}" at {_ht[0]:.2f}s–{_ht[1]:.2f}s')
+                    # ── Step 2: Find banned word timestamps ───────────────────────
+                    self._censor_set_status(f'[{vi+1}/{len(video_list)}] Scanning for banned words...')
+                    self.set_progress(f'[{vi+1}/{len(video_list)}] Scanning for banned words...',
+                                     step=2, total=4, pct=25)
+                    hits = []  # list of (start, end, word)
 
-                if not hits:
-                    self.log(f'[Censor] No banned words found in {vid_name}', GREEN)
-                    self.log(f'[Censor] Tip: If you know there are swear words, try enabling 🔍 Deep Scan with the medium model', FG2)
-                    self._censor_set_status(f'No banned words found in {vid_name}', GREEN)
-                    self.set_progress(f'No banned words found', pct=100)
-                    self.after(0, lambda v=vid: self._censor_render_result(v, [], None))
+                    # Phonetic aliases — ONLY words that are clearly wrong transcriptions
+                    # of profanity, NOT actual normal words people say
+                    _PHONETIC = {
+                        'fuck':        ['f*ck','fck','fuuuck','fuhh','ffff'],
+                        'shit':        ['sh*t','shiit','shiiit'],
+                        'bitch':       ['biatch','biotch','b*tch'],
+                        'ass':         ['arse','a**'],
+                        'motherfucker':['motherf','mfer','mf'],
+                        'nigga':       ['n*gga','niggas'],
+                        'nigger':      ['n*gger'],
+                    }
+                    # Build flat lookup: alias -> canonical banned word
+                    _alias_map = {}
+                    for _canon, _aliases in _PHONETIC.items():
+                        for _a in _aliases:
+                            _alias_map[''.join(c for c in _a.lower() if c.isalpha())] = _canon
+
+                    def _word_matches_banned(w_clean, banned_list):
+                        """Check if a transcribed word matches any banned word."""
+                        # Minimum length — never match single chars or 2-char words
+                        if len(w_clean) < 2: return None
+
+                        # Innocent words that merely contain a banned substring (spicy, cocktail, assess...)
+                        _SAFE_START = ('spice','spicy','spici','susp','desp','ausp','consp','inspic','cockp','cockt','cockr','dickens','dickson','dickinson','assess','scunth')
+                        _SAFE_ANY = ('peacock','hancock','woodcock','shuttlecock')
+                        if (w_clean.startswith(_SAFE_START) or any(s in w_clean for s in _SAFE_ANY)) and \
+                           not any(w_clean == ''.join(c for c in x.lower() if c.isalpha()) for x in banned_list):
+                            return None
+
+                        # Check phonetic aliases first
+                        if w_clean in _alias_map:
+                            _canon = _alias_map[w_clean]
+                            if any(''.join(c for c in _b.lower() if c.isalpha()) == _canon
+                                   for _b in banned_list):
+                                return _canon
+
+                        for _b in banned_list:
+                            b = ''.join(c for c in _b.lower() if c.isalpha())
+                            # Skip banned words shorter than 3 chars (too many false positives)
+                            if len(b) < 3 or not w_clean: continue
+                            if len(b) <= 3:
+                                # Very short (3 chars like "ass"): exact match OR
+                                # starts compound word: "asshole", "asses" — not "asset", "classic"
+                                if w_clean == b:
+                                    return _b
+                                # Only allow compound if next char is h,e,i,s (asshole/asses)
+                                if (w_clean.startswith(b + 'h') or
+                                    w_clean.startswith(b + 'es') or
+                                    w_clean.startswith(b + 'in')):
+                                    return _b
+                            elif len(b) <= 5:
+                                # Medium (fuck, shit, bitch): startswith catches fucking/shithead
+                                if w_clean == b or w_clean.startswith(b):
+                                    return _b
+                                # Contained in compound (motherfucker, bullshit)
+                                if b in w_clean and len(w_clean) <= len(b) + 8:
+                                    return _b
+                            else:
+                                # Long words: exact or starts-with only
+                                if w_clean == b or w_clean.startswith(b):
+                                    return _b
+                        return None
+
+                    for seg in segs:
+                        seg_words = seg.get('words', [])
+                        if seg_words:
+                            for wd in seg_words:
+                                w_raw   = wd.get('word', '')
+                                w_clean = ''.join(c for c in w_raw.lower() if c.isalpha())
+                                if not w_clean: continue
+                                matched = _word_matches_banned(w_clean, words)
+                                if matched:
+                                    hits.append((
+                                        max(0.0, wd['start'] - 0.15),  # start 0.15s early
+                                        wd['end'] + 0.1,
+                                        w_clean
+                                    ))
+                        else:
+                            # No word timestamps — estimate position within segment
+                            seg_text   = seg.get('text', '').lower()
+                            seg_clean  = ''.join(c if c.isalpha() else ' ' for c in seg_text)
+                            seg_tokens = seg_clean.split()
+                            seg_dur    = seg['end'] - seg['start']
+                            for _ti, tok in enumerate(seg_tokens):
+                                if _word_matches_banned(tok, words):
+                                    # Estimate position proportionally within segment
+                                    frac   = _ti / max(len(seg_tokens), 1)
+                                    word_t = seg['start'] + frac * seg_dur
+                                    # Start beep 0.15s early, cover full word + 0.1s tail
+                                    hits.append((max(0, word_t - 0.15), word_t + 0.6, tok))
+                    # ── Step 3: AI context pass (optional) ───────────────────────
+                    if self.censor_ai_pass.get() and hits:
+                        self._censor_set_status('AI context pass...')
+                        self.set_progress('AI filtering false positives...', step=3, total=4, pct=50)
+                        hits = self._censor_ai_filter(segs, hits)
+
+                    self.log(f'[Censor] Found {len(hits)} words to censor: {[h[2] for h in hits]}', YELLOW if hits else GREEN)
+                    for _ht in hits:
+                        self.log(f'[Censor]   "{_ht[2]}" at {_ht[0]:.2f}s–{_ht[1]:.2f}s')
+
+                    if not hits:
+                        self.log(f'[Censor] No banned words found in {vid_name}', GREEN)
+                        self.log(f'[Censor] Tip: If you know there are swear words, try enabling 🔍 Deep Scan with the medium model', FG2)
+                        self._censor_set_status(f'No banned words found in {vid_name}', GREEN)
+                        self.set_progress(f'No banned words found', pct=100)
+                        self.after(0, lambda v=vid: self._censor_render_result(v, [], None))
+                        _clean += 1
+                        continue
+
+                    # ── Step 4: Extract + patch audio ────────────────────────────
+                    self._censor_set_status(f'[{vi+1}/{len(video_list)}] Patching audio...')
+                    self.set_progress(f'[{vi+1}/{len(video_list)}] Patching audio — {len(hits)} words...',
+                                     step=4, total=4, pct=75)
+                    tmp_dir = _tmp.mkdtemp(prefix='cf_censor_')
+                    try:
+                        # Extract full audio as WAV
+                        wav_in  = str(Path(tmp_dir) / 'audio_in.wav')
+                        wav_out = str(Path(tmp_dir) / 'audio_out.wav')
+                        _rx = subprocess.run([ff,'-y','-i',vid,'-vn','-ar','44100','-ac','2',
+                                       '-f','wav',wav_in],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        if _rx.returncode != 0:
+                            raise RuntimeError('ffmpeg audio extract failed: ' + (_rx.stderr or b'').decode(errors='replace')[-200:])
+
+                        try:
+                            _sf = _fresh_import('soundfile')
+                            _np2 = _fresh_import('numpy')
+                        except ImportError:
+                            raise ImportError('soundfile/numpy not installed. Go to Settings → Update Modules to install them.')
+                        audio, sr = _sf.read(wav_in, dtype='float32')
+                        n_ch = audio.shape[1] if audio.ndim == 2 else 1
+                        self.log(f'[Censor] Audio: {len(audio)/sr:.1f}s, {sr}Hz, {n_ch}ch')
+
+                        def _make_bleep_stereo(mono_bleep, length, channels):
+                            """Tile mono bleep to required length and channels."""
+                            if len(mono_bleep) < length:
+                                reps = (length // len(mono_bleep)) + 2
+                                mono_bleep = _np2.tile(mono_bleep, reps)
+                            mono_bleep = mono_bleep[:length]
+                            if channels == 2:
+                                return _np2.stack([mono_bleep, mono_bleep], axis=1)
+                            return mono_bleep
+
+                        # Load bleep source
+                        bleep_mono = None
+                        if style == 'beep':
+                            bleep_mono = self._censor_make_beep(sr)
+                        elif style == 'mp3' and mp3_path and Path(mp3_path).exists():
+                            raw, bsr = _sf.read(mp3_path, dtype='float32')
+                            # Convert to mono if stereo
+                            bleep_mono = raw.mean(axis=1) if raw.ndim == 2 else raw
+                            if bsr != sr:
+                                # Simple resample via repeat/decimate
+                                ratio = sr / bsr
+                                new_len = int(len(bleep_mono) * ratio)
+                                bleep_mono = _np2.interp(
+                                    _np2.linspace(0, len(bleep_mono), new_len),
+                                    _np2.arange(len(bleep_mono)), bleep_mono
+                                ).astype('float32')
+                        if style == 'mp3' and bleep_mono is None:
+                            self.log('[Censor] ⚠️ MP3 file missing/invalid — falling back to beep', YELLOW)
+                            bleep_mono = self._censor_make_beep(sr)
+
+                        # Apply censoring (patch in place; track max change only on patched slices)
+                        audio_patched = audio
+                        _maxdiff = 0.0
+                        for start_t, end_t, word in hits:
+                            s = int(start_t * sr)
+                            e = int(end_t   * sr)
+                            e = min(e, len(audio_patched))
+                            if e <= s:
+                                self.log(f'[Censor] ⚠️ Zero-length hit at {start_t:.2f}s, skipping')
+                                continue
+                            seg_len = e - s
+                            self.log(f'[Censor] Censoring "{word}" samples {s}–{e} ({seg_len} samples)')
+                            _orig = audio_patched[s:e].copy()
+                            if style == 'silence':
+                                audio_patched[s:e] = 0.0
+                            elif bleep_mono is not None:
+                                patch = _make_bleep_stereo(bleep_mono, seg_len, n_ch)
+                                audio_patched[s:e] = patch
+                            _maxdiff = max(_maxdiff, float(_np2.abs(audio_patched[s:e] - _orig).max()))
+
+                        # Verify patch was applied
+                        diff = _maxdiff
+                        self.log(f'[Censor] Max audio diff after patch: {diff:.4f} (0=unchanged)')
+                        if diff < 0.001:
+                            self.log('[Censor] ⚠️ Audio unchanged — patch may have failed!', YELLOW)
+
+                        _sf.write(wav_out, audio_patched, sr)
+
+                        # Mux patched audio back into video
+                        out_name = f'{Path(vid).stem}_censored.mp4'
+                        out_path = str(Path(out) / out_name)
+                        # Log wav_out size to confirm it exists and has data
+                        wav_sz = Path(wav_out).stat().st_size if Path(wav_out).exists() else 0
+                        self.log(f'[Censor] wav_out size: {wav_sz//1024}KB')
+
+                        r = subprocess.run(
+                            [ff,'-y',
+                             '-i', vid,
+                             '-i', wav_out,
+                             '-map', '0:v:0',
+                             '-map', '1:a:0',
+                             '-c:v', 'copy',
+                             '-c:a', 'aac',
+                             '-b:a', '192k',
+                             '-avoid_negative_ts', 'make_zero',
+                             out_path],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                        mux_err = (r.stderr or b'').decode(errors='replace')
+                        if r.returncode == 0:
+                            out_sz = Path(out_path).stat().st_size if Path(out_path).exists() else 0
+                            self.log(f'[Censor] ✅ Saved: {out_name} ({out_sz//1024}KB)', GREEN)
+                            self.after(0, lambda v=vid, h=hits, op=out_path:
+                                self._censor_render_result(v, h, op))
+                            _ok += 1
+                        else:
+                            self.log(f'[Censor] ❌ Mux failed (rc={r.returncode}): {mux_err[-300:]}', RED)
+                            _failed.append(vid_name)
+                    finally:
+                        import shutil as _sh
+                        _sh.rmtree(tmp_dir, ignore_errors=True)
+                except Exception as _ve:
+                    _failed.append(vid_name)
+                    self.log(f'[Censor] ❌ {vid_name} failed: {_ve}', RED)
+                    self.log(traceback.format_exc(), RED)
                     continue
 
-                # ── Step 4: Extract + patch audio ────────────────────────────
-                self._censor_set_status(f'[{vi+1}/{len(video_list)}] Patching audio...')
-                self.set_progress(f'[{vi+1}/{len(video_list)}] Patching audio — {len(hits)} words...',
-                                 step=4, total=4, pct=75)
-                tmp_dir = _tmp.mkdtemp(prefix='cf_censor_')
-                try:
-                    # Extract full audio as WAV
-                    wav_in  = str(Path(tmp_dir) / 'audio_in.wav')
-                    wav_out = str(Path(tmp_dir) / 'audio_out.wav')
-                    subprocess.run([ff,'-y','-i',vid,'-vn','-ar','44100','-ac','2',
-                                   '-f','wav',wav_in],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-                    try:
-                        _sf = _fresh_import('soundfile')
-                        _np2 = _fresh_import('numpy')
-                    except ImportError:
-                        raise ImportError('soundfile/numpy not installed. Go to Settings → Update Modules to install them.')
-                    audio, sr = _sf.read(wav_in, dtype='float32')
-                    n_ch = audio.shape[1] if audio.ndim == 2 else 1
-                    self.log(f'[Censor] Audio: {len(audio)/sr:.1f}s, {sr}Hz, {n_ch}ch')
-
-                    def _make_bleep_stereo(mono_bleep, length, channels):
-                        """Tile mono bleep to required length and channels."""
-                        if len(mono_bleep) < length:
-                            reps = (length // len(mono_bleep)) + 2
-                            mono_bleep = _np2.tile(mono_bleep, reps)
-                        mono_bleep = mono_bleep[:length]
-                        if channels == 2:
-                            return _np2.stack([mono_bleep, mono_bleep], axis=1)
-                        return mono_bleep
-
-                    # Load bleep source
-                    bleep_mono = None
-                    if style == 'beep':
-                        bleep_mono = self._censor_make_beep(sr)
-                    elif style == 'mp3' and mp3_path and Path(mp3_path).exists():
-                        raw, bsr = _sf.read(mp3_path, dtype='float32')
-                        # Convert to mono if stereo
-                        bleep_mono = raw.mean(axis=1) if raw.ndim == 2 else raw
-                        if bsr != sr:
-                            # Simple resample via repeat/decimate
-                            ratio = sr / bsr
-                            new_len = int(len(bleep_mono) * ratio)
-                            bleep_mono = _np2.interp(
-                                _np2.linspace(0, len(bleep_mono), new_len),
-                                _np2.arange(len(bleep_mono)), bleep_mono
-                            ).astype('float32')
-
-                    # Apply censoring
-                    audio_patched = audio.copy()
-                    for start_t, end_t, word in hits:
-                        s = int(start_t * sr)
-                        e = int(end_t   * sr)
-                        e = min(e, len(audio_patched))
-                        if e <= s:
-                            self.log(f'[Censor] ⚠️ Zero-length hit at {start_t:.2f}s, skipping')
-                            continue
-                        seg_len = e - s
-                        self.log(f'[Censor] Censoring "{word}" samples {s}–{e} ({seg_len} samples)')
-                        if style == 'silence':
-                            audio_patched[s:e] = 0.0
-                        elif bleep_mono is not None:
-                            patch = _make_bleep_stereo(bleep_mono, seg_len, n_ch)
-                            audio_patched[s:e] = patch
-
-                    # Verify patch was applied
-                    diff = _np2.abs(audio_patched - audio).max()
-                    self.log(f'[Censor] Max audio diff after patch: {diff:.4f} (0=unchanged)')
-                    if diff < 0.001:
-                        self.log('[Censor] ⚠️ Audio unchanged — patch may have failed!', YELLOW)
-
-                    _sf.write(wav_out, audio_patched, sr)
-
-                    # Mux patched audio back into video
-                    out_name = f'{Path(vid).stem}_censored.mp4'
-                    out_path = str(Path(out) / out_name)
-                    # Log wav_out size to confirm it exists and has data
-                    wav_sz = Path(wav_out).stat().st_size if Path(wav_out).exists() else 0
-                    self.log(f'[Censor] wav_out size: {wav_sz//1024}KB')
-
-                    r = subprocess.run(
-                        [ff,'-y',
-                         '-i', vid,
-                         '-i', wav_out,
-                         '-map', '0:v:0',
-                         '-map', '1:a:0',
-                         '-c:v', 'copy',
-                         '-c:a', 'aac',
-                         '-b:a', '192k',
-                         '-avoid_negative_ts', 'make_zero',
-                         out_path],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-                    mux_err = (r.stderr or b'').decode(errors='replace')
-                    if r.returncode == 0:
-                        out_sz = Path(out_path).stat().st_size if Path(out_path).exists() else 0
-                        self.log(f'[Censor] ✅ Saved: {out_name} ({out_sz//1024}KB)', GREEN)
-                        self.after(0, lambda v=vid, h=hits, op=out_path:
-                            self._censor_render_result(v, h, op))
-                    else:
-                        self.log(f'[Censor] ❌ Mux failed (rc={r.returncode}): {mux_err[-300:]}', RED)
-                finally:
-                    import shutil as _sh
-                    _sh.rmtree(tmp_dir, ignore_errors=True)
-
-            total = len(video_list)
-            self._censor_set_status(f'Done! {total} video(s) censored → {out}', GREEN)
-            self.after(0, lambda t=total, o=out: (
-                self.set_progress(f'✅ Done — {t} video(s) censored', pct=100),
-                messagebox.showinfo('Done', f'Censored {t} video(s)\nSaved to: {o}')
-            ))
+            _done = _ok + _clean
+            if _failed:
+                self._censor_set_status(f'Finished with errors: {len(_failed)} failed', RED)
+                self.after(0, lambda d=_done, f=list(_failed): (
+                    self.set_progress(f'⚠ {len(f)} video(s) failed', pct=100),
+                    messagebox.showwarning('Censor finished',
+                                           f'{d} ok, {len(f)} failed:\n' + '\n'.join(f))
+                ))
+            else:
+                self._censor_set_status(f'Done! {_done} video(s) censored → {out}', GREEN)
+                # Clear the queue only after a fully successful run (main thread)
+                self.after(0, lambda t=_done, o=out: (
+                    self.censor_queue_box.delete('1.0', 'end'),
+                    self.set_progress(f'✅ Done — {t} video(s) censored', pct=100),
+                    messagebox.showinfo('Done', f'Censored {t} video(s)\nSaved to: {o}')
+                ))
 
         except Exception:
             err = traceback.format_exc()
@@ -17288,7 +17350,6 @@ sys.exit(main())
             self._censor_running = False
             self.after(0, lambda: self.censor_go_btn.config(
                 state='normal', text='🔇  CENSOR VIDEO'))
-            self._censor_clear_queue()
 
     def _censor_make_beep(self, sr, freq=1000, duration=None):
         """Generate a sine wave beep at given frequency."""
@@ -17390,7 +17451,7 @@ where "keep" = words to censor, "remove" = false positives to skip."""
                       ).pack(side='left')
 
         # Update result count
-        n = len(self.censor_results_frame.winfo_children())
+        n = sum(1 for w in self.censor_results_frame.winfo_children() if isinstance(w, tk.Frame))
         self.censor_result_lbl.config(text=f'{n} video(s) processed')
 
     # ═══════════════════════════════════════════════════════════════════════════
