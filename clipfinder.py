@@ -16847,244 +16847,485 @@ Return ONLY the JSON array, no other text."""
                 return
 
 
-    def _run_music_removal(self):
-        """Run Demucs on all queued videos."""
-        # Get videos from queue box
-        lines = [l.strip() for l in self.v_mr_queue_box.get('1.0','end').splitlines() if l.strip()]
-        videos = [l for l in lines if Path(l).exists()]
-        if not videos:
-            # Fallback to v_mr_video for compatibility
-            vid = self.v_mr_video.get().strip()
-            if vid and Path(vid).exists():
-                videos = [vid]
+    # ── Music Removal (isolated Demucs engine) ────────────────────────────────
+    # Demucs/PyTorch run in a SEPARATE Python process from %LOCALAPPDATA%\ClipFinder\envs\demucs, so
+    # nothing here imports torch/demucs/torchaudio and it can never collide with the app's packages.
+    @staticmethod
+    def _mr_clean_path(s):
+        """Strip whitespace and ONE matching pair of quotes that Explorer's 'Copy as path' adds."""
+        s = (s or '').strip()
+        for _ in range(3):
+            if len(s) >= 2 and ((s[0] == s[-1] and s[0] in '"\'`') or (s[0] in '“‘' and s[-1] in '”’')):
+                s = s[1:-1].strip()
             else:
-                messagebox.showerror('No video', 'Add videos to the queue first.'); return
-        out = self.v_mr_out.get().strip()
-        if not out:
-            messagebox.showerror('No output', 'Select an output folder first.'); return
+                break
+        return s
 
-        model     = self.v_mr_model.get()
-        keep_vox  = self.v_mr_keep_vocals.get()
-        keep_other= self.v_mr_keep_other.get()
-        ff        = ensure_ffmpeg()
+    @staticmethod
+    def _mr_explain(tail, what='Demucs'):
+        """Readable one-liner from the tail of a failed subprocess."""
+        lines = [l.strip() for l in (tail or '').splitlines() if l.strip()]
+        last = lines[-1][:300] if lines else 'no details were reported'
+        low = (tail or '').lower()
+        if any(k in low for k in ('no module named', 'modulenotfounderror', 'dll load failed', 'importerror')):
+            return (f'{what} could not start - the Music Removal engine looks damaged. '
+                    f'Reinstall it from Settings > Update Center.  ({last})')
+        if any(k in low for k in ('out of memory', 'memoryerror', "can't allocate", 'not enough memory')):
+            return f'{what} ran out of memory - try a shorter video or close other programs.  ({last})'
+        if any(k in low for k in ('urlopen error', 'getaddrinfo', 'connection', 'timed out', 'httperror')):
+            return f'{what} could not download the separation model (needed once) - check your internet connection.  ({last})'
+        return last
 
-        self.set_busy(True)
-        self.mr_status_lbl.config(text=f'⏳ Processing {len(videos)} video(s)...', fg=ACCENT2)
-        self.log(f'🎵 Music Removal: starting {len(videos)} video(s)...', ACCENT2)
-
-        def _run():
+    def _mr_say(self, text, color=None):
+        """Update the tab's status label from any thread."""
+        color = color or ACCENT2
+        def _do():
             try:
-                import subprocess as _sp, sys as _sys, tempfile as _tmp
-                _ensure_pkgs_on_path()
+                self.mr_status_lbl.config(text=text, fg=color)
+            except Exception:
+                pass
+        try:
+            self.after(0, _do)
+        except Exception:
+            pass
 
-                # Check demucs + dependencies installed
-                missing = []
-                for _m in ('demucs', 'torch', 'torchaudio'):
-                    try: __import__(_m)
-                    except ImportError: missing.append(_m)
-                if missing:
-                    self.log(f'❌ Missing: {", ".join(missing)} — install in Settings → Update Modules', RED)
-                    self.after(0, lambda: self.mr_status_lbl.config(
-                        text=f'❌ Missing: {", ".join(missing)} — install in Settings', fg=RED))
-                    return
+    def _mr_cancel_obj(self):
+        """Object with .is_set() (what eng_run/_um_run poll) that follows the global Cancel button."""
+        import types as _types
+        return _types.SimpleNamespace(is_set=lambda: bool(getattr(self, '_cancel_requested', False)))
 
-                for _vi, vid in enumerate(videos):
-                    self.after(0, lambda n=_vi+1, t=len(videos), v=Path(vid).name:
-                        self.mr_status_lbl.config(text=f'⏳ [{n}/{t}] {v}...', fg=ACCENT2))
-                    self.log(f'🎵 [{_vi+1}/{len(videos)}] Processing: {Path(vid).name}', ACCENT2)
-                    try:
-                        self._run_music_removal_single(vid, out, model, keep_vox, keep_other, ff, _vi, len(videos))
-                    except Exception as _ve:
-                        import traceback as _tb
-                        self.log(f'❌ [{Path(vid).name}] Failed: {_ve}', RED)
-                        self.log(_tb.format_exc(), RED)
-                        continue
+    def _mr_engine_refresh(self):
+        """Header line of the tab: engine installed (version) / not installed + Install button."""
+        try:
+            st = eng_status('demucs')
+        except Exception:
+            st = dict(installed=False, version=None, torch=None)
+        try:
+            if st.get('installed'):
+                self.mr_eng_lbl.config(text=f'Engine: ✅ Demucs {st.get("version") or "?"}  +  PyTorch {st.get("torch") or "?"}  (isolated)',
+                                       fg=GREEN)
+                self.mr_eng_btn.pack_forget()
+            else:
+                self.mr_eng_lbl.config(text='Engine: ⚠ not installed - one-time download of about 1 GB', fg=YELLOW)
+                if not self.mr_eng_btn.winfo_ismapped():
+                    self.mr_eng_btn.pack(side='left', padx=(10, 0))
+        except Exception:
+            pass
 
-                self.after(0, lambda: (
-                    self.mr_status_lbl.config(text=f'✅ Done: {len(videos)} video(s) processed', fg=GREEN),
-                    self.set_busy(False),
-                    self.set_progress('✅ Music Removal complete', pct=100)
-                ))
-            except Exception as _ex:
-                import traceback as _tb2
-                self.log(f'Music Removal error: {_tb2.format_exc()}', RED)
-                self.after(0, lambda: (self.set_busy(False), self.set_progress('', pct=0)))
+    def _mr_install_engine(self, then=None):
+        """Ask ONCE, then build the isolated Demucs engine in a worker thread (cancellable, progress in the
+        status bar). Calls then() on the Tk thread when it succeeded; on refusal/failure just resets."""
+        if getattr(self, '_mr_busy', False) or getattr(self, '_uc_engine_busy', False):
+            messagebox.showinfo('Music Removal', 'Something is already running (or the engine is installing).\n'
+                                                 'Wait for it to finish first.')
+            return
+        if not messagebox.askyesno(
+                'Install Music Removal engine?',
+                'Music Removal needs its own AI engine (Demucs + PyTorch).\n\n'
+                '  -  One-time download of about 1 GB (allow ~3 GB of free disk space)\n'
+                '  -  It installs into its own folder and never touches your other modules\n'
+                '  -  The separation model (100-400 MB) is fetched the first time you run it\n\n'
+                'Install it now?'):
+            self._mr_say('Music Removal engine not installed - click "Install engine" when you are ready.', YELLOW)
+            return
+        self._mr_busy = True
+        self._uc_engine_busy = True
+        cancel = self._mr_cancel_obj()
+        self.log('🎵 Installing the Music Removal engine (one-time download)...', ACCENT2)
+        self.set_busy(True)                                   # also clears a stale cancel flag
+        self.set_progress('🎵 Installing Music Removal engine...', pct=None)
+        self._mr_say('⏳ Installing the Music Removal engine - this can take several minutes...')
+        try:
+            self.mr_go_btn.config(state='disabled')
+        except Exception:
+            pass
 
-        import threading; threading.Thread(target=_run, daemon=True).start()
+        def _line(l):
+            try:
+                self.after(0, lambda l=l: self.set_progress(f'🎵 {l[:70]}', pct=None))
+            except Exception:
+                pass
+
+        def _work():
+            res = dict(ok=False, error='unknown error')
+            try:
+                res = eng_install('demucs', on_line=_line, cancel=cancel)
+            except Exception as e:
+                res = dict(ok=False, error=str(e))
+
+            def _fin():
+                self._mr_busy = False
+                self._uc_engine_busy = False
+                try:
+                    self.mr_go_btn.config(state='normal')
+                except Exception:
+                    pass
+                self.set_busy(False)
+                self.set_progress('', pct=0)
+                self._mr_engine_refresh()
+                try:
+                    self._uc_engine_refresh()
+                except Exception:
+                    pass
+                if res.get('ok'):
+                    self.log(f'✅ Music Removal engine ready (Demucs {res.get("version")})', GREEN)
+                    self._mr_say('✅ Engine installed', GREEN)
+                    if then:
+                        then()
+                elif res.get('error') == 'Cancelled':
+                    self.log('⛔ Engine install cancelled', YELLOW)
+                    self._mr_say('⛔ Engine install cancelled', YELLOW)
+                else:
+                    self.log(f'❌ Music Removal engine: {res.get("error")}', RED)
+                    self._mr_say('❌ Engine install failed - see the log', RED)
+                    messagebox.showerror('Music Removal engine',
+                                         f'Could not install the engine:\n\n{res.get("error")}\n\nDetails are in the update log.')
+            try:
+                self.after(0, _fin)
+            except Exception:
+                pass
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _mr_parse_queue(self):
+        """-> (existing files, missing paths). Strips quotes, ignores blanks and duplicates."""
+        try:
+            raw = self.v_mr_queue_box.get('1.0', 'end').splitlines()
+        except Exception:
+            raw = []
+        if not any(l.strip() for l in raw):
+            try:
+                raw = [self.v_mr_video.get()]         # legacy single-file field
+            except Exception:
+                raw = []
+        videos, missing, seen = [], [], set()
+        for line in raw:
+            p = self._mr_clean_path(line)
+            if not p:
+                continue
+            key = os.path.normcase(os.path.abspath(p))
+            if key in seen:
+                continue
+            seen.add(key)
+            (videos if os.path.isfile(p) else missing).append(p)
+        return videos, missing
+
+    def _run_music_removal(self):
+        """Run Demucs (isolated engine) on all queued videos."""
+        if getattr(self, '_mr_busy', False):
+            messagebox.showinfo('Music Removal', 'Music Removal is already running.')
+            return
+        videos, missing = self._mr_parse_queue()
+        for m in missing:
+            self.log(f'⚠ Music Removal: file not found, skipped: {m}', YELLOW)
+        if not videos:
+            messagebox.showerror('No video', 'Add videos to the queue first.' if not missing else
+                                 'None of the queued files exist:\n\n' + '\n'.join(missing[:8]))
+            return
+        out = self._mr_clean_path(self.v_mr_out.get())
+        if not out:
+            messagebox.showerror('No output', 'Select an output folder first.')
+            return
+        model = self.v_mr_model.get()
+        keep_vox = bool(self.v_mr_keep_vocals.get())
+        keep_other = bool(self.v_mr_keep_other.get())
+        if not keep_vox and not keep_other:
+            keep_vox = True
+            self.log('[Music] Nothing ticked under Keep - keeping vocals only', FG2)
+        if missing and not messagebox.askyesno(
+                'Some files were not found',
+                f'{len(missing)} queued file(s) do not exist and will be skipped:\n\n' + '\n'.join(missing[:6]) +
+                f'\n\nContinue with the other {len(videos)}?'):
+            return
+        try:
+            installed = bool(eng_status('demucs').get('installed'))
+        except Exception:
+            installed = False
+        self._mr_engine_refresh()
+        if installed:
+            self._mr_start(videos, out, model, keep_vox, keep_other)
+        else:
+            self._mr_install_engine(then=lambda: self._mr_start(videos, out, model, keep_vox, keep_other))
+
+    def _mr_start(self, videos, out, model, keep_vox, keep_other):
+        if getattr(self, '_mr_busy', False):
+            return
+        self._mr_busy = True
+        try:
+            self.mr_go_btn.config(state='disabled')
+        except Exception:
+            pass
+        self.set_busy(True)                                   # also clears a stale cancel flag
+        self._mr_say(f'⏳ Processing {len(videos)} video(s)...')
+        self.log(f'🎵 Music Removal: starting {len(videos)} video(s)...', ACCENT2)
+        try:
+            threading.Thread(target=self._mr_worker, args=(videos, out, model, keep_vox, keep_other),
+                             daemon=True).start()
+        except Exception as e:
+            self._mr_finish([], [], False, f'Could not start the worker: {e}', out, len(videos))
+
+    def _mr_worker(self, videos, out, model, keep_vox, keep_other):
+        """Worker thread: ffmpeg lookup, engine sanity check, then one video at a time."""
+        done, failed, cancelled, fatal = [], [], False, ''
+        cancel = self._mr_cancel_obj()
+        try:
+            self._mr_say('⏳ Preparing (ffmpeg)...')
+            ff = ensure_ffmpeg()                              # may download ffmpeg - never on the Tk thread
+            try:                                              # the Demucs subprocess looks ffmpeg up on PATH
+                ffdir = os.path.dirname(ff) if os.path.isabs(ff) else ''
+                if ffdir and os.path.normcase(ffdir) not in [os.path.normcase(x) for x in os.environ.get('PATH', '').split(os.pathsep)]:
+                    os.environ['PATH'] = ffdir + os.pathsep + os.environ.get('PATH', '')
+            except Exception:
+                pass
+            if not pm_python():
+                raise RuntimeError('Python 3.12 was not found - the Music Removal engine needs it. Install Python 3.12 and retry.')
+            if not eng_status('demucs').get('installed'):
+                raise RuntimeError('The Music Removal engine is not installed. Use the "Install engine" button.')
+            os.makedirs(out, exist_ok=True)
+            n = len(videos)
+            for i, vid in enumerate(videos):
+                if cancel.is_set():
+                    cancelled = True
+                    break
+                name = os.path.basename(vid)
+                self._mr_say(f'⏳ [{i + 1}/{n}] {name}...')
+                self.log(f'🎵 [{i + 1}/{n}] Processing: {name}', ACCENT2)
+                try:
+                    res = self._run_music_removal_single(vid, out, model, keep_vox, keep_other, ff, i, n)
+                except Exception as e:
+                    import traceback as _tb
+                    failed.append((name, str(e) or e.__class__.__name__))
+                    self.log(f'❌ [{name}] Failed: {e}', RED)
+                    self.log(_tb.format_exc(), RED)
+                    continue
+                if res is None:                               # cancelled part-way through this video
+                    cancelled = True
+                    break
+                done.append(res)
+        except Exception as e:
+            import traceback as _tb2
+            fatal = str(e) or e.__class__.__name__
+            self.log(f'Music Removal error: {_tb2.format_exc()}', RED)
+        finally:
+            try:
+                self.after(0, lambda: self._mr_finish(done, failed, cancelled, fatal, out, len(videos)))
+            except Exception:
+                self._mr_busy = False
+
+    def _mr_finish(self, done, failed, cancelled, fatal, out, total):
+        """Tk thread: reset the busy state (always) and report an accurate summary."""
+        self._mr_busy = False
+        try:
+            self.mr_go_btn.config(state='normal')
+        except Exception:
+            pass
+        try:
+            self.set_busy(False)
+        except Exception:
+            pass
+        if fatal:
+            text, color, pct = f'❌ {fatal[:160]}', RED, 0
+        elif cancelled:
+            text, color, pct = f'⛔ Cancelled - {len(done)} of {total} finished', YELLOW, 0
+        elif failed and not done:
+            text, color, pct = f'❌ Failed: {len(failed)} of {total} video(s)', RED, 0
+        elif failed:
+            text, color, pct = f'⚠ {len(done)} done, {len(failed)} failed', YELLOW, 100
+        else:
+            text, color, pct = f'✅ Done: {len(done)} video(s) processed', GREEN, 100
+        self._mr_say(text, color)
+        try:
+            self.set_progress(text, pct=pct)
+        except Exception:
+            pass
+        self.log(text, color)
+        detail = '\n'.join(f'  -  {n}: {why[:200]}' for n, why in failed[:6])
+        if len(failed) > 6:
+            detail += f'\n  ... and {len(failed) - 6} more (see the log)'
+        try:
+            if fatal:
+                messagebox.showerror('Music Removal', fatal)
+            elif cancelled:
+                pass
+            elif failed and not done:
+                messagebox.showerror('Music Removal', f'No video could be processed:\n\n{detail}')
+            elif failed:
+                messagebox.showwarning('Music Removal', f'{len(done)} saved, {len(failed)} failed:\n\n{detail}\n\nSaved to: {out}')
+            else:
+                messagebox.showinfo('Music Removed', f'Saved {len(done)} video(s) to:\n{out}'
+                                    if len(done) != 1 else f'Saved: {os.path.basename(done[0])}\nLocation: {out}')
+        except Exception:
+            pass
 
     def _run_music_removal_single(self, vid, out, model, keep_vox, keep_other, ff, vi=0, total=1):
-        """Process a single video through Demucs music removal."""
-        import subprocess as _sp, sys as _sys, tempfile as _tmp
-        _ensure_pkgs_on_path()
+        """Separate one video with the isolated Demucs engine and mux the chosen stems back.
+        Runs on a worker thread. Returns the output path, or None if cancelled; raises RuntimeError
+        (readable message) on failure. Temp files are always removed.
 
-        # Patch torchaudio to use soundfile backend — avoids torchcodec DLL issues on Windows
+        Demucs runs with --two-stems=vocals, so it yields exactly two stems:
+          vocals     - the speech
+          no_vocals  - EVERYTHING else (music, drums, bass, effects)
+        keep_vox -> vocals in the result; keep_other -> no_vocals (the background music) in the result.
+        Vocals only = music removed. Both ticked = the full original mix."""
+        import tempfile as _tempf, shutil as _shu
+        cancel = self._mr_cancel_obj()
+        name = os.path.basename(vid)
+        total = max(1, int(total))
+
+        def prog(frac, text):
+            pct = (vi + max(0.0, min(1.0, frac))) / total * 100
+            self.set_progress(f'🎵 [{vi + 1}/{total}] {text}' if total > 1 else f'🎵 {text}', pct=pct)
+            self._mr_say(f'⏳ {text}')
+
+        def ffrun(cmd, what, timeout=6 * 3600):
+            rc, tail, state = _um_run([ff, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y'] + cmd,
+                                      'ffmpeg', timeout=timeout, cancel=cancel)
+            if state == 'cancelled':
+                return None
+            if state == 'timeout':
+                raise RuntimeError(f'ffmpeg timed out while {what}.')
+            if rc != 0:
+                raise RuntimeError(f'ffmpeg failed while {what}: {self._mr_explain(tail, "ffmpeg")}')
+            return True
+
+        tmp = _tempf.mkdtemp(prefix='cf_mr_')
+        part = None
         try:
-            import torchaudio as _ta
-            _ta.set_audio_backend('soundfile')
-            self.log('[Music] Using soundfile audio backend', FG2)
-        except Exception as _tae:
-            self.log(f'[Music] torchaudio backend note: {_tae}', FG2)
+            # 1. audio -> 44.1 kHz stereo wav (ASCII path, so the engine never meets odd characters)
+            prog(0.02, 'Extracting audio...')
+            self.log('Step 1: Extracting audio...', FG2)
+            audio = os.path.join(tmp, 'input_audio.wav')
+            if not ffrun(['-i', vid, '-vn', '-ar', '44100', '-ac', '2', '-f', 'wav', audio], 'reading the audio', 3600):
+                return None
+            if not os.path.isfile(audio) or os.path.getsize(audio) < 1024:
+                raise RuntimeError(f'"{name}" has no usable audio track.')
+            if cancel.is_set():
+                return None
 
-        # Step 1: Extract audio from video
-        self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Extracting audio...', fg=ACCENT2))
-        self.log('Step 1: Extracting audio...', FG2)
-        self.set_progress('🎵 Music Removal: extracting audio...', pct=10)
-        tmp_dir = Path(_tmp.mkdtemp())
-        audio_path = str(tmp_dir / 'input_audio.wav')
-        _sp.run([ff, '-y', '-i', vid, '-vn', '-ar', '44100',
-                 '-ac', '2', '-f', 'wav', audio_path],
-                stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
+            # 2. separate (progress is parsed from demucs' tqdm bars)
+            self.log(f'Step 2: Running Demucs [{model}] in the isolated engine...', FG2)
+            prog(0.05, f'Separating vocals [{model}]... (this takes a while)')
+            sep_out = os.path.join(tmp, 'separated')
+            st = {'passes': 1, 'pass': 0, 'last': -1, 'shown': -1}
 
-        # Step 2: Run Demucs separation
-        self.after(0, lambda: self.mr_status_lbl.config(
-            text=f'⏳ Separating stems with {model}... (this takes a while)', fg=ACCENT2))
-        self.log(f'Step 2: Running Demucs [{model}]...', FG2)
-        self.set_progress(f'🎵 Music Removal: separating stems [{model}]...', pct=30)
-        sep_out = str(tmp_dir / 'separated')
-        # Demucs command — patch torchaudio via python -c before demucs runs
-        import os as _os_dm
-        _dm_env = dict(_os_dm.environ)
-        # Force torchaudio to use soundfile — avoids torchcodec/DLL issues
-        _dm_env['TORCHAUDIO_BACKEND'] = 'soundfile'
-        _dm_env['TORCH_AUDIO_USE_SOUNDFILE'] = '1'
-        # Write a temp launcher script that patches torchaudio before demucs runs
-        import tempfile as _tmp2
-        _launcher = str(Path(_tmp2.gettempdir()) / 'cf_demucs_launcher.py')
-        with open(_launcher, 'w', encoding='utf-8') as _lf:
-            _pkgs_path = str(PKGS_DIR)
-            _lf.write(f"""# -*- coding: utf-8 -*-
-import sys
-sys.path.insert(0, r'{_pkgs_path}')
-try:
-    import soundfile as sf
-    import torch
-    import torchaudio
+            def on_line(line):
+                m = re.search(r'bag of (\d+) models', line)
+                if m:
+                    st['passes'] = max(1, int(m.group(1)))
+                    return
+                m = re.search(r'(\d{1,3})%\|', line)
+                if not m:
+                    return
+                pct = min(100, int(m.group(1)))
+                if 'seconds' not in line:                     # a model-download bar, not separation
+                    if pct != st['shown']:
+                        st['shown'] = pct
+                        self._mr_say(f'⏳ Downloading the {model} model (first use only)... {pct}%')
+                    return
+                if st['last'] >= 0 and pct < st['last'] - 10:  # a bag of models prints one bar per model
+                    st['pass'] = min(st['pass'] + 1, st['passes'] - 1)
+                st['last'] = pct
+                frac = (st['pass'] + pct / 100.0) / st['passes']
+                if int(frac * 100) != st['shown']:
+                    st['shown'] = int(frac * 100)
+                    prog(0.05 + 0.80 * frac, f'Separating vocals [{model}]... {int(frac * 100)}%')
 
-    def _sf_load(path, *args, **kwargs):
-        data, sr = sf.read(str(path), dtype='float32', always_2d=True)
-        return torch.tensor(data.T), sr
+            rc, tail, state = eng_run('demucs', ['-n', model, '--two-stems=vocals', '-o', sep_out, audio],
+                                      on_line=on_line, cancel=cancel, cwd=tmp)
+            if state == 'cancelled' or cancel.is_set():
+                return None
+            if state == 'timeout':
+                raise RuntimeError('Demucs timed out.')
+            if rc != 0:
+                raise RuntimeError('Demucs failed: ' + self._mr_explain(tail))
 
-    def _sf_save(path, src, sample_rate, *args, **kwargs):
-        import numpy as np
-        data = src.numpy().T
-        sf.write(str(path), data, sample_rate)
+            # 3. pick / mix the stems
+            self.log('Step 3: Mixing selected stems...', FG2)
+            prog(0.86, 'Mixing stems...')
+            stem_dir = os.path.join(sep_out, model, 'input_audio')
+            if not os.path.isdir(stem_dir):                   # be tolerant about the folder naming
+                cands = [d for d in (os.path.join(sep_out, x, 'input_audio') for x in
+                                     (os.listdir(sep_out) if os.path.isdir(sep_out) else [])) if os.path.isdir(d)]
+                stem_dir = cands[0] if cands else stem_dir
 
-    torchaudio.load = _sf_load
-    torchaudio.save = _sf_save
-except Exception as e:
-    print(f'[Demucs] dependency error: {{e}}', file=sys.stderr)
+            def find_stem(nm):
+                for ext in ('wav', 'flac', 'mp3'):
+                    p = os.path.join(stem_dir, f'{nm}.{ext}')
+                    if os.path.isfile(p):
+                        return p
+                return None
+            wanted = (['vocals'] if keep_vox else []) + (['no_vocals'] if keep_other else [])
+            if not wanted:
+                wanted = ['vocals']
+            stems = []
+            for nm in wanted:
+                p = find_stem(nm)
+                if not p:
+                    raise RuntimeError(f'Demucs did not produce the "{nm}" stem (looked in {stem_dir}).')
+                stems.append(p)
+            if len(stems) == 1:
+                mixed = stems[0]
+            else:
+                mixed = os.path.join(tmp, 'mixed.wav')
+                inputs = []
+                for s in stems:
+                    inputs += ['-i', s]
+                # amix divides every input by the input count, so scale back up and guard against clipping
+                if not ffrun(inputs + ['-filter_complex',
+                                       f'amix=inputs={len(stems)}:duration=longest,volume={len(stems)},alimiter=limit=0.95',
+                                       mixed], 'mixing the stems', 3600):
+                    return None
+            if cancel.is_set():
+                return None
 
-try:
-    from demucs.__main__ import main
-except ModuleNotFoundError as e:
-    print(f'[Demucs] incomplete install — please click Update All Packages in Settings: {{e}}', file=sys.stderr)
-    sys.exit(1)
-sys.exit(main())
-""")
-        _dm_cmd = [_sys.executable, _launcher,
-                   '-n', model,
-                   '--two-stems', 'vocals',
-                   '--out', sep_out,
-                   audio_path]
-        _dm_r = _sp.run(_dm_cmd, capture_output=True, text=True, env=_dm_env)
-        if _dm_r.returncode != 0:
-            _err_txt = _dm_r.stderr[-500:]
-            if 'incomplete install' in _err_txt or 'demucs.__main__' in _err_txt or 'ModuleNotFoundError' in _err_txt:
-                self.log('Demucs error: incomplete install — go to Settings → Update All Packages and restart', RED)
-                raise RuntimeError('Demucs is not fully installed.\nGo to Settings → Update Modules → Update All Packages, then restart ClipFinder.')
-            self.log(f'Demucs error: {_err_txt}', RED)
-            raise RuntimeError(f'Demucs failed: {_dm_r.stderr[-200:]}')
-
-        # Step 3: Find stems and mix the ones we want
-        self.log('Step 3: Mixing selected stems...', FG2)
-        if getattr(self, '_cancel_requested', False): return
-        self.set_progress('🎵 Music Removal: mixing stems...', pct=75)
-        self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Mixing stems...', fg=ACCENT2))
-        # two-stems output: vocals.wav and no_vocals.wav
-        sep_track = Path(sep_out) / model / 'input_audio'
-        # Try .wav first (default), then .mp3
-        def _find_stem(name):
-            for ext in ('wav','mp3','flac'):
-                p = sep_track / f'{name}.{ext}'
-                if p.exists(): return str(p)
-            return None
-        stems_to_mix = []
-        if keep_vox:
-            v = _find_stem('vocals')
-            if v: stems_to_mix.append(v)
-        if keep_other:
-            o = _find_stem('no_vocals')
-            if o: stems_to_mix.append(o)
-        if not stems_to_mix:
-            v = _find_stem('vocals')
-            if v: stems_to_mix.append(v)
-        if not stems_to_mix:
-            raise RuntimeError(f'No stems found in {sep_track} — check demucs output')
-
-        # Mix stems back together — use WAV to avoid codec issues
-        mixed_audio = str(tmp_dir / 'mixed.wav')
-        if len(stems_to_mix) == 1:
-            import shutil as _sh
-            _sh.copy2(stems_to_mix[0], mixed_audio)
-        else:
-            # amix all stems
-            inputs = []
-            for s in stems_to_mix:
-                inputs += ['-i', s]
-            _sp.run([ff, '-y'] + inputs +
-                    ['-filter_complex', f'amix=inputs={len(stems_to_mix)}:duration=longest',
-                     mixed_audio],
-                    stdout=_sp.PIPE, stderr=_sp.PIPE, check=True)
-
-        # Step 4: Merge cleaned audio back with original video
-        self.log('Step 4: Merging with original video...', FG2)
-        if getattr(self, '_cancel_requested', False): return
-        self.set_progress('🎵 Music Removal: merging audio + video...', pct=90)
-        self.after(0, lambda: self.mr_status_lbl.config(text='⏳ Merging audio + video...', fg=ACCENT2))
-        stem = Path(vid).stem
-        # Ensure output folder exists
-        Path(out).mkdir(parents=True, exist_ok=True)
-        out_path = str(Path(out) / f'{stem} - NoMusic - ClipFinder.mp4')
-        _vcodec, _acodec, _extra = get_encoder(ff)
-        _vid_ext = Path(vid).suffix.lower()
-        _needs_reencode = _vid_ext in ('.mov', '.avi', '.wmv', '.flv', '.mkv', '.webm')
-        _cv = ['-c:v', _vcodec] + _extra if _needs_reencode else ['-c:v', 'copy']
-        _cmd = [ff, '-y',
-                '-i', vid,
-                '-i', mixed_audio,
-                ] + _cv + [
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-map', '0:v:0',
-                '-map', '1:a:0',
-                '-shortest',
-                out_path]
-        self.log(f'[Music] ffmpeg merge: {" ".join(_cmd[-6:])}', FG2)
-        _res = _sp.run(_cmd, stdout=_sp.PIPE, stderr=_sp.PIPE)
-        if _res.returncode != 0:
-            _err = (_res.stderr or b'').decode(errors='replace')[-500:]
-            self.log(f'[Music] ffmpeg stderr: {_err}', RED)
-            raise _sp.CalledProcessError(_res.returncode, _cmd, _res.stdout, _res.stderr)
-
-        # Cleanup
-        import shutil as _sh2
-        _sh2.rmtree(str(tmp_dir), ignore_errors=True)
-
-        size = Path(out_path).stat().st_size / 1024 / 1024
-        self.log(f'✅ Done: {Path(out_path).name} ({size:.1f}MB)', GREEN)
-        self.after(0, lambda: self.mr_status_lbl.config(
-            text=f'✅ {Path(out_path).name}', fg=GREEN))
-        self.after(0, lambda: messagebox.showinfo('Music Removed',
-            f'Saved: {Path(out_path).name}\nLocation: {out}'))
-
-
+            # 4. mux the new audio onto the original video
+            self.log('Step 4: Merging with original video...', FG2)
+            prog(0.92, 'Merging audio + video...')
+            os.makedirs(out, exist_ok=True)
+            out_path = os.path.join(out, f'{os.path.splitext(name)[0]} - NoMusic - ClipFinder.mp4')
+            part = out_path + '.part'
+            reencode = os.path.splitext(vid)[1].lower() in ('.mov', '.avi', '.wmv', '.flv', '.mkv', '.webm')
+            if reencode:
+                vcodec, _ac, extra = get_encoder(ff)
+                cv = ['-c:v', vcodec] + list(extra)
+            else:
+                cv = ['-c:v', 'copy']
+            cmd = ['-i', vid, '-i', mixed] + cv + ['-c:a', 'aac', '-b:a', '192k',
+                                                   '-map', '0:v:0?', '-map', '1:a:0', '-shortest',
+                                                   '-movflags', '+faststart', '-f', 'mp4', part]
+            self.log(f'[Music] ffmpeg merge: {"re-encode" if reencode else "stream copy"} -> {os.path.basename(out_path)}', FG2)
+            if not ffrun(cmd, 'merging the audio back into the video'):
+                return None
+            if not os.path.isfile(part) or os.path.getsize(part) == 0:
+                raise RuntimeError('ffmpeg produced an empty file.')
+            os.replace(part, out_path)
+            part = None
+            size = os.path.getsize(out_path) / 1024 / 1024
+            self.log(f'✅ Done: {os.path.basename(out_path)} ({size:.1f}MB)', GREEN)
+            return out_path
+        finally:
+            if part:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+            _shu.rmtree(tmp, ignore_errors=True)
 
     def _build_music_removal_tab(self, p):
         """AI Music Removal using Demucs — strips background music, keeps vocals."""
         tk.Label(p, text='🎵  AI MUSIC REMOVAL', font=('Segoe UI', 10, 'bold'),
                 fg=ACCENT, bg=BG).pack(anchor='w', padx=16, pady=(12,2))
         tk.Label(p, text='Strip copyrighted background music. Keeps vocals and speech. Runs locally — no API needed.',
-                font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', padx=16, pady=(0,8))
+                font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', padx=16, pady=(0,4))
+
+        # Engine status line: Demucs runs in its own isolated environment (see the update manager)
+        eng_row = tk.Frame(p, bg=BG); eng_row.pack(fill='x', padx=16, pady=(0,6))
+        self.mr_eng_lbl = tk.Label(eng_row, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
+        self.mr_eng_lbl.pack(side='left')
+        self.mr_eng_btn = tk.Button(eng_row, text='⬇  Install engine', font=FONT_SMALL,
+                                    bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=10, pady=2,
+                                    command=lambda: self._mr_install_engine())
+        self._mr_engine_refresh()
+        p.bind('<Map>', lambda e: self._mr_engine_refresh() if e.widget is p else None)   # picks up Settings-side installs
 
         sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
         sec.pack(fill='x', padx=16, pady=(0,6))
@@ -17117,8 +17358,10 @@ sys.exit(main())
                     self.v_mr_queue_box.insert('end', f'\n{f}' if current else f)
             _mr_update_count()
         def _mr_add_clipfinder():
-            v = self.v_video.get().strip()
-            if not v: return
+            v = self._mr_clean_path(self._real_video())          # '' while the entry only shows its placeholder
+            if not v:
+                self.mr_status_lbl.config(text='No Clip Finder video loaded yet - pick one on the Clip Finder tab first.', fg=YELLOW)
+                return
             current = self.v_mr_queue_box.get('1.0','end').strip()
             if v not in current:
                 self.v_mr_queue_box.insert('end', f'\n{v}' if current else v)
@@ -17178,25 +17421,20 @@ sys.exit(main())
         tk.Checkbutton(keep_row, text='Vocals', variable=self.v_mr_keep_vocals,
                       font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
                       activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
-        tk.Checkbutton(keep_row, text='Other (SFX/ambience)', variable=self.v_mr_keep_other,
+        # Demucs runs with --two-stems=vocals: the only two stems are the vocals and "everything else"
+        # (the music). So this box keeps the background music - the label now says exactly that.
+        tk.Checkbutton(keep_row, text='Background music (no vocals)', variable=self.v_mr_keep_other,
                       font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
                       activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
-        tk.Label(keep_row, text='Drums/bass always removed',
+        tk.Label(keep_row, text='Vocals only = music removed  |  both = original mix',
                 font=('Segoe UI',7), fg=FG3, bg=BG2).pack(side='left', padx=8)
 
         btn_row = tk.Frame(p, bg=BG); btn_row.pack(fill='x', padx=16, pady=6)
-        tk.Button(btn_row, text='🎵  REMOVE MUSIC',
+        self.mr_go_btn = tk.Button(btn_row, text='🎵  REMOVE MUSIC',
                  font=('Segoe UI',10,'bold'), bg=ACCENT, fg='#000',
                  relief='flat', bd=0, cursor='hand2', padx=20, pady=8,
-                 command=self._run_music_removal).pack(side='left')
-        try:
-            import demucs as _dm_chk  # noqa
-            _demucs_ok = True
-        except ImportError:
-            _demucs_ok = False
-        if not _demucs_ok:
-            tk.Label(btn_row, text='⚠ Demucs not installed — go to Settings → Update Modules',
-                    font=FONT_SMALL, fg=YELLOW, bg=BG).pack(side='left', padx=12)
+                 command=self._run_music_removal)
+        self.mr_go_btn.pack(side='left')
         self.mr_status_lbl = tk.Label(p, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
         self.mr_status_lbl.pack(fill='x', padx=16)
 
