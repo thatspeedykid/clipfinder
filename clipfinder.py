@@ -4140,6 +4140,8 @@ class App(tk.Tk):
         self.srt_result = None
         self.running    = False
         self._cancel_requested = False
+        self._ff_procs = []                    # running export ffmpeg processes (killed by Cancel)
+        self._ff_lock  = threading.Lock()
         # App-level rate-limit tracking — persists across runs, visible to Settings panel
         import threading as _thr_init
         self._rl_provs      = set()        # providers currently rate-limited
@@ -6758,8 +6760,10 @@ class App(tk.Tk):
                 self.log('⛔ Killed whisper process', YELLOW)
             except: pass
         _do_transcribe._active_procs = []
-        # Kill any active Auto Edit ffmpeg process
-        for _p in list(getattr(self, '_ae_procs', [])):
+        # Kill any running export/queue ffmpeg process and any active Auto Edit ffmpeg process
+        with self._ff_lock:
+            _ffp = list(self._ff_procs)
+        for _p in _ffp + list(getattr(self, '_ae_procs', [])):
             try: _p.kill()
             except Exception: pass
         self.log('⛔ Task cancelled', YELLOW)
@@ -7912,6 +7916,7 @@ class App(tk.Tk):
 
             segs_raw = result.get('segments', [])
             self._whisper_segments = segs_raw
+            self._whisper_vid = os.path.normcase(os.path.abspath(str(vid)))
             lines = []
             for seg in segs_raw:
                 lines.append(f'[{ts(seg["start"])}] {seg["text"].strip()}')
@@ -9763,7 +9768,7 @@ Return ONLY the JSON array, no other text."""
             # Rename field
             rn_row = tk.Frame(inner, bg=BG2); rn_row.pack(fill='x', pady=(3,0))
             tk.Label(rn_row, text='Filename:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
-            name_var = tk.StringVar(value=re.sub(r'[\\/:*?"<>|]','',clip.get('title','clip'))[:40])
+            name_var = tk.StringVar(value=clip.get('filename') or re.sub(r'[\\/:*?"<>|]','',clip.get('title','clip'))[:40])
             clip['_name_var'] = name_var
             tk.Entry(rn_row, textvariable=name_var, font=FONT_SMALL,
                      bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
@@ -10206,15 +10211,42 @@ Return ONLY the JSON array, no other text."""
         else:
             self._export_selected()
 
+    def _resolve_export_video(self):
+        """Source video for export: the Video field, else the last transcribed/downloaded file."""
+        v = (self.v_video.get() or '').strip()
+        if not v or v == getattr(self, '_video_placeholder', '') or not Path(v).is_file():
+            v = (getattr(self, '_last_transcribed_vid', '') or getattr(self, '_last_dl_path', '') or '').strip()
+        return v if v and Path(v).is_file() else ''
+
+    def _run_ff(self, cmd, stdout=None, stderr=None):
+        """subprocess.run for export/queue ffmpeg jobs; the process is tracked so Cancel can kill it."""
+        p = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
+        with self._ff_lock:
+            self._ff_procs.append(p)
+        try:
+            out, err = p.communicate()
+        finally:
+            with self._ff_lock:
+                if p in self._ff_procs: self._ff_procs.remove(p)
+        return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
     def _export_selected(self):
+        if getattr(self, '_export_running', False):
+            return
         sel = [self.clips[i] for i, v in enumerate(self.clip_vars) if v.get()]
         if not sel:
             messagebox.showwarning('Nothing selected', 'Check at least one clip.')
             return
+        if not self._resolve_export_video() or not self.v_outdir.get().strip():
+            messagebox.showwarning('Missing', 'Set a valid video file and output folder first.')
+            return
+        self._export_running = True
         self.set_busy(True)
         threading.Thread(target=self._do_export, args=(sel,), daemon=True).start()
 
     def _autocut(self):
+        if getattr(self, '_export_running', False):
+            return
         if not self.clips:
             messagebox.showwarning('No clips', 'Run FIND CLIPS first.')
             return
@@ -10223,19 +10255,28 @@ Return ONLY the JSON array, no other text."""
             try: return -int(c.get('score', 5))
             except: return -5
         best3 = sorted(self.clips, key=_score)[:3]
+        if not self._resolve_export_video() or not self.v_outdir.get().strip():
+            messagebox.showwarning('Missing', 'Set a valid video file and output folder first.')
+            return
+        self._export_running = True
         self.set_busy(True)
         threading.Thread(target=self._do_export, args=(best3,), daemon=True).start()
 
 
 
     def _run_export_queue(self):
+        if getattr(self, '_export_running', False):
+            return
         if not hasattr(self, '_export_queue') or not self._export_queue:
             messagebox.showwarning('Empty Queue', 'Add clips to queue first.')
             return
+        self._export_running = True
         self.set_busy(True)
         jobs = list(self._export_queue)
         self._export_queue.clear()
-        try: self.queue_lb.delete(0, 'end')
+        try:
+            self.queue_lb.delete(0, 'end')
+            self._queue_strip.pack_forget()
         except: pass
         threading.Thread(target=self._process_queue, args=(jobs,), daemon=True).start()
 
@@ -10245,7 +10286,7 @@ Return ONLY the JSON array, no other text."""
         if not sel:
             messagebox.showwarning('Nothing selected', 'Select clips first.')
             return
-        vid = self.v_video.get()
+        vid = self._resolve_export_video()
         out = self.v_outdir.get()
         if not vid or not out:
             messagebox.showwarning('Missing', 'Set video file and output folder first.')
@@ -10261,14 +10302,18 @@ Return ONLY the JSON array, no other text."""
             clips_copy.append(c)
         self._export_queue.append((vid, out, clips_copy))
         label = f'{Path(vid).name}  ({len(clips_copy)} clip{"s" if len(clips_copy)!=1 else ""})'
-        if hasattr(self,'queue_listbox'): self.queue_listbox.insert('end', label)
-        if hasattr(self,'queue_count_lbl'): self.queue_count_lbl.config(text=f'{len(self._export_queue)} video(s) queued')
+        try:
+            self.queue_lb.insert('end', label)
+            self._queue_strip.pack(fill='x', padx=8, pady=(0,2), before=self.clip_canvas.master)
+        except Exception: pass
         self.log(f'Added to queue: {label}', GREEN)
 
     def _clear_queue(self):
         self._export_queue.clear()
-        if hasattr(self,'queue_listbox'): self.queue_listbox.delete(0, 'end')
-        if hasattr(self,'queue_count_lbl'): self.queue_count_lbl.config(text='')
+        try:
+            self.queue_lb.delete(0, 'end')
+            self._queue_strip.pack_forget()
+        except Exception: pass
         self.log('Queue cleared.')
 
     def _run_queue(self):
@@ -10279,10 +10324,21 @@ Return ONLY the JSON array, no other text."""
         threading.Thread(target=self._process_queue, daemon=True).start()
 
     def _process_queue(self, jobs=None):
+        try:
+            self._process_queue_inner(jobs)
+        except Exception:
+            _qe = traceback.format_exc()
+            self.log(f'Queue error:\n{_qe}', RED)
+            self.after(0, lambda: self.set_busy(False))
+        finally:
+            self._export_running = False
+
+    def _process_queue_inner(self, jobs=None):
+        import shutil as _shq
         queue = jobs or self._export_queue or []
         total_ok = 0; total_clips = 0
         ff = find_ffmpeg()
-        if not ff:
+        if not ff or (not _shq.which(ff) and not Path(ff).exists()):
             self.log('Queue error: ffmpeg not found', RED)
             self.after(0, lambda: self.set_busy(False))
             return
@@ -10315,9 +10371,13 @@ Return ONLY the JSON array, no other text."""
                 if getattr(self, '_cancel_requested', False): return
                 self.set_progress(f'Queue: cutting {fname[:40]}...', pct=int((qi*len(clips)+i+1)/(len(queue)*len(clips))*100))
                 _vcodec, _acodec, _extra = get_encoder(ff)
-                r = subprocess.run([ff,'-y','-ss',start,'-to',end,'-i',vid,
-                                   '-c:v',_vcodec,'-c:a',_acodec]+_extra+[dest],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                r = self._run_ff([ff,'-y','-ss',start,'-to',end,'-i',vid,
+                                  '-c:v',_vcodec,'-c:a',_acodec]+_extra+[dest],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if r.returncode != 0 and getattr(self, '_cancel_requested', False):
+                    try: Path(dest).unlink()
+                    except OSError: pass
+                    return
                 if r.returncode == 0:
                     total_ok += 1
                     self.log(f'  ✅ {fname}', GREEN)
@@ -10327,7 +10387,8 @@ Return ONLY the JSON array, no other text."""
         self.log(f'Queue done: {total_ok}/{total_clips} clips exported.', GREEN)
         self.set_progress(f'✅ Queue done: {total_ok}/{total_clips} clips exported', pct=100)
         self.after(0, lambda: self.set_busy(False))
-        self.after(0, self._clear_queue)
+        if jobs is None:
+            self.after(0, self._clear_queue)
         self.after(0, lambda: messagebox.showinfo('Queue Done',
             f'Exported {total_ok}/{total_clips} clips from {len(queue)} video(s).'))
 
@@ -10341,7 +10402,13 @@ Return ONLY the JSON array, no other text."""
         title = re.sub(r'[\\/:*?"<>|]', '', clip.get('title', 'preview'))[:40]
 
         # Cut the clip to a temp file and open with system player
-        tmp = Path(_tmp_prev.gettempdir()) / f'cf_preview_{title[:20]}.mp4'
+        import time as _t
+        _tdir = Path(_tmp_prev.gettempdir())
+        for _old in _tdir.glob('cf_preview_*.mp4'):
+            try:
+                if _t.time() - _old.stat().st_mtime > 3600: _old.unlink()
+            except OSError: pass          # locked by an open player - skip
+        tmp = _tdir / f'cf_preview_{int(_t.time()*1000)}.mp4'
         self.log(f'Cutting preview: {start} → {end}', FG2)
         self.set_progress('Cutting preview...', pct=50)
 
@@ -10393,6 +10460,7 @@ Return ONLY the JSON array, no other text."""
             return timestamp_str
 
         import re as _snap_re
+        import math as _snap_math
 
         def _sentence_score(txt):
             """Score 0-3: how likely this segment text ends a complete thought."""
@@ -10420,7 +10488,7 @@ Return ONLY the JSON array, no other text."""
             # Score current segment
             cur_score = _sentence_score(segs[target_idx]['text'])
             if cur_score >= 3:
-                return ts(min(segs[target_idx]['end'] + 0.3, segs[-1]['end']))
+                return ts(_snap_math.ceil(min(segs[target_idx]['end'] + 0.3, segs[-1]['end'])))
 
             # Look ahead up to 10s or 6 segments for cleaner end
             LENIENCY = 10.0
@@ -10443,7 +10511,7 @@ Return ONLY the JSON array, no other text."""
                 if s >= 3:
                     break
 
-            return ts(min(best_end + 0.3, segs[-1]['end']))
+            return ts(_snap_math.ceil(min(best_end + 0.3, segs[-1]['end'])))
 
         else:  # snap == 'start'
             # Find closest segment start to target
@@ -10517,16 +10585,20 @@ Return ONLY the JSON array, no other text."""
             _mb.showinfo('Empty session', 'Session file has no clips.')
             return
         # Warn if video path changed
-        current_vid = self.v_video.get()
-        if saved_vid and saved_vid != current_vid:
+        current_vid = self.v_video.get().strip()
+        if current_vid == getattr(self, '_video_placeholder', ''):
+            current_vid = ''
+        if saved_vid and current_vid and saved_vid != current_vid:
             if not _mb.askyesno('Different video',
                 f'Session was saved for:\n{Path(saved_vid).name}\n\n'
-                f'Currently loaded:\n{Path(current_vid).name if current_vid else "(none)"}\n\n'
+                f'Currently loaded:\n{Path(current_vid).name}\n\n'
                 'Load anyway?'):
                 return
-            # Restore the video path if current is empty
-            if not current_vid and saved_vid and Path(saved_vid).exists():
-                self.v_video.set(saved_vid)
+        # Restore the video path if current is empty
+        if not current_vid and saved_vid and Path(saved_vid).exists():
+            self.v_video.set(saved_vid)
+            try: self._video_entry.config(fg=FG)
+            except Exception: pass
         if session.get('outdir'):
             self.v_outdir.set(session['outdir'])
         self.clips = clips_raw
@@ -10535,16 +10607,28 @@ Return ONLY the JSON array, no other text."""
         self.log(f'Session loaded — {len(clips_raw)} clips restored', GREEN)
 
     def _do_export(self, clips):
-        vid = self.v_video.get()
+        try:
+            self._do_export_inner(clips)
+        except Exception:
+            _xe = traceback.format_exc()
+            self.log(f'Export error:\n{_xe}', RED)
+            self.after(0, lambda: (self.set_busy(False),
+                                   messagebox.showerror('Export failed', 'See the log for details.')))
+        finally:
+            self._export_running = False
+
+    def _do_export_inner(self, clips):
+        vid = self._resolve_export_video()
         out = self.v_outdir.get()
         base = Path(vid).stem
         ff = find_ffmpeg()
         ok = 0
         Path(out).mkdir(parents=True, exist_ok=True)
+        _vf_cache = {}
         def _to_sec(t):
             try:
-                p = t.split(':')
-                return int(p[0])*3600 + int(p[1])*60 + float(p[2])
+                p = [float(x) for x in str(t).strip().split(':')]
+                return sum(v*60**k for k, v in enumerate(reversed(p)))
             except Exception: return 0
 
         for i, clip in enumerate(clips):
@@ -10590,16 +10674,23 @@ Return ONLY the JSON array, no other text."""
 
             def _run_fmt(out_path, vertical=False, _st=start, _en=end):
                 # Build fresh command — always use _st/_en params, never outer closure vars
+                if getattr(self, '_cancel_requested', False): return False
                 if vertical:
                     _cmd_base = [ff, '-y', '-ss', _st, '-to', _en, '-i', vid]
-                    _vff = self._get_vertical_vf(vid)
+                    if vid not in _vf_cache:
+                        _vf_cache[vid] = self._get_vertical_vf(vid)
+                    _vff = _vf_cache[vid]
                     if not _vff:
                         _vff = ['-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920']
                     _cmd = _cmd_base + ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18'] + _vff + ['-c:a', 'aac', '-b:a', '192k', out_path]
                 else:
                     _cmd_base_local = [ff, '-y'] + _hw_args + ['-ss', _st, '-to', _en, '-i', vid]
                     _cmd = _cmd_base_local + ['-c:v', _vcodec] + ['-c:a', _acodec] + _extra + [out_path]
-                _r = subprocess.run(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                _r = self._run_ff(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                if _r.returncode != 0 and getattr(self, '_cancel_requested', False):
+                    try: Path(out_path).unlink()
+                    except OSError: pass
+                    return False
                 _err = _r.stderr.decode(errors='replace') if _r.stderr else ''
                 # Guard: returncode==0 but 0-frame encode writes only a header (~1KB)
                 _out_size = Path(out_path).stat().st_size if Path(out_path).exists() else 0
@@ -10614,7 +10705,7 @@ Return ONLY the JSON array, no other text."""
                                      '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
                                      '-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920',
                                      '-c:a', 'aac', '-b:a', '192k', out_path]
-                        _r2 = subprocess.run(_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        _r2 = self._run_ff(_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         return _r2.returncode == 0
                     else:
                         self.log(f'[Export] Falling back to libx264 CPU encoder', YELLOW)
@@ -10622,7 +10713,7 @@ Return ONLY the JSON array, no other text."""
                                     '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
                                     '-movflags', '+faststart',
                                     '-c:a', 'aac', '-b:a', '192k', out_path]
-                        _r2 = subprocess.run(_cmd_cpu, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        _r2 = self._run_ff(_cmd_cpu, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                         _out_size2 = Path(out_path).stat().st_size if Path(out_path).exists() else 0
                         if _r2.returncode != 0 or _out_size2 <= 10240:
                             _err2 = _r2.stderr.decode(errors='replace')[-200:] if _r2.stderr else ''
@@ -10909,14 +11000,22 @@ Return ONLY the JSON array, no other text."""
         r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
         return f'&H{alpha:02X}{b:02X}{g:02X}{r:02X}'
 
-    def _transcript_to_ass(self, s):
+    def _sub_segments_for(self, inp):
+        """Whisper segments that belong to video `inp` (subtitle-tab transcript, else main-tab one), or []."""
+        try:
+            _n = os.path.normcase(os.path.abspath(str(inp)))
+        except Exception:
+            return []
+        if getattr(self, '_sub_segments', None) and getattr(self, '_sub_vid', '') == _n:
+            return self._sub_segments
+        if getattr(self, '_whisper_segments', None) and getattr(self, '_whisper_vid', '') == _n:
+            return self._whisper_segments
+        return []
+
+    def _transcript_to_ass(self, s, segs):
         """Convert whisper segments to ASS with pause detection and karaoke word highlight."""
         import re as _re
 
-        segs = getattr(self, '_whisper_segments', [])
-        if not segs:
-            srt = getattr(self, 'srt_result', {})
-            segs = srt.get('segments', []) if srt else []
         if not segs:
             _ts_re = _re.compile(r'^\[(\d+[\d:.]+)\]\s*(.*)')
             parsed = []
@@ -10948,6 +11047,11 @@ Return ONLY the JSON array, no other text."""
         oc = self._hex_to_ass_color(s['outline'])
         bg_alpha = max(0, 255 - int(s['bg_opacity'] / 100 * 255)) if s['bg_on'] else 255
         bc = self._hex_to_ass_color(s['bg_color'], alpha=bg_alpha)
+        # BG Box: BorderStyle 3 draws an opaque box in OutlineColour, Outline acts as box padding
+        _box = bool(s['bg_on']) and s['bg_opacity'] > 0
+        oc_style = bc if _box else oc
+        _bstyle  = 3 if _box else 1
+        _outline = max(s['stroke'], 4) if _box else s['stroke']
 
         def _ts(t):
             h=int(t//3600); m=int((t%3600)//60); sc=t%60
@@ -10959,9 +11063,9 @@ Return ONLY the JSON array, no other text."""
             'OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, '
             'Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n'
             # \kf sweeps Secondary -> Primary, so for karaoke the highlight must be the Primary colour
-            f'Style: Default,{s["font"]},{s["size"]},{hc if karaoke else tc},{tc if karaoke else hc},{oc},{bc},'
-            f'{"1" if s["bold"] else "0"},{"1" if s["italic"] else "0"},0,0,100,100,0,0,1,'
-            f'{s["stroke"]},0,2,60,60,80,1\n\n'
+            f'Style: Default,{s["font"]},{s["size"]},{hc if karaoke else tc},{tc if karaoke else hc},{oc_style},{bc},'
+            f'{"1" if s["bold"] else "0"},{"1" if s["italic"] else "0"},0,0,100,100,0,0,{_bstyle},'
+            f'{_outline},0,2,60,60,80,1\n\n'
             '[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
         )
 
@@ -11012,9 +11116,13 @@ Return ONLY the JSON array, no other text."""
             if ce <= cs: ce = cs + 0.3
             if karaoke:
                 line = f'{{{an_tag}}}'
+                prev_end = grp[0]['start']
                 for w in grp:
+                    gap_cs = int((w['start'] - prev_end) * 100)
+                    if gap_cs > 0: line += f'{{\\k{gap_cs}}}'
                     dur_cs = max(1, int((w['end'] - w['start']) * 100))
                     line += f'{{\\kf{dur_cs}}}{w["word"]} '
+                    prev_end = w['end']
                 ass += f'Dialogue: 0,{_ts(cs)},{_ts(ce)},Default,,0,0,0,,{line.rstrip()}\n'
             else:
                 line = ' '.join(w['word'] for w in grp)
@@ -11038,10 +11146,9 @@ Return ONLY the JSON array, no other text."""
                     _wm = 'base'
                 result = _do_transcribe(inp, _wm, ffmpeg_path=ff, use_word_timestamps=True)
                 segs_raw = result.get('segments', [])
-                self._whisper_segments = segs_raw
-                self.srt_result = result
-                self.transcript = '\n'.join(
-                    f'[{s["start"]:.2f}] {s["text"].strip()}' for s in segs_raw)
+                self._sub_segments = segs_raw
+                self._sub_result = result
+                self._sub_vid = os.path.normcase(os.path.abspath(inp))
                 n = len(segs_raw)
                 def _done():
                     self.sub_trans_btn.config(state='normal', text='📝 Transcribe')
@@ -11050,9 +11157,10 @@ Return ONLY the JSON array, no other text."""
             except Exception as _ex:
                 import traceback as _tb
                 _e = _tb.format_exc()
+                _msg = str(_ex)
                 def _err():
                     self.sub_trans_btn.config(state='normal', text='📝 Transcribe')
-                    self.sub_trans_lbl.config(text=f'❌ {_ex}', fg=RED)
+                    self.sub_trans_lbl.config(text=f'❌ {_msg}', fg=RED)
                     self.log(f'Subtitle transcription error:\n{_e}', RED)
                 self.after(0, _err)
         import threading; threading.Thread(target=_run, daemon=True).start()
@@ -11066,6 +11174,7 @@ Return ONLY the JSON array, no other text."""
         s = self._get_sub_settings()
         self.sub_status_lbl.config(text='Grabbing preview...', fg=FG2)
         def _run():
+            tf_png = None
             try:
                 import subprocess as _sp, tempfile as _tf, os as _os, base64 as _b64
                 from PIL import Image, ImageDraw, ImageFont
@@ -11086,12 +11195,12 @@ Return ONLY the JSON array, no other text."""
                 except:
                     mid = 5.0
 
-                tf_png = _tf.mktemp(suffix='.png')
+                _fd, tf_png = _tf.mkstemp(suffix='.png'); _os.close(_fd)
                 _sp.run([_ff, '-ss', str(mid), '-i', inp,
                          '-vframes', '1', '-q:v', '2', '-vf', 'scale=640:360',
                          tf_png, '-y'], capture_output=True)
 
-                if not Path(tf_png).exists():
+                if not Path(tf_png).exists() or Path(tf_png).stat().st_size == 0:
                     self.after(0, lambda: self.sub_status_lbl.config(
                         text='Could not extract frame from video', fg=RED))
                     return
@@ -11157,7 +11266,6 @@ Return ONLY the JSON array, no other text."""
                 buf = _io.BytesIO()
                 img.save(buf, format='PNG')
                 img_b64 = _b64.b64encode(buf.getvalue()).decode('ascii')
-                _os.unlink(tf_png)
 
                 def _show():
                     import tkinter as _tk3
@@ -11174,6 +11282,10 @@ Return ONLY the JSON array, no other text."""
                 self.after(0, lambda e=str(_ex), tb=_err2: (
                     self.sub_status_lbl.config(text=f'Preview error: {e}', fg=RED),
                     self.log(f'Preview error:\n{tb}', RED)))
+            finally:
+                if tf_png:
+                    try: os.unlink(tf_png)
+                    except OSError: pass
         import threading; threading.Thread(target=_run, daemon=True).start()
 
     def _render_sub_preview(self):
@@ -11187,12 +11299,13 @@ Return ONLY the JSON array, no other text."""
         if not inp or not Path(inp).exists():
             messagebox.showwarning('No input', 'Select a video file first.')
             return
-        # Auto-transcribe if no segments yet
-        if not getattr(self, '_whisper_segments', []):
+        # Auto-transcribe if no segments for THIS video yet
+        segs = self._sub_segments_for(inp)
+        if not segs:
             self.sub_status_lbl.config(text='No transcript — transcribing first...', fg=YELLOW)
             self.sub_burn_btn.config(state='disabled', text='⏳ Transcribing...')
             def _then_burn():
-                if getattr(self, '_whisper_segments', []):
+                if self._sub_segments_for(inp):
                     self._burn_subtitles()
                 else:
                     self.sub_burn_btn.config(state='normal', text='🔤  BURN SUBTITLES')
@@ -11205,10 +11318,9 @@ Return ONLY the JSON array, no other text."""
                     if not _wm or _wm == 'auto': _wm = 'base'
                     result = _do_transcribe(inp, _wm, ffmpeg_path=ff, use_word_timestamps=True)
                     segs_raw = result.get('segments', [])
-                    self._whisper_segments = segs_raw
-                    self.srt_result = result
-                    self.transcript = '\n'.join(
-                        f'[{s["start"]:.2f}] {s["text"].strip()}' for s in segs_raw)
+                    self._sub_segments = segs_raw
+                    self._sub_result = result
+                    self._sub_vid = os.path.normcase(os.path.abspath(inp))
                     self.after(0, lambda: (
                         self.sub_trans_lbl.config(text=f'✅ {len(segs_raw)} segments', fg=GREEN),
                         _then_burn()
@@ -11220,17 +11332,22 @@ Return ONLY the JSON array, no other text."""
                     ))
             import threading; threading.Thread(target=_run_trans, daemon=True).start()
             return
-        outdir = self.v_sub_outdir.get().strip()
-        Path(outdir).mkdir(parents=True, exist_ok=True)
-        stem = Path(inp).stem
-        outfile = str(Path(outdir) / f'{stem} - Subtitled - ClipFinder.mp4')
-        s = self._get_sub_settings()
+        try:
+            outdir = self.v_sub_outdir.get().strip() or str(Path.home() / 'Downloads')
+            Path(outdir).mkdir(parents=True, exist_ok=True)
+            stem = Path(inp).stem
+            outfile = str(Path(outdir) / f'{stem} - Subtitled - ClipFinder.mp4')
+            s = self._get_sub_settings()
+            self.cfg['sub_outdir'] = outdir
+            save_cfg(self.cfg)
+        except Exception as _be:
+            self.sub_status_lbl.config(text=f'❌ {_be}', fg=RED)
+            return
         self.sub_burn_btn.config(state='disabled', text='⏳ Burning...')
         self.sub_status_lbl.config(text='Starting...', fg=FG2)
-        self.cfg['sub_outdir'] = outdir
-        save_cfg(self.cfg)
 
         def _run():
+            tf_ass = None
             try:
                 import subprocess as _sp, tempfile as _tf, os as _os, re as _re_sub
                 _ff = ensure_ffmpeg()
@@ -11241,13 +11358,14 @@ Return ONLY the JSON array, no other text."""
                     return
 
                 # Write ASS file
-                ass_content = self._transcript_to_ass(s)
-                tf_ass = _tf.mktemp(suffix='.ass')
+                ass_content = self._transcript_to_ass(s, segs)
+                _fd, tf_ass = _tf.mkstemp(suffix='.ass'); _os.close(_fd)
                 with open(tf_ass, 'w', encoding='utf-8') as _f:
                     _f.write(ass_content)
 
                 # Get video duration for progress %
-                _dur_r = _sp.run([_ff, '-i', inp], capture_output=True, text=True)
+                _dur_r = _sp.run([_ff, '-i', inp], capture_output=True, text=True,
+                                 encoding='utf-8', errors='replace')
                 _dm = _re_sub.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur_r.stderr)
                 _total_s = 1.0
                 if _dm:
@@ -11261,30 +11379,44 @@ Return ONLY the JSON array, no other text."""
                 elif 'qsv' in _enc: _vcodec = ['h264_qsv']
                 else: _vcodec = ['libx264', '-crf', '18', '-preset', 'fast']
 
-                ass_escaped = tf_ass.replace('\\', '/').replace(':', '\\:')
-                cmd = [_ff, '-i', inp,
-                       '-vf', f"ass='{ass_escaped}'",
-                       '-c:v'] + _vcodec + ['-c:a', 'copy', outfile, '-y']
+                # Reference the temp .ass by bare file name (cwd = its folder) so a TEMP path
+                # containing an apostrophe / drive colon can't break the filtergraph quoting.
+                _inp_abs = _os.path.abspath(inp)
+                _out_abs = _os.path.abspath(outfile)
+                if _os.path.dirname(_ff): _ff = _os.path.abspath(_ff)   # cwd changes below
+                _vf = f'ass={_os.path.basename(tf_ass)}'
 
                 self.after(0, lambda: self.set_progress('🔤 Burning subtitles...', pct=1))
-                proc = _sp.Popen(cmd, stderr=_sp.PIPE, text=True,
-                                 encoding='utf-8', errors='replace')
-                for line in proc.stderr:
-                    if 'time=' in line:
-                        try:
-                            _t = line.split('time=')[1].split()[0]
-                            _parts = _t.split(':')
-                            _cur = int(_parts[0])*3600 + int(_parts[1])*60 + float(_parts[2])
-                            _pct = min(99, int(_cur / _total_s * 100))
-                            self.after(0, lambda p=_pct, t=_t: (
-                                self.set_progress(f'🔤 Burning subtitles... {t}', pct=p),
-                                self.sub_status_lbl.config(text=f'Burning... {t}', fg=FG2)
-                            ))
-                        except: pass
-                proc.wait()
-                _os.unlink(tf_ass)
 
-                if proc.returncode == 0:
+                def _burn_once(_a_args):
+                    cmd = [_ff, '-i', _inp_abs, '-vf', _vf,
+                           '-c:v'] + _vcodec + _a_args + [_out_abs, '-y']
+                    proc = _sp.Popen(cmd, cwd=_os.path.dirname(tf_ass), stderr=_sp.PIPE, text=True,
+                                     encoding='utf-8', errors='replace')
+                    _tail = []
+                    for line in proc.stderr:
+                        _tail = (_tail + [line.rstrip()])[-15:]
+                        if 'time=' in line:
+                            try:
+                                _t = line.split('time=')[1].split()[0]
+                                _parts = _t.split(':')
+                                _cur = int(_parts[0])*3600 + int(_parts[1])*60 + float(_parts[2])
+                                _pct = min(99, int(_cur / _total_s * 100))
+                                self.after(0, lambda p=_pct, t=_t: (
+                                    self.set_progress(f'🔤 Burning subtitles... {t}', pct=p),
+                                    self.sub_status_lbl.config(text=f'Burning... {t}', fg=FG2)
+                                ))
+                            except: pass
+                    proc.wait()
+                    return proc.returncode, _tail
+
+                _rc, _tail = _burn_once(['-c:a', 'copy'])
+                if _rc != 0 and any(('audio' in _l.lower() or 'codec' in _l.lower()) for _l in _tail):
+                    # audio stream may not fit in MP4 (e.g. Vorbis) — retry once with AAC audio
+                    self.log('Subtitle burn: audio copy failed, retrying with AAC audio...', YELLOW)
+                    _rc, _tail = _burn_once(['-c:a', 'aac', '-b:a', '192k'])
+
+                if _rc == 0:
                     def _done():
                         self.sub_burn_btn.config(state='normal', text='🔤  BURN SUBTITLES')
                         self.sub_status_lbl.config(text=f'✅ Saved: {Path(outfile).name}', fg=GREEN)
@@ -11292,7 +11424,7 @@ Return ONLY the JSON array, no other text."""
                         self.log(f'✅ Subtitles burned: {outfile}', GREEN)
                     self.after(0, _done)
                 else:
-                    raise RuntimeError(f'ffmpeg returned code {proc.returncode}')
+                    raise RuntimeError(f'ffmpeg returned code {_rc}\n' + '\n'.join(_tail))
             except Exception as _ex:
                 import traceback as _tb
                 _err = _tb.format_exc()
@@ -11302,6 +11434,10 @@ Return ONLY the JSON array, no other text."""
                     self.set_progress('❌ Subtitle burn failed', pct=0)
                     self.log(f'Subtitle burn error:\n{_err}', RED)
                 self.after(0, _err_ui)
+            finally:
+                if tf_ass:
+                    try: os.unlink(tf_ass)
+                    except OSError: pass
         import threading; threading.Thread(target=_run, daemon=True).start()
 
     def _copy_transcript(self):
@@ -11429,15 +11565,18 @@ Return ONLY the JSON array, no other text."""
             self._ps_status.config(text='🎬 Transcribing... this may take a few minutes', fg=FG2)
             self.set_progress('🎬 Post Studio — Transcribing...', pct=5)
             import threading as _vt
+            model_size = self.v_whisper.get()
+            if not model_size or model_size == 'auto':
+                model_size = 'base'
+            _use_gpu = self.v_use_gpu_whisper.get() if hasattr(self, 'v_use_gpu_whisper') else True
             def _run():
                 try:
                     ff = find_ffmpeg()
-                    model_size = self.v_whisper.get() or 'base'
                     self.after(0, lambda: self._ps_status.config(
                         text=f'🎬 Transcribing [{model_size}]...', fg=FG2))
                     result = _do_transcribe(
                         vid=_vp, model_size=model_size,
-                        use_gpu=self.v_gpu.get() if hasattr(self,'v_gpu') else True,
+                        use_gpu=_use_gpu,
                         ffmpeg_path=ff,
                         log_cb=lambda msg, col=FG2: self.after(0, lambda m=msg: self._ps_status.config(text=str(m)[:80], fg=FG2)))
                     if result and result.get('segments'):
@@ -11500,6 +11639,12 @@ Return ONLY the JSON array, no other text."""
                         self._ps_set_handle(_pk, _h[_pk])
                 self._ps_mem_lbl.config(text='💾 remembered', fg=GREEN)
             else:
+                # No memory for this name: undo earlier autofill so old handles don't leak onto a new person
+                for _pk, _af in list(getattr(self, '_ps_autofill', {}).items()):
+                    _e, _sv, _ph = self._ps_handle_entries[_pk]
+                    if _e.get().strip() == _af:
+                        _e.delete(0, 'end'); _e.insert(0, _ph); _e.config(fg=FG3); _sv.set('')
+                self._ps_autofill = {}
                 self._ps_mem_lbl.config(text='')
         self._ps_name.bind('<FocusIn>', _name_focus_in)
         self._ps_name.bind('<FocusOut>', _name_focus_out)
@@ -11601,7 +11746,7 @@ Return ONLY the JSON array, no other text."""
                                       relief='flat', bd=0, cursor='hand2', pady=10,
                                       activebackground=ACCENT2, command=self._ps_generate)
         self._ps_gen_btn.pack(fill='x', pady=(0,4))
-        self._ps_status = tk.Label(left, text='', font=('Segoe UI',1), fg=BG, bg=BG)  # hidden — kept for transcription callbacks
+        self._ps_status = tk.Label(left, text='', font=('Segoe UI',8), fg=FG2, bg=BG, wraplength=310, justify='left')  # transcription / warning feedback
         self._ps_status.pack(anchor='w')
 
         # ── RIGHT: output boxes per platform ─────────────────────────────────
@@ -11664,6 +11809,8 @@ Return ONLY the JSON array, no other text."""
                                     _sc, _rs = self._ps_score_post(pk, t, _gk, _mk)
                                     self._ps_update_score(pk, _sc, _rs)
                                 _rt.Thread(target=_do_score, daemon=True).start()
+                            else:
+                                self.log(f'[Post Studio] Regen produced no text for {k}', YELLOW)
                             self._ps_out[k]['regen'].config(state='normal', text='🔄 Regen')
                         self.after(0, _upd)
                     _rt.Thread(target=_run, daemon=True).start()
@@ -14962,6 +15109,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                                     progress_cb=_ae_progress_cb)
             self.ticker_on = False
             self._whisper_segments = result.get('segments', [])
+            self._whisper_vid = os.path.normcase(os.path.abspath(str(vid)))
             segs_raw = self._whisper_segments
             transcript_lines = [f'[{ts(seg["start"])}] {seg["text"].strip()}' for seg in segs_raw]
             self.transcript = '\n'.join(transcript_lines)
