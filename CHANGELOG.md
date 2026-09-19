@@ -18,7 +18,7 @@
 - **Channel browser** (Downloader → Browse channels): Kick VODs/Clips, Twitch VODs/Clips, YouTube Streams/Videos/Shorts with thumbnails; Kick tab removed from Clip Finder
 
 ### 🚀 Post Studio (rewritten)
-- Master caption prompt (TikTok / Instagram / YouTube Shorts / X), strict output contract + tolerant parser, hard-rule enforcement and rules-check panel, SeeEx mode, creator tag reminders, iteration buttons, version history, per-person handle memory; provider order Gemini → OpenRouter → Groq
+- Master caption prompt (TikTok / Instagram / YouTube Shorts / X), strict output contract + tolerant parser, hard-rule enforcement and rules-check panel, editable Event & creator rules block (SeeEx is the default content; clearing it retires the event everywhere) with event mode, creator tag reminders, iteration buttons, version history, per-person handle memory; provider order Gemini → OpenRouter → Groq
 - Removed the old 3-option tweet generator (orphaned code that raised NameError)
 
 ### 🤖 AI

@@ -31,7 +31,7 @@ Every entry has a thumbnail with a duration badge, views and date, plus **Load**
 Write TikTok, Instagram, YouTube Shorts and X posts from a transcript *or just a rough description*:
 - Follows the full master prompt: finds the one moment people stop scrolling for, on-screen hook + caption per platform, YouTube title with a hashtag, X with **no hashtags and no em dashes**, factual-accuracy wording, SeeEx rules, creator tag rules.
 - **Rules check** after every generation: auto-fixes what is mechanical (X hashtags/dashes, generic #viral/#fyp tags, SeeEx / Adrianah Lee / Rellik The Clown spelling, hashtag counts) and warns about the rest (criminal labels, "faked/lied", consent vs. assault, alleged claims stated as fact, missing SeeEx, Aishah Sofey tagging).
-- **SeeEx mode** (Auto / Always / Not SeeEx), people-in-this-clip, angle override, saved standing rules, per-person handle memory.
+- **Event & creator rules box** (saved, editable): the SeeEx rules, roster, name spellings and tag rules live here instead of being baked in. Event over? Clear the box and every trace of it leaves the prompt and the checks. **Event mode** (Auto / Always / Not this event), people-in-this-clip, angle override, saved standing rules, per-person handle memory.
 - **Try again · Funnier · Shorten · More viral · free-text correction**, per-card regenerate, version history, editable results with per-field copy. **New clip** wipes everything so clips never bleed into each other.
 - Pick a found clip straight from Clip Finder, or load a video and transcribe it.
 

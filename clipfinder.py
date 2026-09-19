@@ -4549,7 +4549,47 @@ Keep captions non-explicit unless the context genuinely requires more detail.
 If a person was involved in controversial comments about minors, do NOT call the person a "pedophile" as an established fact unless there is an authoritative factual basis. Instead use: "controversial comments about minors", "comments involving minors", "amid accusations involving comments about minors", "after a disturbing song involving children".
 Do not reproduce disturbing sexual lyrics involving minors. Focus on the event rather than repeating the content.
 
-16. IMPORTANT SEEEX RULE
+16-20, 27, 30. EVENT & CREATOR RULES
+Rules about specific events, people and creators (an event that must always be named, rosters, name spelling, tagging, past corrections) are kept by the user in a separate block called EVENT & CREATOR RULES, appended below when it is not empty. Follow that block exactly; the rule numbers 16-20, 27 and 30 refer to it. If it is absent, those numbers do not apply and no event or creator has to be named.
+
+21. IF I GIVE YOU A ROUGH DESCRIPTION
+Sometimes I won't provide a full transcript. I may say something like "Mizkif reacts to..." or "Ice gets chased by..." or "Dana talks about fake UFC rumors." Use the information I give you and create the captions. Do not ask unnecessary clarification questions if the basic story is clear.
+
+22. IF I ASK TO "TRY AGAIN"
+Do NOT simply change two words. Make the hook and framing genuinely different. For example: Version 1: "DANA WHITE SAYS 99.9% OF FIGHT NEWS IS BULLSHIT 😭" Version 2: "DANA WHITE IS DONE WITH UFC RUMOR PAGES 💀" Version 3: "DANA WHITE HAS ONE QUESTION FOR UFC RUMOR ACCOUNTS 😭" These are actually different angles.
+
+23. IF I SAY "MAKE IT FUNNIER"
+Keep the factual setup but add the joke/punchline. Usually the funniest line should come toward the end. Example: "Meanwhile the guy in the back is standing there like nothing is happening 😂" or "Bro really tried to get her eliminated and became the one getting chased 😭💀". Don't turn the entire caption into a joke if the actual event needs context.
+
+24. IF I SAY "SHORTEN IT"
+Actually shorten it. Remove unnecessary setup. Keep: 1. Who 2. What happened 3. The hook/punchline. Don't just remove one sentence.
+
+25. IF I SAY "MAKE IT MORE VIRAL"
+Increase curiosity and punchiness without inventing information. Use: stronger opening, more surprising framing, shorter sentences, better punchline, more direct wording, one strong emoji moment. Do not use fake claims simply to make it more viral.
+
+26. IF I GIVE YOU A QUOTE
+If there is a particularly strong quote, you can build the caption around it. Example: "If the UFC didn't announce it and Dana didn't announce it, why are you pulling this shit out of your ass?" That can be the centerpiece. But don't overquote the transcript. Use only the strongest part.
+
+28. DO NOT RANDOMLY ADD PEOPLE
+If the clip is about two people, don't add a third just because he shows up in other clips of the same event. If the clip is about Dana White and NinaDrama, don't mention people or events from unrelated clips. Only use people who belong in the specific clip.
+
+29. DO NOT MIX CLIPS
+I may send several clips in the same conversation. Treat each new clip as its own piece of content unless I explicitly say they are connected. Don't accidentally carry details from the previous clip into the next one.
+
+31. HASHTAG RULES
+TikTok / Instagram / YouTube: use only relevant hashtags, e.g. #IcePoseidon #NickLee or #DanaWhite #NinaDrama #UFC. X: NO HASHTAGS. EVER unless I specifically ask for them. Do not use random generic hashtags like #Viral #FYP #Trending unless I specifically ask for them.
+
+32. WRITING FORMAT
+For each platform, structure the response clearly. The actual finished platform copy should be clean and ready to paste.
+
+33. MOST IMPORTANT RULE
+When I give you a transcript, don't overthink it. Find the one moment people would stop scrolling for and build around it. The goal is not: "What happened in this conversation?" The goal is: "What part of this conversation would make someone stop scrolling and watch?" Then write the caption around that moment.
+If I give you a specific angle, that overrides your choice. If I correct something, the correction overrides everything previously written. If I say "make it different," actually rewrite it. If I say "make it funnier," add a real punchline. If I say "shorter," make it shorter. If I say the clip is not from the event in the EVENT & CREATOR RULES, drop the event. If I say to always mention the event, mention it naturally until I tell you otherwise.
+"""
+
+# Default content of the editable "Event & creator rules" box (Post Studio). The user keeps, edits or clears it;
+# when the event is over the whole block can simply be emptied.
+PS_DEFAULT_EVENT_RULES = """16. IMPORTANT SEEEX RULE
 Always mention SeeEx when the clip is from Nick Lee's SeeEx event until I explicitly tell you "You don't need to mention SeeEx anymore." This applies naturally to TikTok captions, Instagram captions, YouTube titles/descriptions, and X posts.
 Use SeeEx, not random variations like "See Ex." Use #SeeEx on TikTok/Instagram/YouTube when appropriate. DO NOT use #SeeEx on X because X captions should not have hashtags.
 If I explicitly say "This isn't SeeEx" then DO NOT mention SeeEx.
@@ -4575,47 +4615,13 @@ If I give you a transcript where Iduncle discusses whether Nick Lee and Ice Pose
 20. DANA WHITE / UFC EXAMPLE
 If I give you a clip of NinaDrama talking to Dana White about UFC rumors: A strong angle is Dana saying that 99.9% of fight information on social media is bullshit. The context: Elias reportedly said he wants to fight again; Elias and Justin were going back and forth; Dana hasn't seen some of the social-media posts; Dana says he stays away from fight-related social media because much of it is bullshit; NinaDrama points out that pages constantly post "this fight is happening"; Dana questions why people announce fights when the UFC/Dana haven't announced them. Strong hook: DANA WHITE SAYS 99.9% OF FIGHT NEWS IS BULLSHIT 😭 Do not make the clip about the unrelated tortilla conversation unless I specifically ask for that angle.
 
-21. IF I GIVE YOU A ROUGH DESCRIPTION
-Sometimes I won't provide a full transcript. I may say something like "Mizkif reacts to..." or "Ice gets chased by..." or "Dana talks about fake UFC rumors." Use the information I give you and create the captions. Do not ask unnecessary clarification questions if the basic story is clear.
-
-22. IF I ASK TO "TRY AGAIN"
-Do NOT simply change two words. Make the hook and framing genuinely different. For example: Version 1: "DANA WHITE SAYS 99.9% OF FIGHT NEWS IS BULLSHIT 😭" Version 2: "DANA WHITE IS DONE WITH UFC RUMOR PAGES 💀" Version 3: "DANA WHITE HAS ONE QUESTION FOR UFC RUMOR ACCOUNTS 😭" These are actually different angles.
-
-23. IF I SAY "MAKE IT FUNNIER"
-Keep the factual setup but add the joke/punchline. Usually the funniest line should come toward the end. Example: "Meanwhile Glink is standing there badly playing Pink Floyd like nothing is happening 😂" or "Bro really tried to eliminate her and became the one getting chased 😭💀". Don't turn the entire caption into a joke if the actual event needs context.
-
-24. IF I SAY "SHORTEN IT"
-Actually shorten it. Remove unnecessary setup. Keep: 1. Who 2. What happened 3. The hook/punchline. Don't just remove one sentence.
-
-25. IF I SAY "MAKE IT MORE VIRAL"
-Increase curiosity and punchiness without inventing information. Use: stronger opening, more surprising framing, shorter sentences, better punchline, more direct wording, one strong emoji moment. Do not use fake claims simply to make it more viral.
-
-26. IF I GIVE YOU A QUOTE
-If there is a particularly strong quote, you can build the caption around it. Example: "If the UFC didn't announce it and Dana didn't announce it, why are you pulling this shit out of your ass?" That can be the centerpiece. But don't overquote the transcript. Use only the strongest part.
-
 27. TAGGING / CREATOR-SPECIFIC RULES
 Aishah Sofey: X must include "Aishah Sofey" (do not rely only on the @handle). TikTok: tag @aishah and include #aishahsofey. Instagram: tag @aishahsofey in the caption and include #aishahsofey. YouTube Shorts: tag @hiaishahsofey.
 Adrianah Lee: correct spelling is "Adrianah Lee", NOT "Adriana Lee".
 Rellik: correct spelling is "Rellik The Clown". Do not change the spelling.
 
-28. DO NOT RANDOMLY ADD PEOPLE
-If the clip is about Chicken Andy and XenaTheWitch, don't add Darius because he's associated with other SeeEx clips. If the clip is about Dana White and NinaDrama, don't mention Nick Lee or SeeEx. Only use people who belong in the specific clip.
-
-29. DO NOT MIX CLIPS
-I may send several clips in the same conversation. Treat each new clip as its own piece of content unless I explicitly say they are connected. Don't accidentally carry details from the previous clip into the next one.
-
 30. WHEN I SAY "THIS ISN'T SEEEX"
 Immediately stop using SeeEx in that clip. Do not force SeeEx into captions just because previous clips were from SeeEx.
-
-31. HASHTAG RULES
-TikTok / Instagram / YouTube: use only relevant hashtags, e.g. #SeeEx #IcePoseidon #NickLee or #DanaWhite #NinaDrama #UFC. X: NO HASHTAGS. EVER unless I specifically ask for them. Do not use random generic hashtags like #Viral #FYP #Trending unless I specifically ask for them.
-
-32. WRITING FORMAT
-For each platform, structure the response clearly. The actual finished platform copy should be clean and ready to paste.
-
-33. MOST IMPORTANT RULE
-When I give you a transcript, don't overthink it. Find the one moment people would stop scrolling for and build around it. The goal is not: "What happened in this conversation?" The goal is: "What part of this conversation would make someone stop scrolling and watch?" Then write the caption around that moment.
-If I give you a specific angle, that overrides your choice. If I correct something, the correction overrides everything previously written. If I say "make it different," actually rewrite it. If I say "make it funnier," add a real punchline. If I say "shorter," make it shorter. If I say "this isn't SeeEx," remove SeeEx. If I say "always mention SeeEx," mention SeeEx naturally until I tell you otherwise.
 """
 
 PS_PLATFORMS = [   # key, label, colour, fields
@@ -4654,10 +4660,10 @@ DESCRIPTION: <text (may span several lines)>
 POST: <text, no hashtags, no em dash>
 Write ONLY the platform sections listed under PLATFORMS REQUESTED (always keep the ### ANGLE section). The captions are final, paste-ready copy."""
 
-_PS_SEEEX_MODES = {
-    'auto':   'SEEEX MODE: AUTO. Mention SeeEx (rule 16) ONLY if the transcript/description shows the clip is from Nick Lee\'s SeeEx event. If it is clearly not, do not mention it (rule 28/30).',
-    'always': 'SEEEX MODE: ALWAYS. The user says this clip is from Nick Lee\'s SeeEx event: mention SeeEx naturally in every platform (rule 16), and use #SeeEx on TikTok/Instagram/YouTube but never on X.',
-    'never':  'SEEEX MODE: NEVER. The user says "This isn\'t SeeEx": do NOT mention SeeEx anywhere (rule 30).',
+_PS_EVENT_MODES = {
+    'auto':   'EVENT MODE: AUTO. Apply the EVENT & CREATOR RULES (for example always naming the event, rule 16) ONLY if the transcript/description shows this clip belongs to that event. If it clearly does not, do not mention the event (rules 28/30).',
+    'always': 'EVENT MODE: ALWAYS. The user says this clip belongs to the event in EVENT & CREATOR RULES: name the event naturally in every platform (rule 16), with its hashtag on TikTok/Instagram/YouTube where the rules allow, never on X.',
+    'never':  'EVENT MODE: NEVER. The user says this clip is NOT from that event (rule 30): do NOT mention the event anywhere.',
 }
 
 _PS_TAG = r'(?<![\w&])#[A-Za-z_]\w*'      # a hashtag (not '#1' or an HTML entity)
@@ -4673,17 +4679,21 @@ def ps_clean_transcript(text, limit=12000):
 
 
 def ps_build_prompt(transcript, platforms, angle='', people='', handles=None, seex='auto', notes='',
-                    task='new', previous=None, correction='', transcript_limit=12000):
-    """-> (system_text, user_text). `previous` is the prior result dict of the SAME clip (for iterations)."""
+                    task='new', previous=None, correction='', transcript_limit=12000, event_rules=''):
+    """-> (system_text, user_text). `previous` is the prior result dict of the SAME clip (for iterations).
+    `event_rules` is the user's editable EVENT & CREATOR RULES block (may be empty)."""
     plat_names = [PS_SECTION_NAME[k] for k, *_ in PS_PLATFORMS if k in platforms]
-    sysm = PS_MASTER_PROMPT + '\n' + PS_OUTPUT_CONTRACT
+    er = (event_rules or '').strip()
+    sysm = PS_MASTER_PROMPT + ('\nEVENT & CREATOR RULES (from the user, follow exactly; these are rules 16-20, 27 and 30):\n' + er + '\n' if er else '') \
+        + '\n' + PS_OUTPUT_CONTRACT
     parts = ['CLIP TRANSCRIPT / DESCRIPTION (stay grounded in this, do not invent anything):',
              ps_clean_transcript(transcript, transcript_limit) or '(none - work only from the notes below)', '']
     if people.strip():
         parts.append(f'PEOPLE IN THIS CLIP: {people.strip()}   (only these belong in the captions)')
     if angle.strip():
         parts.append(f'ANGLE OVERRIDE (rule 2: follow this angle exactly): {angle.strip()}')
-    parts.append(_PS_SEEEX_MODES.get(seex, _PS_SEEEX_MODES['auto']))
+    if er:
+        parts.append(_PS_EVENT_MODES.get(seex, _PS_EVENT_MODES['auto']))
     hs = {k: v for k, v in (handles or {}).items() if v}
     if hs:
         parts.append('CREATOR HANDLES (use them per rule 27 where relevant): ' + '; '.join(f'{k}: {v}' for k, v in hs.items()))
@@ -4754,12 +4764,17 @@ def _ps_count_emoji(s):
     return len(re.findall('[\U0001F300-\U0001FAFF☀-➿\U0001F1E6-\U0001F1FF⭐⬆✅]', s or ''))
 
 
-def ps_enforce(res, platforms=None, seex='auto', people='', transcript=''):
+def ps_enforce(res, platforms=None, seex='auto', people='', transcript='', event_rules=''):
     """Apply the HARD rules automatically and collect notes.
     -> (fixed result dict, fixes [what was changed], warnings [things a human should look at])."""
     import copy
     r = copy.deepcopy(res)
     fixes, warns = [], []
+    er = event_rules or ''
+    has_event = bool(re.search(r'see\s?ex', er, flags=re.I))       # the SeeEx rules are present in the rules box
+    has_adr = 'adrianah' in er.lower()
+    has_rel = 'rellik' in er.lower()
+    has_aish = bool(re.search(r'aishah', er, flags=re.I))
 
     def fix(cond, msg):
         if cond:
@@ -4811,7 +4826,7 @@ def ps_enforce(res, platforms=None, seex='auto', people='', transcript=''):
             m = re.search(_PS_TAG, y.get('description', ''))
             if m:
                 tag = m.group(0)
-            elif seex == 'always':
+            elif seex == 'always' and has_event:
                 tag = '#SeeEx'
             if tag:
                 y['title'] = f'{title.rstrip()} {tag}'
@@ -4822,13 +4837,16 @@ def ps_enforce(res, platforms=None, seex='auto', people='', transcript=''):
             warns.append(f'YouTube title is {len(y["title"])} characters (limit 100)')
     # ---- spelling normalisation everywhere (SeeEx, Adrianah, Rellik)
     def norm(s, hook=False):
-        if hook:   # hooks are usually ALL CAPS: keep SEEEX in caps, only repair a split "SEE EX"
-            s = re.sub(r'\bSee[\s\-]Ex\b', lambda m: 'SEEEX' if m.group(0).isupper() else 'SeeEx', s, flags=re.I)
-        else:
-            s = re.sub(r'\bSee[\s\-]?Ex\b', 'SeeEx', s, flags=re.I)
-        s = re.sub(r'(?<![\w&])#see[\s\-_]?ex\b', '#SeeEx', s, flags=re.I)
-        s = re.sub(r'\bAdriana\s+Lee\b', 'Adrianah Lee', s)
-        s = re.sub(r'\bRel+[iy]c?k\s+the\s+clown\b', 'Rellik The Clown', s, flags=re.I)
+        if has_event:
+            if hook:   # hooks are usually ALL CAPS: keep SEEEX in caps, only repair a split "SEE EX"
+                s = re.sub(r'\bSee[\s\-]Ex\b', lambda m: 'SEEEX' if m.group(0).isupper() else 'SeeEx', s, flags=re.I)
+            else:
+                s = re.sub(r'\bSee[\s\-]?Ex\b', 'SeeEx', s, flags=re.I)
+            s = re.sub(r'(?<![\w&])#see[\s\-_]?ex\b', '#SeeEx', s, flags=re.I)
+        if has_adr:
+            s = re.sub(r'\bAdriana\s+Lee\b', 'Adrianah Lee', s)
+        if has_rel:
+            s = re.sub(r'\bRel+[iy]c?k\s+the\s+clown\b', 'Rellik The Clown', s, flags=re.I)
         return s
     changed = False
     for k in ('tiktok', 'instagram', 'youtube', 'x'):
@@ -4836,21 +4854,21 @@ def ps_enforce(res, platforms=None, seex='auto', people='', transcript=''):
             nv = norm(v, hook=(f == 'hook'))
             if nv != v:
                 r[k][f] = nv; changed = True
-    fix(changed, 'Normalised spelling (SeeEx / Adrianah Lee / Rellik The Clown)')
+    fix(changed, 'Normalised name spelling from your event & creator rules')
     # ---- SeeEx mode checks
     text_after = ' '.join(str(v) for k in ('tiktok', 'instagram', 'youtube', 'x') for v in (r.get(k) or {}).values())
     has_seex = bool(re.search(r'see\s?ex', text_after, flags=re.I))
-    if seex == 'never' and has_seex:
-        warns.append('SeeEx MODE is "Never" but the copy mentions SeeEx (rule 30)')
-    if seex == 'always':
+    if has_event and seex == 'never' and has_seex:
+        warns.append('Event mode is "Not this event" but the copy mentions SeeEx (rule 30)')
+    if has_event and seex == 'always':
         for k, name in (('tiktok', 'TikTok'), ('instagram', 'Instagram'), ('youtube', 'YouTube'), ('x', 'X')):
             if k in r and not re.search(r'see\s?ex', ' '.join(r[k].values()), flags=re.I):
                 warns.append(f'{name}: SeeEx is not mentioned (mode is "Always", rule 16)')
-    if 'x' in r and re.search(r'#see\s?ex', r['x'].get('post', ''), flags=re.I):
+    if has_event and 'x' in r and re.search(r'#see\s?ex', r['x'].get('post', ''), flags=re.I):
         warns.append('X mentions #SeeEx as a hashtag (never on X)')
     # ---- creator rules
     both = (people or '') + ' ' + (transcript or '') + ' ' + text_after
-    if re.search(r'aishah\s*sofey|aishahsofey', both, flags=re.I):
+    if has_aish and re.search(r'aishah\s*sofey|aishahsofey', both, flags=re.I):
         if 'x' in r and not re.search(r'Aishah Sofey', r['x'].get('post', '')):
             warns.append('Aishah Sofey: the X post must include her name "Aishah Sofey", not only the @handle (rule 27)')
     # ---- soft checks: emojis, all caps, risky claims
@@ -4874,11 +4892,11 @@ def ps_enforce(res, platforms=None, seex='auto', people='', transcript=''):
     return r, fixes, warns
 
 
-def ps_creator_reminders(people='', transcript='', handles=None):
+def ps_creator_reminders(people='', transcript='', handles=None, event_rules=''):
     """Manual to-dos from the creator-specific rules (things the copy itself cannot do)."""
     both = (people or '') + ' ' + (transcript or '')
     out = []
-    if re.search(r'aishah\s*sofey|aishahsofey', both, flags=re.I):
+    if re.search(r'aishah', event_rules or '', flags=re.I) and re.search(r'aishah\s*sofey|aishahsofey', both, flags=re.I):
         out.append('Aishah Sofey: tag @aishahsofey in the X comments BEFORE the clip blows up. TikTok: tag @aishah + #aishahsofey. '
                    'Instagram: tag @aishahsofey in the video + caption + #aishahsofey. YouTube Shorts: tag @hiaishahsofey.')
     return out
@@ -12193,7 +12211,7 @@ Return ONLY the JSON array, no other text."""
 
     _PS_TRANS_PH = 'Paste the transcript, or just describe the clip ("Mizkif reacts to...")'
     _PS_ANGLE_PH = 'Optional. Force an angle, e.g. "make it about Dana calling the rumors bullshit"'
-    _PS_PEOPLE_PH = 'Who is in THIS clip, e.g. Nick Lee, Ice Poseidon'
+    _PS_PEOPLE_PH = 'Who is in THIS clip, e.g. Dana White, NinaDrama'
     _PS_RULES_PH = 'Standing rules for every clip, e.g. "Always mention SeeEx"'
     _PS_HANDLES = (('x', '𝕏', '@handle'), ('tiktok', '🎵', '@tiktok'),
                    ('instagram', '📸', '@instagram'), ('youtube', '▶', '@youtube'))
@@ -12330,9 +12348,9 @@ Return ONLY the JSON array, no other text."""
         self._ps_make_ph(self._ps_angle, self._PS_ANGLE_PH)
 
         # SeeEx mode + platforms
-        self._ps_lbl(left, 'SEEEX', 'Nick Lee\'s event. Auto = only when the clip is clearly from it.')
+        self._ps_lbl(left, 'EVENT MODE', 'Applies the event & creator rules below. Auto = only when the clip clearly belongs to the event.')
         _sx = tk.Frame(left, bg=BG); _sx.pack(fill='x')
-        for _v, _t in (('auto', 'Auto'), ('always', 'Always mention'), ('never', 'Not SeeEx')):
+        for _v, _t in (('auto', 'Auto'), ('always', 'Always mention'), ('never', 'Not this event')):
             tk.Radiobutton(_sx, text=_t, value=_v, variable=self._ps_seex, font=FONT_SMALL, bg=BG, fg=FG,
                            selectcolor=BG3, activebackground=BG, activeforeground=FG, relief='flat',
                            cursor='hand2').pack(side='left', padx=(0, 8))
@@ -12364,6 +12382,20 @@ Return ONLY the JSON array, no other text."""
         self._ps_rules.pack(fill='x', pady=(2, 0))
         self._ps_make_ph(self._ps_rules, self._PS_RULES_PH)
         self._ps_put(self._ps_rules, self.cfg.get('ps_rules', ''))
+
+        self._ps_lbl(left, 'EVENT & CREATOR RULES  (saved, editable)',
+                     'Current event (e.g. SeeEx), who is in it, name spellings, tag rules, past corrections. '
+                     'Event over? Clear this box and it is gone from the prompt.')
+        self._ps_events = tk.Text(left, height=7, font=FONT_SMALL, bg=BG3, fg=FG3, insertbackground=ACCENT,
+                                  relief='flat', bd=4, wrap='word')
+        self._ps_events.pack(fill='x', pady=(2, 0))
+        self._ps_make_ph(self._ps_events, 'Empty = no event rules. Use Default to load the SeeEx rules.')
+        self._ps_put(self._ps_events, self.cfg.get('ps_event_rules', PS_DEFAULT_EVENT_RULES))
+        _er = tk.Frame(left, bg=BG); _er.pack(fill='x', pady=(3, 0))
+        tk.Button(_er, text='↺ Default (SeeEx)', font=FONT_SMALL, bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2',
+                  padx=8, pady=3, command=lambda: self._ps_put(self._ps_events, PS_DEFAULT_EVENT_RULES)).pack(side='left', padx=(0, 4))
+        tk.Button(_er, text='✕ Clear (event over)', font=FONT_SMALL, bg=BG3, fg=FG2, relief='flat', bd=0, cursor='hand2',
+                  padx=8, pady=3, command=lambda: self._ps_put(self._ps_events, '')).pack(side='left')
 
         self._ps_gen_btn = tk.Button(left, text='⚡  WRITE THE POSTS', font=('Segoe UI', 10, 'bold'), bg=ACCENT,
                                      fg='#000', relief='flat', bd=0, cursor='hand2', pady=10,
@@ -12758,6 +12790,7 @@ Return ONLY the JSON array, no other text."""
             'platforms': [k for k, *_ in PS_PLATFORMS if self._ps_plats[k].get()],
             'handles': {k: self._ps_val(e) for k, e in self._ps_handle.items()},
             'rules': self._ps_val(self._ps_rules),
+            'event_rules': self._ps_val(self._ps_events),
             'correction': self._ps_val(self._ps_fix),
         }
 
@@ -12784,6 +12817,7 @@ Return ONLY the JSON array, no other text."""
         # remember the things that should survive between clips
         try:
             self.cfg['ps_seex'] = inp['seex']; self.cfg['ps_rules'] = inp['rules']; self.cfg['ps_plats'] = inp['platforms']
+            self.cfg['ps_event_rules'] = inp['event_rules']       # '' is a real value: the user retired the event
             save_cfg(self.cfg)
         except Exception:
             pass
@@ -12816,7 +12850,7 @@ Return ONLY the JSON array, no other text."""
                 # Groq's free plan allows ~8K tokens/minute in total: the master prompt alone is ~5K, so give it less
                 lim, mx = (2800, 1100) if lib == 'groq' else (12000, 1800)
                 sysm, user = ps_build_prompt(inp['transcript'], plats, inp['angle'], inp['people'], inp['handles'],
-                                             inp['seex'], inp['rules'], task, previous, correction, lim)
+                                             inp['seex'], inp['rules'], task, previous, correction, lim, inp['event_rules'])
                 self.after(0, lambda l=lib: self._ps_set_status(f'Writing with {l.title()}...'))
                 try:
                     txt = self._ps_call_ai(lib, key, sysm, user, mx)
@@ -12838,9 +12872,9 @@ Return ONLY the JSON array, no other text."""
                 if k == 'angle' or k in plats:
                     merged[k] = v
             all_plats = [k for k, *_ in PS_PLATFORMS if k in merged]
-            fixed, fixes, warns = ps_enforce(merged, all_plats, inp['seex'], inp['people'], inp['transcript'])
+            fixed, fixes, warns = ps_enforce(merged, all_plats, inp['seex'], inp['people'], inp['transcript'], inp['event_rules'])
             fixed['fixes'], fixed['warns'] = fixes, warns
-            fixed['reminders'] = ps_creator_reminders(inp['people'], inp['transcript'], inp['handles'])
+            fixed['reminders'] = ps_creator_reminders(inp['people'], inp['transcript'], inp['handles'], inp['event_rules'])
             fixed['provider'] = used
 
             def _done():
