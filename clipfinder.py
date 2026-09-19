@@ -2294,8 +2294,8 @@ class KickError(Exception):
     """A Kick URL could not be resolved. The message is written for the end user."""
 
 
-def _kick_get(url, token=None, timeout=20):
-    """GET a Kick URL -> (http_status, body_text).
+def _kick_get(url, token=None, timeout=20, binary=False):
+    """GET a Kick URL -> (http_status, body_text) - or body bytes when binary=True.
 
     Kick sits behind Cloudflare, so use curl_cffi with Chrome TLS impersonation when it
     is installed (newest target first, older ones for old curl_cffi builds); otherwise
@@ -2312,7 +2312,7 @@ def _kick_get(url, token=None, timeout=20):
         for target in ('chrome', 'chrome131', 'chrome124', 'chrome120'):
             try:
                 r = _cr.get(url, headers=hdrs, impersonate=target, timeout=timeout)
-                return r.status_code, r.text
+                return r.status_code, (r.content if binary else r.text)
             except Exception as e:
                 msg = str(e).lower()
                 if 'impersonat' in msg or 'not supported' in msg or 'unknown' in msg:
@@ -2320,7 +2320,7 @@ def _kick_get(url, token=None, timeout=20):
                 break             # network / TLS problem - try plain requests
     import requests as _rq
     r = _rq.get(url, headers={**hdrs, 'User-Agent': _KICK_UA}, timeout=timeout)
-    return r.status_code, r.text
+    return r.status_code, (r.content if binary else r.text)
 
 
 def _kick_json(url, token=None, timeout=20):
@@ -2355,6 +2355,68 @@ def _kick_secs(value, ms=False):
     except (TypeError, ValueError):
         return 0
     return int(v / 1000) if ms else int(v)
+
+
+def _kick_pick_thumb(thumb, min_width=380):
+    """Smallest thumbnail in a Kick {src, srcSet} dict that is still >= min_width px wide
+    (sharp on a scaled display, but ~30 KB instead of the 130 KB full-size image)."""
+    if not isinstance(thumb, dict):
+        return thumb or ''
+    sset = thumb.get('srcSet') or thumb.get('srcset') or ''
+    opts = sorted((int(w), u) for u, w in re.findall(r'(\S+)\s+(\d+)w', sset))
+    for w, u in opts:
+        if w >= min_width:
+            return u
+    return opts[-1][1] if opts else (thumb.get('src') or '')
+
+
+def kick_thumbnail(url, cache_dir=None, size=(192, 108)):
+    """Download a Kick VOD thumbnail (cached on disk) -> PIL RGB image cropped to `size`, or None."""
+    try:
+        import hashlib, io
+        from PIL import Image, ImageOps
+        data = None
+        cpath = None
+        if cache_dir is not None:
+            cpath = Path(cache_dir) / (hashlib.sha1(url.encode('utf-8')).hexdigest()[:24] + '.webp')
+            if cpath.exists() and cpath.stat().st_size > 500:
+                data = cpath.read_bytes()
+        if data is None:
+            st, data = _kick_get(url, timeout=15, binary=True)
+            if st != 200 or not data or len(data) < 500:
+                return None
+            if cpath is not None:
+                try:
+                    cpath.parent.mkdir(parents=True, exist_ok=True)
+                    cpath.write_bytes(data)
+                except Exception:
+                    pass
+        im = Image.open(io.BytesIO(data)).convert('RGB')
+        return ImageOps.fit(im, size, Image.LANCZOS)
+    except Exception:
+        return None
+
+
+def kick_thumb_badge(im, text, live=False):
+    """Draw a small duration (or red LIVE) badge in the bottom-right corner of a thumbnail."""
+    try:
+        from PIL import ImageDraw, ImageFont
+        im = im.copy()
+        d = ImageDraw.Draw(im, 'RGBA')
+        try:
+            font = ImageFont.truetype('segoeuib.ttf', 12)
+        except Exception:
+            font = ImageFont.load_default()
+        text = 'LIVE' if live else text
+        l, t, r, b = d.textbbox((0, 0), text, font=font)
+        w, h = r - l + 10, b - t + 8
+        x1, y1 = im.width - 6, im.height - 6
+        d.rounded_rectangle((x1 - w, y1 - h, x1, y1), radius=4,
+                            fill=(220, 38, 38, 235) if live else (0, 0, 0, 200))
+        d.text((x1 - w + 5 - l, y1 - h + 4 - t), text, font=font, fill=(255, 255, 255, 255))
+        return im
+    except Exception:
+        return im
 
 
 def _kick_expired(iso):
@@ -2507,8 +2569,7 @@ def kick_list_vods(slug, token=None):
         vid = v.get('id')
         if not vid:
             continue
-        thumb = v.get('thumbnail')
-        thumb = thumb.get('src', '') if isinstance(thumb, dict) else (thumb or '')
+        thumb = _kick_pick_thumb(v.get('thumbnail'))
         out.append({'id': vid, 'url': f'https://kick.com/{slug}/videos/{vid}',
                     'title': v.get('title') or 'Untitled VOD', 'duration': _kick_secs(v.get('duration')),
                     'created': (v.get('start_time') or '')[:10], 'views': int(v.get('viewer_count') or 0),
@@ -2519,8 +2580,7 @@ def kick_list_vods(slug, token=None):
             vid = (v.get('video') or {}).get('uuid')
             if not vid:
                 continue
-            thumb = v.get('thumbnail')
-            thumb = thumb.get('src', '') if isinstance(thumb, dict) else (thumb or '')
+            thumb = _kick_pick_thumb(v.get('thumbnail'))
             out.append({'id': vid, 'url': f'https://kick.com/{slug}/videos/{vid}',
                         'title': v.get('session_title') or 'Untitled VOD',
                         'duration': _kick_secs(v.get('duration'), ms=True),
@@ -4291,6 +4351,7 @@ class App(tk.Tk):
         slug = self._kick_slug_var.get().strip().lower()
         if not slug: return
         self._kick_browse_btn.config(state='disabled', text='⏳ Loading...')
+        self._kick_thumb_gen = getattr(self, '_kick_thumb_gen', 0) + 1     # cancel thumbnails still loading
         self._kick_bot_lbl.config(text=f'Fetching VODs for @{slug}...')
         for w in self._kick_list_frame.winfo_children(): w.destroy()
         tk.Label(self._kick_list_frame, text='⏳ Loading VODs...',
@@ -4349,8 +4410,9 @@ class App(tk.Tk):
 
         self._kick_bot_lbl.config(text=f'{len(vods)} VODs found for @{slug}')
 
+        thumb_jobs = []      # (label, thumbnail url, badge text, is_live) - filled in by background threads
         for vod in vods:
-            # Normalised by kick_list_vods(): id, url, title, duration (s), created, views, is_live
+            # Normalised by kick_list_vods(): id, url, title, duration (s), created, views, is_live, thumb
             title     = vod.get('title') or 'Untitled VOD'
             duration  = vod.get('duration', 0) or 0  # seconds
             created   = vod.get('created', '')
@@ -4367,10 +4429,17 @@ class App(tk.Tk):
             card = tk.Frame(self._kick_list_frame, bg=BG2, cursor='hand2')
             card.pack(fill='x', padx=8, pady=(4,0))
 
+            # Thumbnail (dark placeholder first, real image fills in from background threads)
+            thumb_lbl = tk.Label(card, image=self._kick_placeholder(), bg=BG2, bd=0, cursor='hand2')
+            thumb_lbl.pack(side='left', padx=(8, 0), pady=8)
+            thumb_jobs.append((thumb_lbl, vod.get('thumb', ''),
+                               f'{dur_h}h {dur_m}m' if dur_h else f'{dur_m}:{dur_s:02d}',
+                               bool(vod.get('is_live'))))
+
             # Left info
             info = tk.Frame(card, bg=BG2); info.pack(side='left', fill='both', expand=True, padx=10, pady=8)
             tk.Label(info, text=title, font=('Segoe UI', 9, 'bold'),
-                     fg=FG, bg=BG2, anchor='w', wraplength=500).pack(anchor='w')
+                     fg=FG, bg=BG2, anchor='w', wraplength=440, justify='left').pack(anchor='w')
             meta_txt = f'🕒 {dur_str}   📅 {created}   👁 {views:,} views' if views else f'🕒 {dur_str}   📅 {created}'
             tk.Label(info, text=meta_txt, font=('Segoe UI', 8),
                      fg=FG2, bg=BG2, anchor='w').pack(anchor='w', pady=(2,0))
@@ -4399,6 +4468,8 @@ class App(tk.Tk):
                 self._kick_direct_clip.set(True)
                 self.log(f'🎮 Direct clip mode: will stream zones from Kick CDN', ACCENT2)
 
+            thumb_lbl.bind('<Button-1>', lambda e, f=_load_vod: f())      # click the thumbnail = Load
+
             tk.Button(btn_col, text='▶ Load', font=FONT_SMALL,
                       bg=ACCENT, fg='#000', relief='flat', bd=0,
                       cursor='hand2', padx=10, pady=4,
@@ -4422,6 +4493,62 @@ class App(tk.Tk):
                 child.bind('<Leave>', _on_leave)
 
             tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=8)
+
+        self._kick_start_thumbs(thumb_jobs)
+
+    def _kick_placeholder(self):
+        """Dark 16:9 stand-in shown until a thumbnail has loaded (also the fallback if it never does)."""
+        if getattr(self, '_kick_ph_img', None) is None:
+            from PIL import Image, ImageTk
+            self._kick_ph_img = ImageTk.PhotoImage(Image.new('RGB', (192, 108), BG3))
+        return self._kick_ph_img
+
+    def _kick_start_thumbs(self, jobs):
+        """Load VOD thumbnails in a few background threads (disk-cached, so re-browsing is instant).
+        A generation counter drops results when the list was rebuilt for another channel meanwhile."""
+        import queue as _q, threading as _th, time as _tm
+        gen = self._kick_thumb_gen = getattr(self, '_kick_thumb_gen', 0) + 1
+        self._kick_thumb_refs = []          # PhotoImages must stay referenced or Tk shows blanks
+        self._kick_thumbs_loaded = 0
+        cache = USER_DIR / 'kick_thumbs'
+        try:                                # Kick deletes VODs after ~30 days - drop stale cache files
+            for f in cache.glob('*.webp'):
+                if _tm.time() - f.stat().st_mtime > 35 * 86400:
+                    f.unlink()
+        except Exception:
+            pass
+        todo = _q.Queue()
+        for j in jobs:
+            todo.put(j)
+
+        def _worker():
+            while gen == self._kick_thumb_gen:
+                try:
+                    lbl, url, badge, live = todo.get_nowait()
+                except _q.Empty:
+                    return
+                im = kick_thumbnail(url, cache) if url else None
+                if im is not None and gen == self._kick_thumb_gen:
+                    im = kick_thumb_badge(im, badge, live)
+                    self.after(0, lambda l=lbl, i=im, g=gen: self._kick_set_thumb(l, i, g))
+
+        for _ in range(min(4, max(1, len(jobs)))):
+            _th.Thread(target=_worker, daemon=True).start()
+
+    def _kick_set_thumb(self, label, im, gen):
+        """Main-thread half of thumbnail loading."""
+        if gen != getattr(self, '_kick_thumb_gen', -1):
+            return
+        try:
+            if not label.winfo_exists():
+                return
+            from PIL import ImageTk
+            ph = ImageTk.PhotoImage(im)
+            self._kick_thumb_refs.append(ph)
+            label.config(image=ph)
+            self._kick_thumbs_loaded += 1
+        except Exception:
+            pass
 
     def _build_auto_edit_sub(self, p):
         """Auto Edit sub-tab — removes silence from video using ffmpeg."""
