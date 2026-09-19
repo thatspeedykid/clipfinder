@@ -1102,6 +1102,9 @@ def attach_rightclick(widget, root):
         finally:
             menu.grab_release()
 
+    # Only text-entry widgets get this menu; don't replace other widgets' own <Button-3> bindings
+    if type(widget).__name__ not in ('Entry', 'Text', 'ScrolledText'):
+        return
     widget.bind('<Button-3>', show_menu)
 
 def apply_rightclick_to_all(widget, root):
@@ -3129,12 +3132,11 @@ class App(tk.Tk):
 
         # Set same icon
         try:
-            import base64 as _b64t, tempfile as _tft, os as _ost
-            _d = _b64t.b64decode(_ICON_B64)
-            _tmp = _tft.NamedTemporaryFile(suffix='.ico', delete=False)
-            _tmp.write(_d); _tmp.close()
-            ov.iconbitmap(_tmp.name)
-            _ost.unlink(_tmp.name)
+            for _ip in (_PathBase(__file__).parent / 'clipfinder.ico',
+                        _PathBase(sys.executable).parent / 'clipfinder.ico',
+                        USER_DIR.parent / 'clipfinder.ico'):
+                if _ip.exists():
+                    ov.iconbitmap(str(_ip)); break
         except Exception:
             pass
 
@@ -3151,7 +3153,7 @@ class App(tk.Tk):
                  fg=ACCENT, bg=BG).pack(side='left')
         tk.Label(logo_row, text='FINDER', font=('Segoe UI', 18, 'bold'),
                  fg=FG, bg=BG).pack(side='left')
-        tk.Label(logo_row, text='  v1.0 BETA', font=('Segoe UI', 9),
+        tk.Label(logo_row, text=f'  v{APP_VERSION}', font=('Segoe UI', 9),
                  fg=FG2, bg=BG).pack(side='left', padx=(4,0))
 
         tk.Label(inner, text='Welcome! Before you start, complete these 3 quick steps:',
@@ -3526,8 +3528,13 @@ class App(tk.Tk):
                                   command=lambda: (self.cfg.update({'smart_transcribe': self.v_smart_transcribe.get()}), save_cfg(self.cfg)))
         _st_chk.pack(side='left', padx=(0,4))
         # Tooltip
-        def _st_enter(e): self.set_progress('⚡ Smart Transcribe: skips transcribing sections you told it to ignore (e.g. "ignore last hour") — faster but permanent for this run')
-        def _st_leave(e): self.set_progress('Ready')
+        # (skipped while a job is running so it doesn't overwrite live progress)
+        def _st_enter(e):
+            if not (getattr(self, 'running', False) or getattr(self, '_ae_running', False)):
+                self.set_progress('⚡ Smart Transcribe: skips transcribing sections you told it to ignore (e.g. "ignore last hour") — faster but permanent for this run')
+        def _st_leave(e):
+            if not (getattr(self, 'running', False) or getattr(self, '_ae_running', False)):
+                self.set_progress('Ready')
         _st_chk.bind('<Enter>', _st_enter)
         _st_chk.bind('<Leave>', _st_leave)
 
@@ -3897,8 +3904,18 @@ class App(tk.Tk):
             _sb_state['hi'] = float(hi)
             _sb_draw()
 
+        def _sb_click(e):
+            h = max(_sb_cv.winfo_height(), 10)
+            frac = e.y / h
+            span = _sb_state['hi'] - _sb_state['lo']
+            self.clip_canvas.yview_moveto(max(0, min(1-span, frac - span/2)))
+
         def _sb_press(e):
             _sb_state['drag_y'] = e.y
+            h = max(_sb_cv.winfo_height(), 10)
+            # Click in the trough (outside the thumb) jumps there; click on the thumb starts a drag
+            if not (_sb_state['lo'] * h <= e.y <= _sb_state['hi'] * h):
+                _sb_click(e)
 
         def _sb_drag(e):
             h = max(_sb_cv.winfo_height(), 10)
@@ -3908,13 +3925,6 @@ class App(tk.Tk):
             new_lo = max(0.0, min(1.0 - span, _sb_state['lo'] + dy))
             self.clip_canvas.yview_moveto(new_lo)
 
-        def _sb_click(e):
-            h = max(_sb_cv.winfo_height(), 10)
-            frac = e.y / h
-            span = _sb_state['hi'] - _sb_state['lo']
-            self.clip_canvas.yview_moveto(max(0, min(1-span, frac - span/2)))
-
-        _sb_cv.bind('<Button-1>', _sb_click)
         _sb_cv.bind('<ButtonPress-1>', _sb_press)
         _sb_cv.bind('<B1-Motion>', _sb_drag)
         _sb_cv.bind('<Configure>', _sb_draw)
@@ -4224,6 +4234,11 @@ class App(tk.Tk):
 
             tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=8)
 
+    def _real_video(self):
+        """Clip Finder video path, or '' when the entry only shows the placeholder hint."""
+        v = self.v_video.get().strip()
+        return '' if v == getattr(self, '_video_placeholder', '') else v
+
     def _build_auto_edit_sub(self, p):
         """Auto Edit sub-tab — removes silence from video using ffmpeg."""
 
@@ -4252,7 +4267,7 @@ class App(tk.Tk):
                  ).pack(side='right')
         tk.Button(inner, text='Use Clip Finder video', font=FONT_SMALL,
                  bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8,
-                 command=lambda: self.v_ae_video.set(self.v_video.get())
+                 command=lambda: self.v_ae_video.set(self._real_video() or self.v_ae_video.get())
                  ).pack(side='left', padx=8)
 
         # ── Output ────────────────────────────────────────────────────────────
@@ -4311,10 +4326,8 @@ class App(tk.Tk):
             messagebox.showerror('No video', 'Select a video file first.'); return
         if not out:
             messagebox.showerror('No output', 'Select an output folder first.'); return
-
-        ff = ensure_ffmpeg()
-        if not ff:
-            messagebox.showerror('ffmpeg missing', 'Install ffmpeg in Settings → Core Dependencies.'); return
+        if getattr(self, '_ae_running', False):
+            messagebox.showinfo('Busy', 'Auto Edit is already running.'); return
 
         mode = self.v_ae_mode.get()
         db = {'light': '-45', 'balanced': '-35', 'aggressive': '-25'}.get(mode, '-35')
@@ -4324,18 +4337,58 @@ class App(tk.Tk):
         stem = Path(vid).stem
         out_path = str(Path(out) / f'{stem} - AutoEdit - ClipFinder.mp4')
 
+        self._ae_running = True
+        self._ae_procs = []
         self.set_busy(True)
         self.ae_status_lbl.config(text='⏳ Processing...', fg=ACCENT2)
         self.log(f'⚡ Auto Edit: {stem} [{mode}]', ACCENT2)
 
         def _run():
+            work = None
+            _out_started = False
             try:
                 import subprocess as _sp, re as _re2, tempfile as _tmp2
+                import shutil as _sh_ae, bisect as _bis
                 _ensure_pkgs_on_path()
+
+                def _ae_cancelled():
+                    if getattr(self, '_cancel_requested', False):
+                        self.after(0, lambda: self.ae_status_lbl.config(text='⛔ Cancelled', fg=YELLOW))
+                        return True
+                    return False
+
+                def _ae_run(cmd, timeout=None):
+                    """Run ffmpeg (killable via Cancel). Returns (returncode, stderr text)."""
+                    if getattr(self, '_cancel_requested', False):
+                        raise RuntimeError('Cancelled')
+                    _p = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE)
+                    self._ae_procs.append(_p)
+                    try:
+                        _o, _e = _p.communicate(timeout=timeout)
+                    except _sp.TimeoutExpired:
+                        _p.kill(); _p.communicate()
+                        raise
+                    finally:
+                        try: self._ae_procs.remove(_p)
+                        except ValueError: pass
+                    return _p.returncode, (_e or b'').decode('utf-8', 'replace')
+
+                def _ae_ff(cmd, timeout=None):
+                    rc, err = _ae_run(cmd, timeout)
+                    if rc != 0:
+                        if getattr(self, '_cancel_requested', False):
+                            raise RuntimeError('Cancelled')
+                        raise RuntimeError('ffmpeg failed: ' + err[-400:])
+                    return err
+
+                self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Checking ffmpeg...', fg=ACCENT2))
+                ff = ensure_ffmpeg()
+                if not (Path(ff).exists() or _sh_ae.which(ff)):
+                    raise RuntimeError('ffmpeg not found - install it in Settings → Core Dependencies')
 
                 # Step 1: Transcribe to get word timestamps
                 self.log('[Auto Edit] Transcribing for word-level cuts...', FG2)
-                if getattr(self, '_cancel_requested', False): return
+                if _ae_cancelled(): return
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Transcribing...', fg=ACCENT2))
                 self.set_progress('Auto Edit: transcribing...', pct=10)
                 _wm = self.v_whisper.get() if hasattr(self,'v_whisper') else 'base'
@@ -4352,33 +4405,51 @@ class App(tk.Tk):
                 except Exception as _te:
                     self.log(f'[Auto Edit] Transcription failed: {_te} — using silence detection only', YELLOW)
                     words = []
+                if _ae_cancelled(): return
 
                 # Step 2: Build keep segments from word timestamps + silence gaps
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Detecting silence...', fg=ACCENT2))
                 self.set_progress('Auto Edit: detecting silence...', pct=35)
-                _sil = _sp.run([ff,'-i',vid,'-af',f'silencedetect=noise={db}dB:d=0.3',
-                                '-f','null','-'], capture_output=True, text=True, timeout=300)
-                sil_starts = [float(m) for m in _re2.findall(r'silence_start: ([\d.]+)', _sil.stderr)]
-                sil_ends   = [float(m) for m in _re2.findall(r'silence_end: ([\d.]+)', _sil.stderr)]
-                self.log(f'[Auto Edit] Found {len(sil_starts)} silence gaps', FG2)
 
-                # Get total duration
-                _di = _sp.run([ff,'-i',vid], capture_output=True, text=True, timeout=30)
-                _dm = _re2.search(r'Duration: (\d+):(\d+):([\d.]+)', _di.stderr)
+                # Get total duration (ffmpeg exits non-zero here - only stderr matters)
+                _, _di_err = _ae_run([ff,'-hide_banner','-i',vid], timeout=60)
+                _dm = _re2.search(r'Duration: (\d+):(\d+):([\d.]+)', _di_err)
                 total = (int(_dm.group(1))*3600 + int(_dm.group(2))*60 + float(_dm.group(3))) if _dm else 0
 
+                # -vn: audio-only decode is far faster than decoding the video too
+                _sil_err = _ae_ff([ff,'-hide_banner','-vn','-i',vid,'-af',f'silencedetect=noise={db}dB:d=0.3',
+                                   '-f','null','-'], timeout=3600)
+                if not total:
+                    _tm = _re2.findall(r'time=(\d+):(\d+):([\d.]+)', _sil_err)
+                    if _tm:
+                        total = int(_tm[-1][0])*3600 + int(_tm[-1][1])*60 + float(_tm[-1][2])
+                # Pair start/end events in order (starts can be slightly negative)
+                sil_starts, sil_ends, _cur = [], [], None
+                for _k, _v in _re2.findall(r'silence_(start|end): (-?[\d.]+(?:e[-+]?\d+)?)', _sil_err):
+                    _v = max(0.0, float(_v))
+                    if _k == 'start':
+                        _cur = _v
+                    elif _cur is not None:
+                        sil_starts.append(_cur); sil_ends.append(_v); _cur = None
+                if _cur is not None:  # silence runs to end of file
+                    sil_starts.append(_cur); sil_ends.append(total if total else _cur)
+                if not total and sil_ends:
+                    total = max(sil_ends)
+                self.log(f'[Auto Edit] Found {len(sil_starts)} silence gaps', FG2)
+
                 # Build keep list — snap cuts to word boundaries if we have them
-                def _snap_to_word(t, wds, snap='end'):
+                _w_starts = sorted(ws for ws, _we in words)
+                _w_ends = sorted(we for _ws, we in words)
+                def _snap_to_word(t, snap='end'):
                     """Snap timestamp to nearest word start or end boundary."""
-                    if not wds:
+                    arr = _w_ends if snap == 'end' else _w_starts
+                    if not arr:
                         return t
+                    i = _bis.bisect_left(arr, t)
                     best, best_d = t, float('inf')
-                    for ws, we in wds:
-                        boundary = we if snap == 'end' else ws
-                        d = abs(boundary - t)
-                        if d < best_d:
-                            best_d = d
-                            best = boundary
+                    for k in (i-1, i):
+                        if 0 <= k < len(arr) and abs(arr[k]-t) < best_d:
+                            best, best_d = arr[k], abs(arr[k]-t)
                     # Only snap if within 0.5s — otherwise keep original
                     return best if best_d < 0.5 else t
 
@@ -4389,12 +4460,14 @@ class App(tk.Tk):
                         if ss > prev + 0.15:
                             # Snap cut-out point to nearest word end
                             # Snap cut-in point to nearest word start
-                            snap_ss = _snap_to_word(ss, words, snap='end')
-                            snap_se = _snap_to_word(se, words, snap='start')
-                            keeps.append((prev, snap_ss))
+                            # (clamped so a keep segment is never negative/overlapping)
+                            snap_ss = max(prev, _snap_to_word(ss, snap='end'))
+                            snap_se = max(snap_ss, _snap_to_word(se, snap='start'))
+                            if snap_ss - prev >= 0.05:
+                                keeps.append((prev, snap_ss))
                             prev = snap_se
                         else:
-                            prev = se
+                            prev = max(prev, se)
                     if total > prev + 0.15:
                         keeps.append((prev, total))
                 else:
@@ -4414,30 +4487,28 @@ class App(tk.Tk):
                 # Step 3: Extract and concat segments
                 self.after(0, lambda: self.ae_status_lbl.config(text=f'⏳ Cutting {len(keeps)} segments...', fg=ACCENT2))
                 self.set_progress(f'Auto Edit: cutting {len(keeps)} segments...', pct=60)
-                concat_f = str(Path(_tmp2.gettempdir()) / f'ae_concat_{Path(vid).stem}.txt')
-                segs_out = []
-                with open(concat_f, 'w') as cf:
+                work = _tmp2.mkdtemp(prefix='cf_ae_')   # private dir; removed in finally
+                concat_f = os.path.join(work, 'concat.txt')
+                with open(concat_f, 'w', encoding='utf-8') as cf:
                     for j, (ks, ke) in enumerate(keeps):
-                        seg_p = str(Path(_tmp2.gettempdir()) / f'ae_s_{j}.mp4')
-                        _sp.run([ff,'-y','-ss',str(ks),'-to',str(ke),'-i',vid,
-                                 '-c','copy',seg_p],
-                                stdout=_sp.PIPE, stderr=_sp.PIPE)
-                        cf.write(f"file '{seg_p}'\n")
-                        segs_out.append(seg_p)
+                        seg_p = os.path.join(work, f's_{j}.mp4')
+                        _ae_ff([ff,'-y','-ss',str(ks),'-to',str(ke),'-i',vid,
+                                '-c','copy',seg_p])
+                        _seg_q = seg_p.replace('\\', '/').replace("'", "'\\''")
+                        cf.write(f"file '{_seg_q}'\n")
 
                 # Step 4: Concat with CRF encode to fix size + AV sync
+                if _ae_cancelled(): return
                 self.after(0, lambda: self.ae_status_lbl.config(text='⏳ Encoding final video...', fg=ACCENT2))
                 self.set_progress('Auto Edit: encoding...', pct=80)
                 # Use GPU encoder for quality + speed, fallback to x264 CRF 18
                 _ae_vcodec, _ae_acodec, _ae_extra = get_encoder(ff)
-                _sp.run([ff,'-y','-f','concat','-safe','0','-i',concat_f,
-                         '-c:v',_ae_vcodec,'-c:a',_ae_acodec]+_ae_extra+[out_path],
-                        stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=3600)
-
-                # Cleanup
-                for sf in segs_out:
-                    try: Path(sf).unlink()
-                    except: pass
+                # Drop any stale output from an earlier run so a failure can't be reported as success
+                _out_started = True
+                Path(out_path).unlink(missing_ok=True)
+                _ae_ff([ff,'-y','-f','concat','-safe','0','-i',concat_f,
+                        '-c:v',_ae_vcodec,'-c:a',_ae_acodec]+_ae_extra+[out_path],
+                       timeout=max(3600, int(total*2)))
 
                 if Path(out_path).exists():
                     orig_mb = Path(vid).stat().st_size/1024/1024
@@ -4451,9 +4522,21 @@ class App(tk.Tk):
 
             except Exception as _e:
                 import traceback as _tb
-                self.log(f'Auto Edit error: {_tb.format_exc()}', RED)
-                self.after(0, lambda: self.ae_status_lbl.config(text=f'❌ {_e}', fg=RED))
+                _emsg = str(_e)
+                if getattr(self, '_cancel_requested', False):
+                    self.log('[Auto Edit] Cancelled', YELLOW)
+                    self.after(0, lambda: self.ae_status_lbl.config(text='⛔ Cancelled', fg=YELLOW))
+                else:
+                    self.log(f'Auto Edit error: {_tb.format_exc()}', RED)
+                    self.after(0, lambda m=_emsg: self.ae_status_lbl.config(text=f'❌ {m[:200]}', fg=RED))
+                if _out_started:  # remove a truncated partial output
+                    try: Path(out_path).unlink(missing_ok=True)
+                    except OSError: pass
             finally:
+                if work:
+                    try: _sh_ae.rmtree(work, ignore_errors=True)
+                    except Exception: pass
+                self._ae_running = False
                 self.set_busy(False)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -4514,7 +4597,7 @@ class App(tk.Tk):
                   ).pack(side='right')
         tk.Button(tinp, text='📋 Use Clip Finder video', font=FONT_SMALL,
                   bg=BG2, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
-                  command=lambda: self.v_trans_file.set(self.v_video.get())
+                  command=lambda: self.v_trans_file.set(self._real_video() or self.v_trans_file.get())
                   ).pack(side='left', padx=(0,8))
         tk.Button(tinp, text='📝 TRANSCRIBE THIS FILE', font=('Segoe UI', 9,'bold'),
                   bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=14, pady=5,
@@ -4614,7 +4697,7 @@ class App(tk.Tk):
                       ) or self.v_sub_input.get())).pack(side='right')
         tk.Button(io_row, text='\U0001f4cb Use Clip Finder', font=FONT_SMALL,
                   bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8, pady=3,
-                  command=lambda: self.v_sub_input.set(self.v_video.get() or self.v_trans_file.get())).pack(side='left', padx=(0, 4))
+                  command=lambda: self.v_sub_input.set(self._real_video() or self.v_trans_file.get())).pack(side='left', padx=(0, 4))
         self.sub_trans_btn = tk.Button(io_row, text='\U0001f4dd Transcribe',
                   font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0,
                   cursor='hand2', padx=10, pady=3, command=self._sub_transcribe)
@@ -4762,11 +4845,11 @@ class App(tk.Tk):
         def _apply_preset(preset):
             self.v_sub_style_preset.set(preset)
             presets = {
-                'standard':  {'bold': True, 'italic': False, 'caps': False, 'color': '#FFFFFF', 'outline': '#000000', 'stroke': 3, 'bg': True,  'bg_opacity': 0,  'size': 48},
-                'karaoke':   {'bold': True, 'italic': False, 'caps': False, 'color': '#FFE000', 'outline': '#000000', 'stroke': 4, 'bg': False, 'bg_opacity': 0,  'size': 52},
-                'cinematic': {'bold': False,'italic': False, 'caps': True,  'color': '#FFFFFF', 'outline': '#000000', 'stroke': 2, 'bg': True,  'bg_opacity': 70, 'size': 44},
-                'minimal':   {'bold': False,'italic': False, 'caps': False, 'color': '#FFFFFF', 'outline': '#000000', 'stroke': 1, 'bg': False, 'bg_opacity': 0,  'size': 36},
-                'tiktok':    {'bold': True, 'italic': False, 'caps': True,  'color': '#FFFFFF', 'outline': '#FF0050', 'stroke': 5, 'bg': False, 'bg_opacity': 0,  'size': 56, 'words': 3},
+                'standard':  {'bold': True, 'italic': False, 'caps': False, 'color': '#FFFFFF', 'outline': '#000000', 'stroke': 3, 'bg': True,  'bg_opacity': 0,  'size': 48, 'karaoke': False, 'words': 6},
+                'karaoke':   {'bold': True, 'italic': False, 'caps': False, 'color': '#FFFFFF', 'outline': '#000000', 'stroke': 4, 'bg': False, 'bg_opacity': 0,  'size': 52, 'karaoke': True,  'words': 6},
+                'cinematic': {'bold': False,'italic': False, 'caps': True,  'color': '#FFFFFF', 'outline': '#000000', 'stroke': 2, 'bg': True,  'bg_opacity': 70, 'size': 44, 'karaoke': False, 'words': 6},
+                'minimal':   {'bold': False,'italic': False, 'caps': False, 'color': '#FFFFFF', 'outline': '#000000', 'stroke': 1, 'bg': False, 'bg_opacity': 0,  'size': 36, 'karaoke': False, 'words': 6},
+                'tiktok':    {'bold': True, 'italic': False, 'caps': True,  'color': '#FFFFFF', 'outline': '#FF0050', 'stroke': 5, 'bg': False, 'bg_opacity': 0,  'size': 56, 'karaoke': False, 'words': 3},
             }
             p = presets.get(preset, presets['standard'])
             self.v_sub_bold.set(p['bold']); self.v_sub_italic.set(p['italic'])
@@ -4774,7 +4857,7 @@ class App(tk.Tk):
             self.v_sub_outline.set(p['outline']); self.v_sub_stroke.set(p['stroke'])
             self.v_sub_bg_on.set(p['bg']); self.v_sub_bg_opacity.set(p['bg_opacity'])
             self.v_sub_size.set(p['size'])
-            if 'words' in p: self.v_sub_words.set(p['words'])
+            self.v_sub_karaoke.set(p.get('karaoke', False)); self.v_sub_words.set(p.get('words', 6))
             _tc_btn.config(bg=p['color']); _oc_btn.config(bg=p['outline'])
             # Update button highlights
             for pr, pb in _preset_btns.items():
@@ -5175,6 +5258,10 @@ class App(tk.Tk):
                 self.log('⛔ Killed whisper process', YELLOW)
             except: pass
         _do_transcribe._active_procs = []
+        # Kill any active Auto Edit ffmpeg process
+        for _p in list(getattr(self, '_ae_procs', [])):
+            try: _p.kill()
+            except Exception: pass
         self.log('⛔ Task cancelled', YELLOW)
         self.set_progress('Cancelled', pct=0)
         self.after(300, lambda: self.set_busy(False))
@@ -8840,7 +8927,8 @@ Return ONLY the JSON array, no other text."""
             '[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, '
             'OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, '
             'Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n'
-            f'Style: Default,{s["font"]},{s["size"]},{tc},{hc},{oc},{bc},'
+            # \kf sweeps Secondary -> Primary, so for karaoke the highlight must be the Primary colour
+            f'Style: Default,{s["font"]},{s["size"]},{hc if karaoke else tc},{tc if karaoke else hc},{oc},{bc},'
             f'{"1" if s["bold"] else "0"},{"1" if s["italic"] else "0"},0,0,100,100,0,0,1,'
             f'{s["stroke"]},0,2,60,60,80,1\n\n'
             '[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
