@@ -7649,6 +7649,8 @@ class App(tk.Tk):
         }
         self.log(f'🌡 Previewing zone {clip["start"]} → {clip["end"]} (score {zone["score"]}/10)', ACCENT)
         self._open_clip_preview(vid, clip)
+
+    def _hm_get_selected_transcript(self):
         """Return transcript lines filtered to only selected heatmap zones.
         Called by _start() when heatmap mode is on and zones are selected."""
         if not self._hm_zones or not any(z['selected'] for z in self._hm_zones):
@@ -8727,7 +8729,11 @@ Return ONLY the JSON array, no other text."""
         vision_models = _ai_models('gemini', 'vision')
         # Progressive frame counts: try full → half → quarter
         # Each image frame ~1000-2000 tokens, so fewer frames = less likely to hit TPM
-        _frame_attempts = [frames_b64, frames_b64[:len(frames_b64)//2], frames_b64[:max(10, len(frames_b64)//4)]]
+        # Even decimation (keeps coverage of the whole video); skip an attempt that is not smaller
+        _frame_attempts = [frames_b64]
+        for _sub in (frames_b64[::2], frames_b64[::4]):
+            if 0 < len(_sub) < len(_frame_attempts[-1]):
+                _frame_attempts.append(_sub)
 
         for _fattempt, _frames_subset in enumerate(_frame_attempts):
             if _fattempt > 0:
@@ -8752,7 +8758,7 @@ Return ONLY the JSON array, no other text."""
                         client = _gv.Client(api_key=_vkey)
                         self.log(f'🎯 Trying {_vmodel} with {len(_frames_subset)} frames...', FG2)
                         resp = _gemini_generate(client, _vmodel, contents,
-                                                _gemini_config(_vmodel, 4096, 0.2, json=True))
+                                                _gemini_config(_vmodel, 8192, 0.2, json=True))
                         raw = _safe_text(resp) or None
                         if raw:
                             break
@@ -8781,8 +8787,9 @@ Return ONLY the JSON array, no other text."""
             _clean = _rev.sub(r'\s*```\s*$', '', _clean, flags=_rev.MULTILINE)
             _clean = _clean.replace('`', '').strip()
             _s, _e = _clean.find('['), _clean.rfind(']')
-            if _s != -1 and _e > _s:
-                _clean = _clean[_s:_e+1]
+            if _s != -1:
+                # A truncated response has no closing ']' — keep the tail so the repair below can run
+                _clean = _clean[_s:_e+1] if _e > _s else _clean[_s:]
             else:
                 # No array found — log what Gemini actually said
                 self.log(f'⚠ Vision: Gemini returned non-JSON: {raw[:200]}', YELLOW)
@@ -8812,6 +8819,20 @@ Return ONLY the JSON array, no other text."""
             except Exception:
                 self.log(f'⚠ Vision parse failed: {raw[:300]}', YELLOW)
                 return None
+
+        # Normalise model output: 'M:SS' / 'H:MM:SS' / numeric-string / null timestamps and
+        # non-dict items must not crash int()/.get() here or in the caller.
+        def _vh_norm(h):
+            if not isinstance(h, dict): return None
+            try:
+                t = sum(float(x) * 60 ** i
+                        for i, x in enumerate(reversed(str(h.get('timestamp')).strip().split(':'))))
+            except ValueError:
+                return None
+            if not (0 <= t < 1e9): return None
+            h['timestamp'] = t
+            return h
+        vision_hits = [_h2 for _h2 in map(_vh_norm, vision_hits if isinstance(vision_hits, list) else []) if _h2]
 
         if not vision_hits:
             self.log('⚠ Vision Mode found no matching moments — try different instructions', YELLOW)
@@ -8919,6 +8940,11 @@ Return ONLY the JSON array, no other text."""
                 except Exception: pass
             return tot
 
+        def _sc(c):
+            # model-supplied score may be '8/10', '8.5', None ... — never raise
+            try: return int(float(str(c.get('score', 5) or 5).split('/')[0]))
+            except Exception: return 5
+
         # ── Snap + length-enforce each clip ────────────────────────────────────
         refined = []
         for c in clips:
@@ -8956,8 +8982,7 @@ Return ONLY the JSON array, no other text."""
                 overlap = max(0, min(ce, ke) - max(cs, ks))
                 shorter = min(ce - cs, ke - ks) or 1
                 if overlap / shorter > 0.4:
-                    better = (int(c.get('score', 5) or 5), _subscore(c)) > \
-                             (int(k.get('score', 5) or 5), _subscore(k))
+                    better = (_sc(c), _subscore(c)) > (_sc(k), _subscore(k))
                     if better:
                         kept[i] = c
                     merged = True
@@ -8966,9 +8991,7 @@ Return ONLY the JSON array, no other text."""
                 kept.append(c)
 
         def _rank(c):
-            try: sc = int(c.get('score', 5) or 5)
-            except Exception: sc = 5
-            return (-sc, -_subscore(c))
+            return (-_sc(c), -_subscore(c))
         kept.sort(key=_rank)
         return kept
 
@@ -9058,7 +9081,6 @@ Return ONLY the JSON array, no other text."""
                         _filtered.append(_l)
                     lines = _filtered
                     transcript = '\n'.join(lines)
-                    self.transcript = transcript
                     self.log(f'📋 Transcript filtered: {_orig_count}→{len(lines)} lines after time filter', GREEN)
 
 
@@ -9073,17 +9095,25 @@ Return ONLY the JSON array, no other text."""
                 CHARS_PER_CHUNK = 8000
             else:
                 CHARS_PER_CHUNK = 40000
-            full_text = self.transcript  # use self.transcript — may have been filtered above
+            full_text = transcript  # local copy — may have been time-filtered above (self.transcript stays full)
 
             # Heatmap mode: if zones are selected, restrict AI to selected transcript only
             _hm_filtered = None
             if (getattr(self, '_heatmap_mode_on', None) and self._heatmap_mode_on.get()
                     and any(z['selected'] for z in getattr(self, '_hm_zones', []))):
-                _hm_filtered = self._hm_get_selected_transcript()
-                if _hm_filtered:
+                _hm_zs = [z for z in self._hm_zones if z['selected']]
+                def _hm_keep(_ln):
+                    _m = re.match(r'\[(\d+):(\d+):(\d+)', _ln)
+                    if not _m: return True
+                    _t = int(_m[1])*3600 + int(_m[2])*60 + int(_m[3])
+                    return any(z['start'] <= _t < z['end'] for z in _hm_zs)
+                _hm_lines = [_l for _l in lines if _hm_keep(_l)]
+                if _hm_lines:
+                    _hm_filtered = '\n'.join(_hm_lines)
+                    lines = _hm_lines
+                    total_lines = len(lines)
                     full_text = _hm_filtered
-                    n_sel = sum(1 for z in self._hm_zones if z['selected'])
-                    self.log(f'🌡 Heatmap: analyzing {n_sel} selected zones only', ACCENT)
+                    self.log(f'🌡 Heatmap: analyzing {len(_hm_zs)} selected zones only', ACCENT)
 
             # Split into chunks by character count, respecting line boundaries
             chunks = []
@@ -9352,8 +9382,8 @@ Return ONLY the JSON array, no other text."""
             _cooling_down = [False]  # shared flag — all threads wait when True
 
             def _task_worker(idx, chunk, prov, label):
-                # Stagger start — 4s apart to avoid thundering herd on free tier APIs
-                _time.sleep(idx * 4.0)
+                # (No start stagger: tasks are dispatched sequentially with a cancel-aware
+                # 5s gap in the dispatch loop below.)
 
                 # Check cancel before starting
                 if getattr(self, '_cancel_requested', False):
@@ -9370,6 +9400,9 @@ Return ONLY the JSON array, no other text."""
                 # is a real error — a provider name means it answered (maybe empty).
                 clips, _res = _try_chunk(chunk, label, exclude=set(), start_prov=prov)
                 last_err = _res if isinstance(_res, Exception) else None
+                if not clips and _res is None:
+                    # _try_chunk called no provider (all dead / rate-excluded) — not a clean empty
+                    last_err = RuntimeError('no AI provider available (all dead or excluded)')
 
                 # Determine if the failure is fatal (no point retrying)
                 def _is_fatal(err):
@@ -9403,7 +9436,13 @@ Return ONLY the JSON array, no other text."""
                         break
                     _retry += 1
                     clips, _res = _try_chunk(chunk, label, exclude=_excluded, start_prov=None)
-                    last_err = _res if isinstance(_res, Exception) else None
+                    if isinstance(_res, Exception):
+                        last_err = _res
+                    elif clips or _res is not None:
+                        last_err = None
+                    else:            # no provider left to try — keep the earlier error
+                        _retry -= 1  # this pass called nothing
+                        break
                     _clean_empty = (not clips and last_err is None)
                     _excluded.add(prov)
 
@@ -9562,6 +9601,8 @@ Return ONLY the JSON array, no other text."""
         except Exception:
             err = traceback.format_exc()
             self.log(f'ERROR in AI:\n{err}', RED)
+            _m = str(sys.exc_info()[1])
+            self.after(0, lambda m=_m: messagebox.showerror('AI analysis failed', m[:600]))
         finally:
             self.running = False
             self.after(0, lambda: self.set_busy(False))
@@ -9840,117 +9881,177 @@ Return ONLY the JSON array, no other text."""
         out = self.v_outdir.get()
         vid = self.v_video.get()
         if not vid or not Path(vid).exists():
+            # same fallback as _render_clips (v_video can hold placeholder text after a tab switch)
+            vid = getattr(self, '_last_transcribed_vid', '') or getattr(self, '_last_dl_path', '')
+        if not vid or not Path(vid).exists():
             messagebox.showerror('No video', 'Select a video file first.')
+            return
+        if not out.strip():
+            messagebox.showerror('No output folder', 'Set an output folder first.')
             return
         self.set_busy(True)
         self.set_progress(f'Censoring {len(sel)} clips...', step=1, total=2)
         def _run():
+            _td = None
             try:
                 ff = ensure_ffmpeg()
-                import tempfile as _tmp
+                if not ff:
+                    raise RuntimeError('ffmpeg not found')
+                import tempfile as _tmp, shutil as _shu
+                Path(out).mkdir(parents=True, exist_ok=True)
+                _td = _tmp.mkdtemp(prefix='cf_')   # private per-run temp dir (no fixed/shared names)
+                _failed = 0
+                _used = set()
+
+                def _ff(cmd, outp=None):
+                    """Run ffmpeg; raise on non-zero exit or a missing/empty output file."""
+                    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if r.returncode != 0:
+                        raise RuntimeError(r.stderr.decode('utf-8', 'replace')[-300:])
+                    if outp and not (Path(outp).exists() and Path(outp).stat().st_size > 1000):
+                        raise RuntimeError(f'ffmpeg produced no output: {Path(outp).name}')
+                    return r
+
                 for i, clip in enumerate(sel):
+                    if getattr(self, '_cancel_requested', False):
+                        self.log('⛔ Cancelled', YELLOW)
+                        return
                     self.set_progress(f'Censoring clip {i+1}/{len(sel)}...', step=1, total=2, pct=int(i/len(sel)*100))
-                    start_t = clip['_sv'].get() if '_sv' in clip else clip.get('start','00:00:00')
-                    end_t   = clip['_ev'].get() if '_ev' in clip else clip.get('end','00:01:00')
-                    _ct = clip.get('title','clip')
-                    title = re.sub(r'[\\/:*?"<>|\']', '', _ct).strip()[:45] or 'Clip'
-                    # First export the clip
-                    tmp_clip = str(Path(_tmp.gettempdir()) / f'cf_censor_clip_{i}.mp4')
-                    _vcodec, _acodec, _extra = get_encoder(ff)
-                    subprocess.run([ff,'-y','-ss',start_t,'-to',end_t,'-i',vid,
-                                   '-c:v',_vcodec,'-c:a',_acodec]+_extra+[tmp_clip],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    # Then censor it
-                    _wm = self.v_whisper.get(); _wm = 'base' if _wm == 'auto' else _wm
-                    result = _do_transcribe(tmp_clip, _wm,
-                                           initial_prompt=self.v_context.get('1.0','end').strip() or None,
-                                           ffmpeg_path=ff, use_word_timestamps=True)
-                    segs = result.get('segments',[])
-                    # Use censor tab words, fall back to CENSOR_WORD_LIST if empty
-                    _cw = self._censor_words if self._censor_words else list(self.CENSOR_WORD_LIST)
-                    words = [w.lower().strip() for w in _cw if w.strip()]
-                    def _clip_word_match(w):
-                        """Simple word match for clip censor."""
-                        if len(w) < 2: return False
-                        for b in words:
-                            b = ''.join(c for c in b if c.isalpha())
-                            if not b or len(b) < 3: continue
-                            if w == b or w.startswith(b): return True
-                            if len(b) <= 5 and b in w: return True
-                        return False
-                    hits = []
-                    for seg in segs:
-                        seg_words = seg.get('words', [])
-                        if seg_words:
-                            for wd in seg_words:
-                                wt = ''.join(c for c in wd.get('word','').lower() if c.isalpha())
-                                if _clip_word_match(wt):
-                                    hits.append((max(0, wd['start']-0.05), wd['end']+0.1, wt))
-                        else:
-                            seg_text = seg.get('text','').lower()
-                            seg_tokens = [''.join(c for c in t if c.isalpha()) for t in seg_text.split()]
-                            seg_dur = seg['end'] - seg['start']
-                            for ti, tok in enumerate(seg_tokens):
-                                if _clip_word_match(tok):
-                                    frac = ti / max(len(seg_tokens), 1)
-                                    word_t = seg['start'] + frac * seg_dur
-                                    hits.append((max(0, word_t-0.1), word_t+0.5, tok))
-                    if hits:
-                        _sf = _fresh_import('soundfile')
-                        wav_in = str(Path(_tmp.gettempdir()) / f'cf_cen_wav_{i}.wav')
-                        wav_out = str(Path(_tmp.gettempdir()) / f'cf_cen_out_{i}.wav')
-                        subprocess.run([ff,'-y','-i',tmp_clip,'-vn','-ar','44100','-ac','2','-f','wav',wav_in],
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        import numpy as _np
-                        audio, sr = _sf.read(wav_in, dtype='float32')
-                        beep = self._censor_make_beep(sr) if style=='beep' else None
-                        if style=='mp3' and mp3 and Path(mp3).exists():
-                            beep, bsr = _sf.read(mp3, dtype='float32')
-                        for s_t, e_t, _ in hits:
-                            s,e = int(s_t*sr), min(int(e_t*sr), len(audio))
-                            if style=='silence': audio[s:e] = 0
-                            elif beep is not None:
-                                b = beep
-                                if len(b) < e-s: b = _np.tile(b, ((e-s)//len(b)+1,1) if b.ndim==2 else (e-s)//len(b)+1)
-                                audio[s:e] = b[:e-s]
-                        _sf.write(wav_out, audio, sr)
-                        _crop = getattr(self,'v_crop_mode',None)
-                        _crop = _crop.get() if _crop else 'normal'
-                        def _mux(inv, wav, outp, vertical=False):
-                            if vertical:
-                                _vf = self._get_vertical_vf(inv) or ['-vf','crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920']
-                                subprocess.run([ff,'-y','-i',inv,'-i',wav,'-map','0:v:0','-map','1:a:0']+_vf+
-                                    ['-c:v','libx264','-preset','fast','-crf','18','-c:a','aac','-b:a','192k','-shortest',outp],
-                                    stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                    tmp_clip = str(Path(_td) / f'cf_censor_clip_{i}.mp4')
+                    wav_in = str(Path(_td) / f'cf_cen_wav_{i}.wav')
+                    wav_out = str(Path(_td) / f'cf_cen_out_{i}.wav')
+                    try:
+                        start_t = clip['_sv'].get() if '_sv' in clip else clip.get('start','00:00:00')
+                        end_t   = clip['_ev'].get() if '_ev' in clip else clip.get('end','00:01:00')
+                        _nv = clip.get('_name_var')
+                        _ct = (_nv.get().strip() if _nv else '') or clip.get('title','clip')
+                        title = re.sub(r'[\\/:*?"<>|\']', '', _ct).strip()[:45] or 'Clip'
+                        if title.lower() in _used:
+                            title = f'{title}_{i+1}'
+                        _used.add(title.lower())
+                        # First export the clip
+                        _vcodec, _acodec, _extra = get_encoder(ff)
+                        _ff([ff,'-y','-ss',start_t,'-to',end_t,'-i',vid,
+                             '-c:v',_vcodec,'-c:a',_acodec]+_extra+[tmp_clip], tmp_clip)
+                        # Then censor it
+                        _wm = self.v_whisper.get(); _wm = 'base' if _wm == 'auto' else _wm
+                        result = _do_transcribe(tmp_clip, _wm,
+                                               initial_prompt=self.v_context.get('1.0','end').strip() or None,
+                                               ffmpeg_path=ff, use_word_timestamps=True)
+                        if result.get('_cancelled') or getattr(self, '_cancel_requested', False):
+                            self.log('⛔ Cancelled', YELLOW)
+                            return
+                        segs = result.get('segments',[])
+                        # Use censor tab words, fall back to CENSOR_WORD_LIST if empty
+                        _cw = self._censor_words if self._censor_words else list(self.CENSOR_WORD_LIST)
+                        words = [w.lower().strip() for w in _cw if w.strip()]
+                        # Short roots that are also common inside innocent words (class, pass,
+                        # assume, spice, cockpit...) only match as exact word / plural / listed suffix.
+                        _AMBIG = {'ass','fag','spic','dick','cock','piss','kike','chink'}
+                        _ONLY_PLURAL = {'spic','cock','fag','kike','chink'}
+                        _SFX = ('s','es','ed','ing','in','er','ers','head','heads','hole','holes')
+                        def _clip_word_match(w):
+                            """Simple word match for clip censor."""
+                            if len(w) < 2: return False
+                            for b in words:
+                                b = ''.join(c for c in b if c.isalpha())
+                                if not b or len(b) < 3: continue
+                                if w == b: return True
+                                if b in _AMBIG:
+                                    if w == b + 's': return True
+                                    if b not in _ONLY_PLURAL and w in {b + x for x in _SFX}: return True
+                                    continue
+                                if w.startswith(b): return True
+                                if len(b) <= 5 and b in w and len(w) <= len(b) + 8: return True
+                            return False
+                        hits = []
+                        for seg in segs:
+                            seg_words = seg.get('words', [])
+                            if seg_words:
+                                for wd in seg_words:
+                                    wt = ''.join(c for c in wd.get('word','').lower() if c.isalpha())
+                                    if _clip_word_match(wt):
+                                        hits.append((max(0, wd['start']-0.05), wd['end']+0.1, wt))
                             else:
-                                subprocess.run([ff,'-y','-i',inv,'-i',wav,'-map','0:v:0','-map','1:a:0',
-                                    '-c:v','copy','-c:a','aac','-b:a','192k','-shortest',outp],
-                                    stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-                        if _crop in ('normal','both'):
-                            _mux(tmp_clip,wav_out,str(Path(out)/f'{title}_censored.mp4'))
-                            self.log(f'[Censor] ✅ {title}_censored.mp4 ({len(hits)} words)',GREEN)
-                        if _crop in ('vertical','both'):
-                            _mux(tmp_clip,wav_out,str(Path(out)/f'{title}_censored_9x16.mp4'),vertical=True)
-                            self.log(f'[Censor] ✅ {title}_censored_9x16.mp4',GREEN)
-                    else:
-                        _crop = getattr(self,'v_crop_mode',None)
-                        _crop = _crop.get() if _crop else 'normal'
-                        if _crop in ('normal','both'):
-                            import shutil as _sh; _sh.copy2(tmp_clip,str(Path(out)/f'{title}.mp4'))
-                            self.log(f'[Censor] Clean 16:9: {title}.mp4',GREEN)
-                        if _crop in ('vertical','both'):
-                            _vf = self._get_vertical_vf(tmp_clip) or ['-vf','crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920']
-                            subprocess.run([ff,'-y','-i',tmp_clip]+_vf+['-c:v','libx264','-preset','fast',
-                                '-crf','18','-c:a','aac',str(Path(out)/f'{title}_9x16.mp4')],
-                                stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-                            self.log(f'[Censor] Clean 9:16: {title}_9x16.mp4',GREEN)
-                    try: Path(tmp_clip).unlink()
-                    except: pass
+                                seg_text = seg.get('text','').lower()
+                                seg_tokens = [''.join(c for c in t if c.isalpha()) for t in seg_text.split()]
+                                seg_dur = seg['end'] - seg['start']
+                                for ti, tok in enumerate(seg_tokens):
+                                    if _clip_word_match(tok):
+                                        frac = ti / max(len(seg_tokens), 1)
+                                        word_t = seg['start'] + frac * seg_dur
+                                        hits.append((max(0, word_t-0.1), word_t+0.5, tok))
+                        if hits:
+                            _sf = _fresh_import('soundfile')
+                            _ff([ff,'-y','-i',tmp_clip,'-vn','-ar','44100','-ac','2','-f','wav',wav_in], wav_in)
+                            import numpy as _np
+                            audio, sr = _sf.read(wav_in, dtype='float32')
+                            beep = self._censor_make_beep(sr) if style=='beep' else None
+                            if style=='mp3' and mp3 and Path(mp3).exists():
+                                # let ffmpeg convert the MP3 to the clip's rate/channels (44.1kHz stereo)
+                                _mp3_wav = str(Path(_td) / f'cf_cen_mp3_{i}.wav')
+                                _ff([ff,'-y','-i',mp3,'-vn','-ar',str(sr),'-ac','2','-f','wav',_mp3_wav], _mp3_wav)
+                                beep, _bsr = _sf.read(_mp3_wav, dtype='float32')
+                            if style != 'silence' and (beep is None or len(beep) == 0):
+                                beep = self._censor_make_beep(sr)   # no usable MP3 -> default beep, never leave it uncensored
+                            if beep is not None and beep.ndim == 1 and audio.ndim == 2:
+                                beep = _np.repeat(beep[:, None], audio.shape[1], axis=1)   # mono beep -> match audio channels
+                            for s_t, e_t, _ in hits:
+                                s,e = int(s_t*sr), min(int(e_t*sr), len(audio))
+                                if e <= s: continue
+                                if style=='silence' or beep is None: audio[s:e] = 0
+                                else:
+                                    b = beep
+                                    if len(b) < e-s: b = _np.tile(b, ((e-s)//len(b)+1,1) if b.ndim==2 else (e-s)//len(b)+1)
+                                    audio[s:e] = b[:e-s]
+                            _sf.write(wav_out, audio, sr)
+                            _crop = getattr(self,'v_crop_mode',None)
+                            _crop = _crop.get() if _crop else 'normal'
+                            def _mux(inv, wav, outp, vertical=False):
+                                if vertical:
+                                    _vf = self._get_vertical_vf(inv) or ['-vf','crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920']
+                                    _ff([ff,'-y','-i',inv,'-i',wav,'-map','0:v:0','-map','1:a:0']+_vf+
+                                        ['-c:v','libx264','-preset','fast','-crf','18','-c:a','aac','-b:a','192k','-shortest',outp], outp)
+                                else:
+                                    _ff([ff,'-y','-i',inv,'-i',wav,'-map','0:v:0','-map','1:a:0',
+                                        '-c:v','copy','-c:a','aac','-b:a','192k','-shortest',outp], outp)
+                            if _crop in ('normal','both'):
+                                _mux(tmp_clip,wav_out,str(Path(out)/f'{title}_censored.mp4'))
+                                self.log(f'[Censor] ✅ {title}_censored.mp4 ({len(hits)} words)',GREEN)
+                            if _crop in ('vertical','both'):
+                                _mux(tmp_clip,wav_out,str(Path(out)/f'{title}_censored_9x16.mp4'),vertical=True)
+                                self.log(f'[Censor] ✅ {title}_censored_9x16.mp4',GREEN)
+                        else:
+                            _crop = getattr(self,'v_crop_mode',None)
+                            _crop = _crop.get() if _crop else 'normal'
+                            if _crop in ('normal','both'):
+                                _shu.copy2(tmp_clip,str(Path(out)/f'{title}.mp4'))
+                                self.log(f'[Censor] Clean 16:9: {title}.mp4',GREEN)
+                            if _crop in ('vertical','both'):
+                                _vf = self._get_vertical_vf(tmp_clip) or ['-vf','crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920']
+                                _v916 = str(Path(out)/f'{title}_9x16.mp4')
+                                _ff([ff,'-y','-i',tmp_clip]+_vf+['-c:v','libx264','-preset','fast',
+                                    '-crf','18','-c:a','aac',_v916], _v916)
+                                self.log(f'[Censor] Clean 9:16: {title}_9x16.mp4',GREEN)
+                    except Exception as _ce:
+                        _failed += 1
+                        self.log(f'[Censor] clip {i+1} failed: {_ce}', RED)
+                    finally:
+                        for _f in (tmp_clip, wav_in, wav_out):
+                            try: Path(_f).unlink()
+                            except Exception: pass
                 self.set_progress('Censor export done!', step=2, total=2, pct=100)
-                self.after(0, lambda: messagebox.showinfo('Done', f'Censored {len(sel)} clips → {out}'))
+                if _failed:
+                    _msg = f'{_failed} of {len(sel)} clips failed (see log). Others saved to {out}'
+                    self.after(0, lambda m=_msg: messagebox.showwarning('Censor finished with errors', m))
+                else:
+                    _msg = f'Censored {len(sel)} clips → {out}'
+                    self.after(0, lambda m=_msg: messagebox.showinfo('Done', m))
             except Exception:
                 self.log(f'Censor clips error:\n{__import__("traceback").format_exc()}', RED)
             finally:
+                if _td:
+                    _shu.rmtree(_td, ignore_errors=True)
                 self.set_busy(False)
         threading.Thread(target=_run, daemon=True).start()
 
@@ -9996,93 +10097,129 @@ Return ONLY the JSON array, no other text."""
             messagebox.showerror('No output folder', 'Set an output folder first.')
             return
         vid = self.v_video.get()
+        if not vid or not Path(vid).exists():
+            # same fallback as _render_clips (v_video can hold placeholder text after a tab switch)
+            vid = getattr(self, '_last_transcribed_vid', '') or getattr(self, '_last_dl_path', '')
+        if not vid or not Path(vid).exists():
+            messagebox.showerror('No video', 'Select a video file first.')
+            return
         self.set_busy(True)
         self.log(f'⚡ Auto Edit: processing {len(sel)} clip(s)...', ACCENT2)
 
         def _run():
+            _td = None
             try:
-                import subprocess as _sp, re as _re, tempfile as _tmp
+                import subprocess as _sp, re as _re, tempfile as _tmp, shutil as _shu
+                Path(out).mkdir(parents=True, exist_ok=True)
+                _td = _tmp.mkdtemp(prefix='cf_')   # private per-run temp dir (no fixed/shared names)
+                _failed = 0
+
+                def _ff(cmd, outp=None):
+                    """Run ffmpeg; raise on non-zero exit or a missing/empty output file."""
+                    r = _sp.run(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE)
+                    if r.returncode != 0:
+                        raise RuntimeError(r.stderr.decode('utf-8', 'replace')[-300:])
+                    if outp and not (Path(outp).exists() and Path(outp).stat().st_size > 1000):
+                        raise RuntimeError(f'ffmpeg produced no output: {Path(outp).name}')
+                    return r
+
                 for i, clip in enumerate(sel):
+                    if getattr(self, '_cancel_requested', False):
+                        self.log('⛔ Cancelled', YELLOW)
+                        return
                     self.set_progress(f'Auto Edit: clip {i+1}/{len(sel)}...', pct=int(i/len(sel)*100))
-                    start_t = clip.get('_sv') and clip['_sv'].get() or clip.get('start','00:00:00')
-                    end_t   = clip.get('_ev') and clip['_ev'].get() or clip.get('end','00:01:00')
-                    _at = clip.get('title','clip')
-                    title = re.sub(r'[\\/:*?"<>|]', '', _at).strip()[:45] or 'Clip'
+                    _junk = []   # temp files of this clip, removed in finally
+                    try:
+                        start_t = clip.get('_sv') and clip['_sv'].get() or clip.get('start','00:00:00')
+                        end_t   = clip.get('_ev') and clip['_ev'].get() or clip.get('end','00:01:00')
+                        _nv = clip.get('_name_var')
+                        _at = (_nv.get().strip() if _nv else '') or clip.get('title','clip')
+                        title = re.sub(r'[\\/:*?"<>|]', '', _at).strip()[:45] or 'Clip'
 
-                    # Step 1: Extract raw clip
-                    raw = str(Path(_tmp.gettempdir()) / f'ae_raw_{i}.mp4')
-                    _vcodec, _acodec, _extra = get_encoder(ff)
-                    _sp.run([ff,'-y','-ss',start_t,'-to',end_t,'-i',vid,
-                             '-c:v',_vcodec,'-c:a',_acodec]+_extra+[raw],
-                            stdout=_sp.PIPE, stderr=_sp.PIPE)
+                        # Step 1: Extract raw clip
+                        raw = str(Path(_td) / f'ae_raw_{i}.mp4')
+                        _junk.append(raw)
+                        _vcodec, _acodec, _extra = get_encoder(ff)
+                        _ff([ff,'-y','-ss',start_t,'-to',end_t,'-i',vid,
+                             '-c:v',_vcodec,'-c:a',_acodec]+_extra+[raw], raw)
 
-                    # Step 2: Detect silence
-                    _sil = _sp.run([ff,'-i',raw,'-af','silencedetect=noise=-35dB:d=0.3',
-                                    '-f','null','-'], capture_output=True, text=True)
-                    sil_starts = [float(m) for m in _re.findall(r'silence_start: ([\d.]+)', _sil.stderr)]
-                    sil_ends   = [float(m) for m in _re.findall(r'silence_end: ([\d.]+)', _sil.stderr)]
+                        # Step 2: Detect silence
+                        _sil = _sp.run([ff,'-i',raw,'-af','silencedetect=noise=-35dB:d=0.3',
+                                        '-f','null','-'], capture_output=True, text=True,
+                                       encoding='utf-8', errors='replace')
+                        sil_starts = [float(m) for m in _re.findall(r'silence_start: ([\d.]+)', _sil.stderr or '')]
+                        sil_ends   = [float(m) for m in _re.findall(r'silence_end: ([\d.]+)', _sil.stderr or '')]
 
-                    if not sil_starts:
-                        # No silence — just copy
-                        import shutil as _sh
-                        _sh.copy2(raw, str(Path(out) / f'{title} - ClipFinder - Part {i+1}.mp4'))
-                        self.log(f'  Clip {i+1}: no silence detected, exported as-is', FG2)
-                        continue
+                        if not sil_starts:
+                            # No silence — just copy
+                            _shu.copy2(raw, str(Path(out) / f'{title} - ClipFinder - Part {i+1}.mp4'))
+                            self.log(f'  Clip {i+1}: no silence detected, exported as-is', FG2)
+                            continue
 
-                    # Step 3: Build keep segments (non-silent parts)
-                    keeps = []
-                    prev = 0.0
-                    for ss, se in zip(sil_starts, sil_ends):
-                        if ss > prev + 0.1:
-                            keeps.append((prev, ss))
-                        prev = se
-                    # Get duration
-                    _dur = _sp.run([ff,'-i',raw], capture_output=True, text=True)
-                    _dm = _re.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur.stderr)
-                    if _dm:
-                        h,m,s = _dm.groups()
-                        total = int(h)*3600+int(m)*60+float(s)
-                        if total > prev + 0.1:
-                            keeps.append((prev, total))
+                        # Step 3: Build keep segments (non-silent parts)
+                        keeps = []
+                        prev = 0.0
+                        for ss, se in zip(sil_starts, sil_ends):
+                            if ss > prev + 0.1:
+                                keeps.append((prev, ss))
+                            prev = se
+                        # Get duration
+                        _dur = _sp.run([ff,'-i',raw], capture_output=True, text=True,
+                                       encoding='utf-8', errors='replace')
+                        _dm = _re.search(r'Duration: (\d+):(\d+):([\d.]+)', _dur.stderr or '')
+                        if _dm:
+                            h,m,s = _dm.groups()
+                            total = int(h)*3600+int(m)*60+float(s)
+                            if total > prev + 0.1:
+                                keeps.append((prev, total))
 
-                    if not keeps:
-                        self.log(f'  Clip {i+1}: all silence, skipping', YELLOW)
-                        continue
+                        if not keeps:
+                            self.log(f'  Clip {i+1}: all silence, skipping', YELLOW)
+                            continue
 
-                    # Step 4: Concat non-silent segments
-                    concat_list = str(Path(_tmp.gettempdir()) / f'ae_list_{i}.txt')
-                    seg_files = []
-                    with open(concat_list, 'w') as cf:
-                        for j, (ks, ke) in enumerate(keeps):
-                            seg = str(Path(_tmp.gettempdir()) / f'ae_seg_{i}_{j}.mp4')
-                            _sp.run([ff,'-y','-ss',str(ks),'-to',str(ke),'-i',raw,
-                                     '-c','copy',seg],
-                                    stdout=_sp.PIPE, stderr=_sp.PIPE)
-                            cf.write(f"file '{seg}'\n")
-                            seg_files.append(seg)
+                        # Step 4: Concat non-silent segments. Segments are RE-ENCODED: with
+                        # '-c copy' every cut snaps back to the previous keyframe, which
+                        # duplicates/desyncs footage. The final concat can stay '-c copy'
+                        # because all segments share the same codec parameters.
+                        concat_list = str(Path(_td) / f'ae_list_{i}.txt')
+                        _junk.append(concat_list)
+                        with open(concat_list, 'w', encoding='utf-8') as cf:
+                            for j, (ks, ke) in enumerate(keeps):
+                                seg = str(Path(_td) / f'ae_seg_{i}_{j}.mp4')
+                                _junk.append(seg)
+                                _ff([ff,'-y','-ss',str(ks),'-to',str(ke),'-i',raw,
+                                     '-c:v','libx264','-preset','veryfast','-crf','18',
+                                     '-c:a','aac','-b:a','192k',seg])
+                                cf.write("file '" + Path(seg).as_posix().replace("'", "'\\''") + "'\n")
 
-                    out_path = str(Path(out) / f'{title} - ClipFinder - Part {i+1}.mp4')
-                    _sp.run([ff,'-y','-f','concat','-safe','0','-i',concat_list,
-                             '-c','copy', out_path],
-                            stdout=_sp.PIPE, stderr=_sp.PIPE)
+                        out_path = str(Path(out) / f'{title} - ClipFinder - Part {i+1}.mp4')
+                        _ff([ff,'-y','-f','concat','-safe','0','-i',concat_list,
+                             '-c','copy', out_path], out_path)
 
-                    removed = sum(e-s for s,e in zip(sil_starts, sil_ends))
-                    self.log(f'  ✅ Clip {i+1}: removed {removed:.1f}s silence → {out_path.split(chr(92))[-1]}', GREEN)
+                        removed = sum(e-s for s,e in zip(sil_starts, sil_ends))
+                        self.log(f'  ✅ Clip {i+1}: removed {removed:.1f}s silence → {out_path.split(chr(92))[-1]}', GREEN)
+                    except Exception as _ce:
+                        _failed += 1
+                        self.log(f'  Clip {i+1} failed: {_ce}', RED)
+                    finally:
+                        # Cleanup (also on continue / exception paths)
+                        for _f in _junk:
+                            try: Path(_f).unlink()
+                            except Exception: pass
 
-                    # Cleanup
-                    for f2 in seg_files:
-                        try: Path(f2).unlink()
-                        except: pass
-                    try: Path(raw).unlink()
-                    except: pass
-
-                self.set_progress(f'⚡ Auto Edit done! {len(sel)} clips processed', pct=100)
-                self.after(0, lambda: messagebox.showinfo('Auto Edit Done',
-                    f'Processed {len(sel)} clip(s)\nSaved to: {out}'))
+                self.set_progress(f'⚡ Auto Edit done! {len(sel)-_failed}/{len(sel)} clips processed', pct=100)
+                if _failed:
+                    _msg = f'{_failed} of {len(sel)} clip(s) failed (see log)\nOthers saved to: {out}'
+                    self.after(0, lambda m=_msg: messagebox.showwarning('Auto Edit finished with errors', m))
+                else:
+                    _msg = f'Processed {len(sel)} clip(s)\nSaved to: {out}'
+                    self.after(0, lambda m=_msg: messagebox.showinfo('Auto Edit Done', m))
             except Exception:
                 import traceback as _tb
                 self.log(f'Auto Edit error:\n{_tb.format_exc()}', RED)
             finally:
+                if _td:
+                    _shu.rmtree(_td, ignore_errors=True)
                 self.set_busy(False)
 
         threading.Thread(target=_run, daemon=True).start()
