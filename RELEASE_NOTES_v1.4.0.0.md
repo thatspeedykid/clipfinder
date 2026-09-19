@@ -39,6 +39,9 @@ Write TikTok, Instagram, YouTube Shorts and X posts from a transcript *or just a
 - Groq `llama-3.x` models were shut down on Aug 16 → now `gpt-oss-120b/20b` and Qwen3.8; Gemini 3.5 / 3.8 with correct thinking-token budgets; OpenRouter free-model list rebuilt against the live catalog.
 - SDKs moved to google-genai 2.x, groq 1.x, openai 3.x. Rate limits and retired models fall through to the next model/key/provider automatically.
 
+### 🎨 New look
+- Sharper text on 125%/150% displays (per-monitor DPI awareness), a dark Windows 11 title bar, an accent underline on the active tab, hover and keyboard-focus states, higher-contrast text colors (all pass WCAG AA), and four accent colors to pick from in **Settings → Appearance** (Ember, Ocean, Violet, Mint; applies after a restart).
+
 ### 🎬 Other improvements
 - **9:16 face tracking works again** (OpenCV YuNet; the old mediapipe tracker silently did nothing). No pip installs at export time.
 - **Music Removal** rewritten around the isolated engine: real progress bar, working Cancel, honest "done / failed" summary, clear engine status.

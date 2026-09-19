@@ -26,6 +26,9 @@
 - google-genai 2.x, groq 1.x, openai 3.x call shapes (`_gemini_complete`, `_groq_complete`, `_openrouter_complete`), None-safe responses, retired-model and rate-limit fallthrough
 - Groq free-tier prompt budgeting (8K tokens/min): smaller chunks, transcript trimmed instead of the instructions
 
+### 🎨 Theme v2
+- Per-monitor DPI awareness + scaled pixel constants, Windows 11 dark title bar/caption colors, WCAG-AA palette, active-tab underline, hover/focus polish, accent presets (Settings → Appearance, restart to apply)
+
 ### 🎬 Features & fixes
 - 9:16 face tracking via OpenCV YuNet (OpenCV 5 removed Haar cascades, mediapipe's legacy API is gone); no runtime pip install
 - Music Removal on the isolated engine: progress, cancel, summary, engine status
