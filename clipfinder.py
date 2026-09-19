@@ -14503,6 +14503,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     groups.append(group)
 
             self._studio_dupes = groups
+            self._studio_dupes_root = folder     # Move Duplicates must use the folder that was scanned
             total_dupes = sum(len(g)-1 for g in groups)
             self.log(f'[Studio] Found {len(groups)} duplicate groups, {total_dupes} files to remove', GREEN)
             self._studio_set_status(f'Done! {len(groups)} groups, {total_dupes} duplicates found.', GREEN)
@@ -14589,7 +14590,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         if not self._studio_dupes:
             messagebox.showwarning('No results', 'Run FIND DUPLICATES first.')
             return
-        folder = self.v_scan_folder.get().strip()
+        folder = getattr(self, '_studio_dupes_root', '') or self.v_scan_folder.get().strip()
         dupes_dir = Path(folder) / 'duplicates'
         dupes_dir.mkdir(exist_ok=True)
         moved = 0
@@ -14664,26 +14665,25 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             except Exception:
                 self.log('[Studio] Installing opencv-contrib-python (one time)...', YELLOW)
                 self._studio_set_status('Installing opencv-contrib (one time ~50MB)...')
-                # Install into PKGS_DIR (same place plain opencv-python lives), not the interpreter's
-                # site-packages, otherwise the plain cv2 in PKGS_DIR keeps shadowing it. Don't re-pull
-                # numpy (its .pyd is already loaded).
-                try:
-                    import numpy as _np_chk
-                    _cv_extra = ['--no-deps']
-                except Exception:
-                    _cv_extra = []
-                _cv_cmd = _pip_cmd(['opencv-contrib-python'], _cv_extra)
-                if _cv_cmd is None:
-                    raise RuntimeError('No Python found to run pip. Install Python 3.12 or reinstall ClipFinder.')
-                _cv_r = subprocess.run(_cv_cmd, capture_output=True, text=True, timeout=900)
-                if _cv_r.returncode != 0:
-                    raise RuntimeError('opencv-contrib install failed (if cv2 is locked, restart ClipFinder and retry): '
-                                       + (_cv_r.stderr or _cv_r.stdout or '')[-300:])
-                try:
-                    _cv2 = _fresh_import('cv2')
-                    _cv2.dnn_superres.DnnSuperResImpl_create()
-                except Exception:
-                    raise RuntimeError('opencv-contrib was installed. Please restart ClipFinder, then run Upscale again.')
+                # Go through the update manager: it stages the wheel, import-tests it and swaps it into PKGS_DIR.
+                # (A plain `pip install` goes to site-packages, where the PKGS_DIR opencv-python shadows it, and
+                # the loaded cv2 .pyd cannot be replaced while the app is running.)
+                _ocv = pm_entry('opencv-contrib-python')
+                if _ocv is None:
+                    raise RuntimeError('opencv-contrib-python is not in the package registry')
+                _stg = pm_stage([_ocv], on_line=lambda l: self.log(f'[Studio] {l}', FG2))
+                _stg_bad = [r for r in _stg if not r.get('ok')]
+                if _stg_bad or not _stg:
+                    raise RuntimeError('opencv-contrib-python install failed: ' +
+                                       (_stg_bad[0].get('error', 'unknown error') if _stg_bad else 'nothing was staged'))
+                if 'cv2' in sys.modules:
+                    # a loaded cv2 .pyd cannot be swapped while running: it is applied at the next start
+                    raise RuntimeError('opencv-contrib-python was downloaded. Restart ClipFinder, then run Upscale again.')
+                pm_apply_staged()
+                _cv2 = _fresh_import('cv2')
+                if not hasattr(_cv2, 'dnn_superres'):
+                    raise RuntimeError('opencv-contrib-python installed but dnn_superres is missing - restart ClipFinder')
+            _cv2 = _fresh_import('cv2')
             from PIL import Image as _Img
             import numpy as _np
             self.log('[Studio] Dependencies OK', GREEN)
@@ -14750,11 +14750,14 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     h_out, w_out = output.shape[:2]
                     out_name = f'{Path(fpath).stem}_x{scale}_{model_name_used}.png'
                     out_path = str(Path(out_dir) / out_name)
-                    # imencode + tofile handles non-ASCII paths (cv2.imwrite silently fails on them)
-                    _ok_enc, _buf = _cv2.imencode('.png', output)
-                    if not _ok_enc:
+                    # imwrite silently fails (returns False / writes nothing) for non-ASCII paths on Windows,
+                    # so encode in memory and write the bytes with Python's own file API
+                    _enc_ok, _enc_buf = _cv2.imencode('.png', output)
+                    if not _enc_ok:
                         raise RuntimeError('PNG encode failed')
-                    _buf.tofile(out_path)
+                    Path(out_path).write_bytes(_enc_buf.tobytes())
+                    if not Path(out_path).exists():
+                        raise RuntimeError(f'Could not write {out_path}')
                     self.log(f'[Studio] Saved: {out_name} ({w_in}x{h_in}→{w_out}x{h_out})', GREEN)
                     results_info.append({'name': out_name, 'path': out_path,
                                          'in_w': w_in, 'in_h': h_in,
@@ -15407,8 +15410,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 _extra_key_enabled[pk].append(_ben)
                 _kidx = len(_extra_key_vars[pk])
 
-                # Same parent as primary rows
-                _erow = tk.Frame(s1, bg=BG3)
+                # Parent is this provider's extra-key container so '+ Add Key' rows stay under their provider
+                _erow = tk.Frame(_extra_key_frames[pk], bg=BG3)
                 _erow.pack(fill='x', pady=1)
 
                 def _remove_row(r=_erow, v=_ev, b=_ben, pk2=pk):
@@ -15460,7 +15463,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     fg=GREEN if enabled else FG3,
                     bg=BG3, relief='flat', bd=0, cursor='hand2', padx=6)
 
-                def _toggle_key(b=_ben, e=_ee, ef=_eef, btn=_tbtn, pk=pkey):
+                def _toggle_key(b=_ben, e=_ee, ef=_eef, btn=_tbtn, pk=pk):
                     b.set(not b.get())
                     is_on = b.get()
                     e.config(state='normal' if is_on else 'disabled',
@@ -15536,6 +15539,35 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             self._auto_select_provider()
             self.log(f'✅ API keys saved', GREEN)
 
+        # CFKEYS2: PBKDF2-HMAC-SHA256 (salted) -> HMAC-SHA256 counter keystream, encrypt-then-MAC.
+        # CFKEYS1 (unsalted sha256 chain, no MAC) is still readable for old bundles.
+        def _keys_xor(enc_key, nonce, data):
+            import hmac as _hm, hashlib as _hs
+            _out = bytearray()
+            for _off in range(0, len(data), 32):
+                _ks = _hm.new(enc_key, nonce + (_off // 32).to_bytes(8, 'big'), _hs.sha256).digest()
+                _out.extend(x ^ y for x, y in zip(data[_off:_off + 32], _ks))
+            return bytes(_out)
+
+        def _keys_encrypt(data, pw):
+            import hmac as _hm, hashlib as _hs
+            _salt, _nonce = os.urandom(16), os.urandom(16)
+            _dk = _hs.pbkdf2_hmac('sha256', pw.encode('utf-8'), _salt, 200000, dklen=64)
+            _ct = _keys_xor(_dk[:32], _nonce, data)
+            _tag = _hm.new(_dk[32:], _salt + _nonce + _ct, _hs.sha256).digest()
+            return b'CFKEYS2:' + _salt + _nonce + _tag + _ct
+
+        def _keys_decrypt(blob, pw):
+            """blob = bytes after the CFKEYS2: magic. Raises ValueError on a wrong password / tampering."""
+            import hmac as _hm, hashlib as _hs
+            if len(blob) < 64:
+                raise ValueError('truncated bundle')
+            _salt, _nonce, _tag, _ct = blob[:16], blob[16:32], blob[32:64], blob[64:]
+            _dk = _hs.pbkdf2_hmac('sha256', pw.encode('utf-8'), _salt, 200000, dklen=64)
+            if not _hm.compare_digest(_tag, _hm.new(_dk[32:], _salt + _nonce + _ct, _hs.sha256).digest()):
+                raise ValueError('wrong password or corrupted file')
+            return _keys_xor(_dk[:32], _nonce, _ct)
+
         def _export_keys():
             import json as _j, base64 as _b64, hashlib as _hs
             from tkinter import simpledialog as _sd, filedialog as _fd
@@ -15559,15 +15591,9 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 filetypes=[('ClipFinder Keys', '*.cfkeys'), ('All', '*.*')])
             if not dest: return
             try:
-                _key = _hs.sha256(pw.encode()).digest()
                 _data = _j.dumps(_bundle).encode()
-                _cipher = bytearray()
-                _ks = _key
-                for i, b in enumerate(_data):
-                    if i % 32 == 0 and i > 0: _ks = _hs.sha256(_ks).digest()
-                    _cipher.append(b ^ _ks[i % 32])
                 with open(dest, 'wb') as _f:
-                    _f.write(_b64.b64encode(b'CFKEYS1:' + bytes(_cipher)))
+                    _f.write(_b64.b64encode(_keys_encrypt(_data, pw)))
                 messagebox.showinfo('Exported', f'Keys saved to:\n{dest}\n\nKeep this file and your password safe!')
                 self.log(f'✅ Keys exported to {dest}', GREEN)
             except Exception as ex:
@@ -15584,15 +15610,18 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             try:
                 with open(src, 'rb') as _f: _raw = _b64.b64decode(_f.read())
                 _magic = b'CFKEYS1:'
-                if not _raw.startswith(_magic):
+                if _raw.startswith(b'CFKEYS2:'):
+                    _plain = _keys_decrypt(_raw[len(b'CFKEYS2:'):], pw)
+                elif _raw.startswith(_magic):
+                    _cipher = _raw[len(_magic):]
+                    _key = _hs.sha256(pw.encode()).digest()
+                    _plain = bytearray()
+                    _ks = _key
+                    for i, b in enumerate(_cipher):
+                        if i % 32 == 0 and i > 0: _ks = _hs.sha256(_ks).digest()
+                        _plain.append(b ^ _ks[i % 32])
+                else:
                     messagebox.showerror('Import failed', 'Not a valid ClipFinder key bundle.'); return
-                _cipher = _raw[len(_magic):]
-                _key = _hs.sha256(pw.encode()).digest()
-                _plain = bytearray()
-                _ks = _key
-                for i, b in enumerate(_cipher):
-                    if i % 32 == 0 and i > 0: _ks = _hs.sha256(_ks).digest()
-                    _plain.append(b ^ _ks[i % 32])
                 _bundle = _j.loads(_plain.decode())
                 if _bundle.get('v') != 1:
                     messagebox.showerror('Import failed', 'Unknown bundle version.'); return
@@ -15612,8 +15641,18 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                                   ('OpenRouter (Free models)','key_openrouter')]:
                     if _pk in self.v_keys: self.v_keys[_pk].set(_kd.get(_ck, ''))
                 if hasattr(self, 'v_unsplash_key'): self.v_unsplash_key.set(_kd.get('key_unsplash',''))
-                self._auto_select_provider()
-                messagebox.showinfo('Imported', 'All keys imported!\nExtra keys (Key 2, Key 3) reload on next Settings open.')
+                # Rebuild the extra-key rows from the bundle so a later Save/Export does not overwrite them
+                for _pk, (_ek, _en) in {'Google Gemini (Free)':     ('key_gemini_extra',     'key_gemini_extra_enabled'),
+                                        'Groq (Free)':              ('key_groq_extra',       'key_groq_extra_enabled'),
+                                        'OpenRouter (Free models)': ('key_openrouter_extra', 'key_openrouter_extra_enabled')}.items():
+                    for _r in list(_extra_key_frames[_pk].winfo_children()): _r.destroy()
+                    _extra_key_vars[_pk] = []; _extra_key_enabled[_pk] = []
+                    _xks = [k.strip() for k in (_kd.get(_ek, '') or '').split(',') if k.strip()]
+                    _xfl = [x for x in (_kd.get(_en, '') or '').split(',') if x in ('0', '1')]
+                    for _xi, _xk in enumerate(_xks):
+                        _add_extra_row(_pk, _xk, (_xfl[_xi] == '1') if _xi < len(_xfl) else True)
+                _save_keys()   # recomputes cfg + self._extra_keys / _extra_keys_enabled from the rebuilt rows
+                messagebox.showinfo('Imported', 'All keys imported!')
                 self.log('✅ Keys imported successfully', GREEN)
             except (ValueError, KeyError):
                 messagebox.showerror('Import failed', 'Wrong password or corrupted file.')
@@ -15699,7 +15738,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         tk.Label(br_row, text='Extract from browser:', font=FONT_SMALL, fg=FG2, bg=BG2, width=22, anchor='w').pack(side='left')
         if not hasattr(self, 'v_cookies_browser'):
             self.v_cookies_browser = tk.StringVar(value=self.cfg.get('cookies_browser', ''))
-        _browsers = ['', 'chrome', 'firefox', 'edge', 'brave', 'opera', 'safari']
+        _browsers = ['', 'chrome', 'firefox', 'edge', 'brave', 'opera']   # yt-dlp cannot read Safari cookies on Windows
         _br_menu = tk.OptionMenu(br_row, self.v_cookies_browser, *_browsers)
         _br_menu.config(font=FONT_SMALL, bg=BG3, fg=FG, relief='flat', bd=0,
                         highlightthickness=0, activebackground=BG4)
@@ -15775,11 +15814,18 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             """Use Gemini Vision to auto-identify and rename unlabeled reference images."""
             import threading as _sl_thr, base64 as _sl_b64
             def _do_scan():
-                _unknown = list(_vref_dir.glob('*.png')) + list(_vref_dir.glob('*.jpg')) + list(_vref_dir.glob('*.jpeg'))
-                if not _unknown:
+                _all = list(_vref_dir.glob('*.png')) + list(_vref_dir.glob('*.jpg')) + list(_vref_dir.glob('*.jpeg'))
+                if not _all:
                     self.after(0, lambda: self.log('No images found in vision_refs folder', YELLOW))
                     return
-                self.after(0, lambda: self.log(f'🔍 Scanning {len(_unknown)} image(s) with Gemini Vision...', FG2))
+                # Only label images that still carry a generic name; keep names the user chose
+                _generic = re.compile(r'(?i)^(screenshot|screen[ _-]?shot|screen[ _-]?capture|image|img|clipboard|capture|snip|photo|pasted[ _-]?image|untitled|unnamed|download|new[ _-]?image)?[\s_\-.()\d]*$')
+                _unknown = [p for p in _all if _generic.match(p.stem)]
+                _skipped = len(_all) - len(_unknown)
+                if not _unknown:
+                    self.after(0, lambda n=_skipped: self.log(f'All {n} reference image(s) already have names - nothing to label', FG2))
+                    return
+                self.after(0, lambda: self.log(f'🔍 Scanning {len(_unknown)} image(s) with Gemini Vision ({_skipped} already named, skipped)...', FG2))
                 _key = self.cfg.get('key_gemini','').strip()
                 if not _key:
                     self.after(0, lambda: self.log('⚠ Need a Gemini key in Settings to scan images', YELLOW))
@@ -15914,7 +15960,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 ('faster_whisper','faster-whisper', 'CUDA/CPU transcription fallback'),
                 ('yt_dlp',        'yt-dlp',         'Video downloader'),
                 ('cv2',           'opencv-python',  'Video frame processing'),
-                ('curl_cffi',     'curl-cffi==0.7.4', 'Kick/Cloudflare bypass — pinned v0.7.4'),
+                ('curl_cffi',     'curl-cffi',      'Kick/Cloudflare bypass — v0.10 to 0.16 (what yt-dlp accepts)'),
                 ('soundfile',     'soundfile',       'Audio processing for censor'),
                 ('imagehash',     'imagehash',       'Image deduplication for thumbnails'),
             ]
@@ -15939,12 +15985,22 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     ))
                     import subprocess as _sp3
                     _nodeps2 = pip_pkg in {'faster-whisper', 'openai-whisper'}
-                    _cmd2 = _pip_cmd([pip_pkg], ['--no-deps'] if _nodeps2 else [])
+                    # Use the registry's version range (e.g. curl-cffi >=0.10,<0.17) instead of a bare/unpinned name
+                    _ent2 = pm_entry(pip_pkg)
+                    _req2 = pm_requirement(_ent2) if _ent2 else pip_pkg
+                    _cmd2 = _pip_cmd([_req2], ['--no-deps'] if _nodeps2 else [])
                     if _cmd2 is None:
                         self.after(0, lambda: btn_widget.config(text='❌ No Python 3.12', bg=RED, fg=FG, state='normal')); return
-                    r2 = _sp3.run(_cmd2, capture_output=True, text=True, timeout=300)
+                    def _run_pip2(_c):
+                        # never let a timeout / decode error kill the worker: the row must always get its result
+                        try:
+                            return _sp3.run(_c, capture_output=True, text=True, encoding='utf-8',
+                                            errors='replace', timeout=1800)
+                        except Exception as _pe2:
+                            return type('R', (), {'returncode': 1, 'stderr': f'{type(_pe2).__name__}: {_pe2}'})()
+                    r2 = _run_pip2(_cmd2)
                     if r2.returncode != 0 and _nodeps2:
-                        r2 = _sp3.run(_pip_cmd([pip_pkg]), capture_output=True, text=True, timeout=300)
+                        r2 = _run_pip2(_pip_cmd([_req2]))
                     _ok2 = r2.returncode == 0
                     _ensure_pkgs_on_path()
                     def _done(ok=_ok2, pkg=pip_pkg, err=r2.stderr):
@@ -16027,6 +16083,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             self.set_busy(True)
             self.set_progress('⬇ Installing whisper.cpp...', pct=5)
             def _do():
+                global _WCPP_INSTALL_LOCK
                 try:
                     self.log('⬇ Installing whisper.cpp (GPU transcription)...', ACCENT2)
                     def _cb(msg):
@@ -16043,6 +16100,9 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                             self.after(0, lambda p=int(_pm.group(1)):
                                 self.set_progress(f'⬇ Downloading model... {p}%', pct=p))
                     auto_install_whispercpp(model_size='base', status_cb=_cb)
+                    # auto_install_whispercpp only logs on failure - verify the result before reporting success
+                    if not (_find_whispercpp() and _find_whispercpp_model('base')):
+                        raise RuntimeError('whisper.cpp install did not complete - see the [whisper.cpp] log lines above')
                     self.after(0, lambda: (
                         self.log('✅ whisper.cpp installed', GREEN),
                         self.set_busy(False),
@@ -16055,6 +16115,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                         self.set_busy(False),
                         self.set_progress('❌ whisper.cpp failed', pct=0)
                     ))
+                finally:
+                    _WCPP_INSTALL_LOCK = None   # the lock only blocks concurrent runs; a retry must be able to run
             import threading; threading.Thread(target=_do, daemon=True).start()
 
         def _install_model_ui(size):
@@ -16085,10 +16147,10 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     try:
                         import importlib as _il
                         _fw = _il.import_module('faster_whisper')
-                        _fw.WhisperModel(size, device='cpu', compute_type='int8',
-                                        download_root=str(_app_path('whisper_models')))
+                        # Fetch the CTranslate2 model only (no model load); this is NOT the ggml file
+                        _fw.download_model(size, cache_dir=str(_app_path('whisper_models')))
                         self.after(0, lambda: (
-                            self.log(f'✅ ggml-{size} ready', GREEN),
+                            self.log(f'✅ faster-whisper {size} model ready', GREEN),
                             self.set_progress(f'✅ whisper {size} model ready', pct=100),
                             _refresh_dep_display()
                         ))
@@ -16172,7 +16234,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             import threading as _thr_cuda
             def _do_cuda():
                 self.log('⬇ Installing whisper.cpp CUDA (cuBLAS) for NVIDIA GPU...', YELLOW)
-                self.log('Downloading ~150MB binary — no CUDA toolkit needed, just NVIDIA driver.', FG2)
+                self.log('Downloading ~460MB binary (cuBLAS 12.4) — this can take several minutes. No CUDA toolkit needed, just NVIDIA driver.', FG2)
                 import subprocess as _sp_cuda, sys as _sys_cuda, urllib.request as _ur_cuda, zipfile as _zf_cuda
 
                 _cuda_dir = _app_path('whisper_cpp_cuda')
@@ -16186,15 +16248,24 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 ]
                 _tmp_zip = _app_path('whisper_cuda_tmp.zip')
                 _downloaded = False
+                _tmp_part = _tmp_zip.with_name(_tmp_zip.name + '.part')
+                def _cuda_hook(count, block, total):
+                    if total > 0 and count % 200 == 0:
+                        _p = min(99, int(count * block / total * 100))
+                        self.after(0, lambda p=_p: self.set_progress(f'⬇ Downloading CUDA binary... {p}%', pct=p))
                 for _url in _cublas_urls:
                     try:
                         self.log(f'Trying: {_url.split("/")[-1]}', FG2)
-                        _ur_cuda.urlretrieve(_url, str(_tmp_zip))
-                        if _tmp_zip.exists() and _tmp_zip.stat().st_size > 1_000_000:
+                        # .part file: an interrupted download must never be mistaken for a finished zip
+                        _ur_cuda.urlretrieve(_url, str(_tmp_part), reporthook=_cuda_hook)
+                        if _tmp_part.exists() and _tmp_part.stat().st_size > 1_000_000:
+                            os.replace(str(_tmp_part), str(_tmp_zip))
                             _downloaded = True
                             break
                     except Exception as _de:
                         self.log(f'Failed: {_de}', YELLOW)
+                        try: _tmp_part.unlink(missing_ok=True)
+                        except Exception: pass
                         continue
 
                 if not _downloaded:
@@ -16227,13 +16298,17 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 _models_dir = _cuda_dir / 'models'
                 if not list(_models_dir.glob('ggml-*.bin')):
                     self.log('Downloading ggml-base.bin model (~142MB)...', FG2)
+                    _mpart = _models_dir / 'ggml-base.bin.part'
                     try:
                         _ur_cuda.urlretrieve(
                             'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
-                            str(_models_dir / 'ggml-base.bin'))
+                            str(_mpart))
+                        os.replace(str(_mpart), str(_models_dir / 'ggml-base.bin'))
                         self.log('✅ Model downloaded!', GREEN)
                     except Exception as _me:
                         self.log(f'Model download failed: {_me} — download manually in Settings', YELLOW)
+                        try: _mpart.unlink(missing_ok=True)
+                        except Exception: pass
 
                 if _dst.exists():
                     global _WHISPER_DEVICE_CACHE
