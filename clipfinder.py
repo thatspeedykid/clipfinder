@@ -2424,6 +2424,8 @@ def load_cfg():
             pass
         return {}
 
+_CFG_LOCK = threading.Lock()
+
 def save_cfg(d):
     try:
         # Keys that background workers persist through their own load_cfg()/save_cfg() round trip
@@ -4193,6 +4195,8 @@ class App(tk.Tk):
                 try: _p.kill()
                 except: pass
             _do_transcribe._active_procs = []
+            try: self._save_settings()
+            except Exception: pass
             try: self.destroy()
             except: pass
             import os as _osx; _osx._exit(0)
@@ -6677,9 +6681,16 @@ class App(tk.Tk):
 
         def _on_done():
             self._clip_dl_running = False
+            # _finish (queued earlier) already captured the flag on success; on failure/cancel
+            # it must not leak into the next Downloader-tab download.
+            self._load_after_dl = False
             try:
                 self._dl_cancel_clip_btn.pack_forget()
-                # Don't re-show download btn — URL replaced with file path
+                # On success the URL was replaced with the file path (button stays hidden);
+                # if the URL is still there the download failed/was cancelled - offer retry.
+                _still_url = self.v_video.get().strip()
+                if _still_url.startswith('http') and not Path(_still_url).exists():
+                    self._dl_btn.pack(side='right', padx=(2,0))
             except: pass
 
         import threading
@@ -6787,10 +6798,20 @@ class App(tk.Tk):
         _walk(self)
         self.after(600, lambda: _walk(self))
 
-    def _quit(self):
-        # Flush current key for current provider
-        if hasattr(self, '_keys'):
-            self._keys[self.v_provider.get()] = self.v_key.get()
+    def _save_settings(self):
+        # (self._keys is already kept in sync with v_key by _on_key_changed and the
+        #  Settings tab's _save_keys - do not re-flush v_key here, it can be stale)
+        # Don't persist the grey placeholder text as real settings
+        _ctx = self._ctx_text()
+        _nm = self.v_names.get().strip() if hasattr(self, 'v_names') else ''
+        if _nm == 'Mizkif, xQc, HasanAbi...': _nm = ''
+        # Keep values that worker threads wrote straight to disk (not into self.cfg)
+        try:
+            _disk = load_cfg()
+            for _k in ('launch_count', 'groq_tpd_until', 'dead_models'):
+                if _k in _disk: self.cfg[_k] = _disk[_k]
+        except Exception:
+            pass
         # Merge everything into self.cfg so nothing gets lost
         self.cfg.update({
             'provider':          self.v_provider.get(),
@@ -6810,12 +6831,12 @@ class App(tk.Tk):
             'auto_load':         self.v_auto_load.get() if hasattr(self, 'v_auto_load') else True,
             'auto_transcribe':   self.v_auto_transcribe.get() if hasattr(self, 'v_auto_transcribe') else False,
             'thumb_outdir':      self.thumb_outdir_var.get() if hasattr(self, 'thumb_outdir_var') else '',
-            'studio_scan_dir':   self.v_scan_folder.get() if hasattr(self, 'studio_scan_dir') else '',
-            'studio_upscale_out': self.v_up_out.get() if hasattr(self, 'studio_upscale_out') else '',
+            'scan_folder':       self.v_scan_folder.get() if hasattr(self, 'v_scan_folder') else '',
+            'up_out':            self.v_up_out.get() if hasattr(self, 'v_up_out') else '',
             'interview_mode':    self.interview_mode.get() if hasattr(self, 'interview_mode') else False,
-            'interview_names':   self.v_names.get().strip() if hasattr(self, 'v_names') else '',
+            'interview_names':   _nm,
             'app_mode':          self.app_mode.get() if hasattr(self, 'app_mode') else 'normal',
-            'video_context':     self.v_context.get('1.0','end').strip() if hasattr(self, 'v_context') else '',
+            'video_context':     _ctx,
             'auto_length_mode':  self.auto_length_mode.get() if hasattr(self, 'auto_length_mode') else 'short',
             'auto_max_min':      self.auto_max_min.get() if hasattr(self, 'auto_max_min') else '2',
             'auto_order':        self.auto_order.get() if hasattr(self, 'auto_order') else 'viral',
@@ -6826,12 +6847,16 @@ class App(tk.Tk):
             'censor_words':      self._censor_words if hasattr(self, '_censor_words') else [],
         })
         save_cfg(self.cfg)
+
+    def _quit(self):
+        self._save_settings()
         global _GPU_ENCODER_CACHE
         _GPU_ENCODER_CACHE = None
         self.destroy()
 
     def log(self, msg, color=None):
-        print(f'[CF] {msg}')
+        try: print(f'[CF] {msg}')
+        except Exception: pass  # e.g. UnicodeEncodeError on a cp1252 redirected stdout
         # Buffer all messages so log window can show history when opened
         if not hasattr(self, '_log_buffer'):
             self._log_buffer = []
@@ -6863,6 +6888,7 @@ class App(tk.Tk):
     def set_busy(self, busy):
         if busy:
             self._cancel_requested = False  # only reset when STARTING a new task
+            _do_transcribe._cancelled = False  # drop a stale cancel left by a previous run
         state = 'disabled' if busy else 'normal'
         try: self.go_btn.config(state=state)
         except: pass
@@ -7442,21 +7468,26 @@ class App(tk.Tk):
     def validate(self, need_ai=True, need_outdir=True):
         # Ensure pkgs/ is on path then check for whisper
         _ensure_pkgs_on_path()
-        import importlib as _ilv
+        import importlib.util as _ilv
         _has_whisper = False
-        # First try importing
+        # find_spec only locates the package - a real import here would load
+        # ctranslate2 etc. on the UI thread (multi-second freeze, OSError on bad DLLs)
         for _wmod in ('faster_whisper', 'whisper'):
             try:
-                _ilv.import_module(_wmod)
-                _has_whisper = True
-                break
-            except ImportError:
+                if _ilv.find_spec(_wmod) is not None:
+                    _has_whisper = True
+                    break
+            except Exception:
                 pass
         # Also check by folder presence in PKGS_DIR (import may fail due to deps
         # but the package files are there and will work once deps load)
         if not _has_whisper:
             _has_whisper = (any(PKGS_DIR.glob('faster_whisper*')) or
                            any(PKGS_DIR.glob('whisper*')))
+        # whisper.cpp alone is enough (_do_transcribe prefers it)
+        if not _has_whisper:
+            try: _has_whisper = bool(_find_whispercpp())
+            except Exception: pass
         if not _has_whisper:
             _msg = (
                 'Whisper (transcription engine) is not installed.\n\n'
@@ -7751,6 +7782,8 @@ class App(tk.Tk):
         }
         self.log(f'🌡 Previewing zone {clip["start"]} → {clip["end"]} (score {zone["score"]}/10)', ACCENT)
         self._open_clip_preview(vid, clip)
+
+    def _hm_get_selected_transcript(self):
         """Return transcript lines filtered to only selected heatmap zones.
         Called by _start() when heatmap mode is on and zones are selected."""
         if not self._hm_zones or not any(z['selected'] for z in self._hm_zones):
@@ -7785,14 +7818,23 @@ class App(tk.Tk):
 
     def _transcribe_only(self):
         if self.running: return
+        _t = getattr(self, '_worker_thread', None)
+        if _t is not None and _t.is_alive():
+            messagebox.showinfo('Still stopping', 'The previous task is still shutting down. Try again in a few seconds.')
+            return
         if not self.validate(need_ai=False, need_outdir=False): return
         self.running = True
         self.set_busy(True)
         self.log('Starting transcription...')
-        threading.Thread(target=self._run_transcribe, args=(False,), daemon=True).start()
+        self._worker_thread = threading.Thread(target=self._run_transcribe, args=(False,), daemon=True)
+        self._worker_thread.start()
 
     def _start(self):
         if self.running: return
+        _t = getattr(self, '_worker_thread', None)
+        if _t is not None and _t.is_alive():
+            messagebox.showinfo('Still stopping', 'The previous task is still shutting down. Try again in a few seconds.')
+            return
         if not self.validate(need_ai=True): return
         mode = self.app_mode.get()
         if mode == 'interview':
@@ -7807,7 +7849,8 @@ class App(tk.Tk):
         self.set_busy(True)
         self._show_empty()
         self.log('Starting...')
-        threading.Thread(target=self._run_transcribe, args=(True,), daemon=True).start()
+        self._worker_thread = threading.Thread(target=self._run_transcribe, args=(True,), daemon=True)
+        self._worker_thread.start()
 
 
     def _run_auto_edit_v2(self):
@@ -7931,6 +7974,7 @@ class App(tk.Tk):
             self._last_transcribed_vid = str(vid)  # store immediately for thumbnail rendering
             model_size = self.v_whisper.get()
             # Store video duration for short-video clip length adjustment
+            self._current_video_duration = 0  # reset so a previous video's value never leaks in
             try:
                 import subprocess as _ffp_dur
                 _ff_dur = find_ffmpeg() or 'ffmpeg'
@@ -8000,7 +8044,7 @@ class App(tk.Tk):
             _use_gpu_flag = _use_gpu_flag.get() if _use_gpu_flag else True
 
             _ff = ensure_ffmpeg()
-            _ctx_prompt = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
+            _ctx_prompt = self._ctx_text()
 
             # Real-time progress from transcription engine
             # Falls back to animated dots if no timestamps available
@@ -8076,9 +8120,7 @@ class App(tk.Tk):
                             _primary = self.cfg.get('key_gemini', '').strip()
                             _extras = [k.strip() for k in self.cfg.get('key_gemini_extra','').split(',') if k.strip()]
                             _gemini_keys = ([_primary] if _primary else []) + _extras
-                            _instructions = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
-                            _ph_texts = ['ignore last hour', 'girl in white shirt', 'e.g. ignore']
-                            if any(_instructions.startswith(p) for p in _ph_texts): _instructions = ''
+                            _instructions = self._ctx_text()
                             _vision_hits = self._run_vision_mode(vid, _instructions, _gemini_keys)
                             if _vision_hits:
                                 _include_hits = _vision_hits.get('include', [])
@@ -8226,6 +8268,15 @@ class App(tk.Tk):
             return raw
         raise ValueError(f'Unknown lib: {lib}')
 
+    def _ctx_text(self):
+        """Instructions box text, or '' when it only holds the grey placeholder."""
+        if not hasattr(self, 'v_context'):
+            return ''
+        _t = self.v_context.get('1.0', 'end').strip()
+        _phs = ('ignore last hour · skip gambling · focus on drama · only clips of [name]  (transcript-based only)',
+                'girl in white shirt · gambling scenes · outdoor moments · funny reactions  (visual AI — sees the video)')
+        return '' if _t in _phs else _t
+
     def _call_provider(self, prov_name, transcript_chunk):
         """Call a single provider, rotating through all configured keys. Returns clip list or raises."""
         data  = PROVIDERS[prov_name]
@@ -8280,7 +8331,7 @@ class App(tk.Tk):
             self.log(f'[{prov_name}] Using {len(_key_pool)}/{_total_all} keys ({_disabled_count} disabled in Settings)', FG2)
 
         # Build prompt
-        ctx_raw = self.v_context.get('1.0','end').strip() if hasattr(self,'v_context') else ''
+        ctx_raw = self._ctx_text()
 
         # Build smart context block — parse user instructions as AI directives
         context_block = ''
@@ -8383,6 +8434,7 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                     last_merr = None
                     raw = None
                     _all_models_rl = True  # assume all rate-limited until one succeeds
+                    _empty_err = None
                     for try_model in try_models:
                         try:
                             resp = _gemini_generate(client, try_model, prompt,
@@ -8410,6 +8462,8 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                         # All models rate-limited/empty for this key — raise so outer loop tries next key
                         self.log(f'[Google Gemini (Free)] Key {_ki+1}: no model returned a result', YELLOW)
                         raise last_merr
+                    if raw is None and _empty_err is not None:
+                        raise _empty_err
                     if raw is None:
                         raise Exception('All Gemini models unavailable (404) — update models list')
 
@@ -8458,9 +8512,8 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                                         self._groq_tpd_exhausted = True
                                         self.log('⚠ Groq daily token limit reached — skipping Groq until tomorrow', YELLOW)
                                         import time as _tpd_t
-                                        _tpd_cfg = load_cfg()
-                                        _tpd_cfg['groq_tpd_until'] = _tpd_t.time() + 86400
-                                        save_cfg(_tpd_cfg)
+                                        self.cfg['groq_tpd_until'] = _tpd_t.time() + 86400
+                                        save_cfg(self.cfg)
                                     break
                                 continue
                             if '403' in _ges and 'access denied' in _ges.lower():
@@ -8469,9 +8522,8 @@ Before outputting EACH clip, verify it passes ALL instructions above. If it fail
                                     self._groq_tpd_exhausted = True
                                     self.log('⚠ Groq access denied (403) — daily limit or account issue. Skipping until tomorrow.', YELLOW)
                                     import time as _tpd_t2
-                                    _tpd_cfg2 = load_cfg()
-                                    _tpd_cfg2['groq_tpd_until'] = _tpd_t2.time() + 86400
-                                    save_cfg(_tpd_cfg2)
+                                    self.cfg['groq_tpd_until'] = _tpd_t2.time() + 86400
+                                    save_cfg(self.cfg)
                                 break
                             if _is_model_gone_error(_ge) or ('400' in _ges and any(x in _ges.lower() for x in ['decommissioned', 'no longer support', 'deprecated', 'not found', 'does not exist'])):
                                 # 400 model_decommissioned or 404 model_not_found
@@ -9098,10 +9150,7 @@ Return ONLY the JSON array, no other text."""
             # "skip first 30 minutes", "only process 1:00:00 to 2:00:00"
             ctx_raw = ''
             if hasattr(self, 'v_context'):
-                _ph_texts = ['ignore last hour', 'girl in white shirt', 'e.g. ignore', 'skip gambling', 'outdoor moments']
-                _raw_ctx = self.v_context.get('1.0','end').strip()
-                if not any(_raw_ctx.startswith(p) for p in _ph_texts):
-                    ctx_raw = _raw_ctx
+                ctx_raw = self._ctx_text()
 
             if ctx_raw and lines:
                 import re as _re_inst
@@ -9183,9 +9232,15 @@ Return ONLY the JSON array, no other text."""
                     and any(z['selected'] for z in getattr(self, '_hm_zones', []))):
                 _hm_filtered = self._hm_get_selected_transcript()
                 if _hm_filtered:
-                    full_text = _hm_filtered
-                    n_sel = sum(1 for z in self._hm_zones if z['selected'])
-                    self.log(f'🌡 Heatmap: analyzing {n_sel} selected zones only', ACCENT)
+                    # Keep only the selected-zone lines that survived earlier filters,
+                    # and let them drive the chunking/assignments below.
+                    _hm_set = set(_hm_filtered.splitlines())
+                    _hm_lines = [_l for _l in lines if _l in _hm_set]
+                    if _hm_lines:
+                        lines = _hm_lines
+                        full_text = '\n'.join(lines)
+                        n_sel = sum(1 for z in self._hm_zones if z['selected'])
+                        self.log(f'🌡 Heatmap: analyzing {n_sel} selected zones only', ACCENT)
 
             # Split into chunks by character count, respecting line boundaries
             chunks = []
@@ -9350,7 +9405,7 @@ Return ONLY the JSON array, no other text."""
                 if 'gemini' in prov.lower():
                     limit = 120000
                 elif 'groq' in prov.lower():
-                    limit = 48000
+                    limit = 14000  # keep in sync with CHARS_PER_CHUNK (Groq prompt cap in _call_provider)
                 else:
                     limit = 7500
                 result, buf, buf_len = [], [], 0
