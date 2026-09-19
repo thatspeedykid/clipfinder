@@ -1,5 +1,42 @@
 # ClipFinder Changelog
 
+## v1.4.0.0 — September 2026 (the revamp)
+
+### 🔄 Update system (rewritten)
+- Package registry with per-package policy (latest / compatible range / keep), groups that must move together (pydantic + pydantic-core, numba + llvmlite, …), protected packages, conflict detection and one-click Repair
+- Updates are **staged, import-tested in isolation and swapped in at the next start** (RECORD-driven file moves, rollback on failure); single-instance lock so a running copy is never updated underneath itself
+- App self-update: validated `clipfinder.py`, timestamped backup, one-click rollback, auto-rollback guard if the new version fails to start; background update check
+- Isolated **Demucs engine** (own venv with its own PyTorch) instead of importing torch/demucs into the app process
+- Settings → **Update Center** replaces "Update All Packages"; yt-dlp is no longer hard-pinned; `curl-cffi` range 0.10–0.16; startup installs only what is missing
+
+### ⬇️ Downloader
+- **Kick VOD/clip downloads fixed** for the new UUIDv7 ids and `web.kick.com` API (Chrome-impersonated requests, public HLS master)
+- **YouTube:** JS runtime for yt-dlp (Node ≥ 22, portable Node 24 downloaded on demand; ignores the EOL Node 20 older builds installed); removed ios/web client hacks and the bgutil plugin
+- Audio-only downloads no longer forced through `-c:a aac` (mp3 was broken); rename keeps the real extension; cancel stops the retry loop; `_cftmp_*` partials cleaned; queue summary counts real successes; host-based site detection; browser cookies actually passed to yt-dlp; `outdir` NameError in the Instagram fallback
+- Twitch: anonymous first (stale cookies caused HTTP 401), friendly "video does not exist"
+- **Auto-transcribe** checkbox (exclusive with auto-load)
+- **Channel browser** (Downloader → Browse channels): Kick VODs/Clips, Twitch VODs/Clips, YouTube Streams/Videos/Shorts with thumbnails; Kick tab removed from Clip Finder
+
+### 🚀 Post Studio (rewritten)
+- Master caption prompt (TikTok / Instagram / YouTube Shorts / X), strict output contract + tolerant parser, hard-rule enforcement and rules-check panel, SeeEx mode, creator tag reminders, iteration buttons, version history, per-person handle memory; provider order Gemini → OpenRouter → Groq
+- Removed the old 3-option tweet generator (orphaned code that raised NameError)
+
+### 🤖 AI
+- Groq: `llama-3.3-70b` / `llama-3.1-8b` (shut down 2026-08-16) → `gpt-oss-120b/20b`, `qwen3.8-27b`; Gemini 3.5-flash-lite / 3.8-flash with per-family thinking config; OpenRouter free list rebuilt (`openrouter/free` router)
+- google-genai 2.x, groq 1.x, openai 3.x call shapes (`_gemini_complete`, `_groq_complete`, `_openrouter_complete`), None-safe responses, retired-model and rate-limit fallthrough
+- Groq free-tier prompt budgeting (8K tokens/min): smaller chunks, transcript trimmed instead of the instructions
+
+### 🎬 Features & fixes
+- 9:16 face tracking via OpenCV YuNet (OpenCV 5 removed Haar cascades, mediapipe's legacy API is gone); no runtime pip install
+- Music Removal on the isolated engine: progress, cancel, summary, engine status
+- ~150 audited defects fixed across transcription, Auto Edit, Censor, Clip Finder, export/queue/subtitles, Editor, Studio, Thumbnails, Settings (see git log for the per-area commits): invalid whisper.cpp flag (`-vth`) that forced CPU fallback, stale cancel flags, atomic config writes with `.bak`, PBKDF2 key export, heatmap crash, placeholder text sent to the AI, censor word matching ("Scunthorpe"), download-complete popup NameError, and more
+- Launch: ~10 s hang removed (no eager ML imports, no unpinned installs on the UI path)
+
+### 📦 Build & release
+- `tools/release_version.py` is the single source of truth for the version; CI fails on any mismatch and verifies the version inside the built installer
+- Slimmer installer (heavy optional packages install on demand); uninstaller removes package caches
+- Node/Python pins updated (embedded Python 3.12.x)
+
 ## v1.3.9.0 — July 2026
 
 ### 🤖 AI Providers — Refreshed & Verified
