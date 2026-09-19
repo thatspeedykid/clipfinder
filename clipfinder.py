@@ -2276,6 +2276,259 @@ def _do_transcribe(vid, model_size, initial_prompt=None, ffmpeg_path=None, progr
         return {'segments': out_segs, 'language': result.get('language','en')}
 
 
+# ── Kick.com resolver ─────────────────────────────────────────────────────────
+# In 2026 Kick moved public VOD ids to UUIDv7 and a new web API. The legacy
+# kick.com/api/v1/video/<uuid> endpoint (still what yt-dlp's extractor calls)
+# answers 404 for those ids, so ClipFinder resolves the HLS master playlist
+# itself and hands yt-dlp / ffmpeg a plain m3u8 URL. The playlist is public,
+# so no login is needed for normal VODs.
+_KICK_UUID    = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+_KICK_VOD_RE  = re.compile(r'(?:^|//)(?:www\.)?kick\.com/(?:(?P<slug>[\w\-]+)/videos|video)/(?P<vid>' + _KICK_UUID + ')', re.I)
+_KICK_CLIP_RE = re.compile(r'(?:/clips/|[?&]clip=)(?P<clip>clip_[\w\-]+)', re.I)
+_KICK_PAGE_RE = re.compile(r'^https?://(?:www\.)?kick\.com/', re.I)   # page URLs only - not the stream./clips. CDN hosts
+_KICK_UA      = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                 'Chrome/131.0.0.0 Safari/537.36')
+
+
+class KickError(Exception):
+    """A Kick URL could not be resolved. The message is written for the end user."""
+
+
+def _kick_get(url, token=None, timeout=20):
+    """GET a Kick URL -> (http_status, body_text).
+
+    Kick sits behind Cloudflare, so use curl_cffi with Chrome TLS impersonation when it
+    is installed (newest target first, older ones for old curl_cffi builds); otherwise
+    fall back to plain requests."""
+    hdrs = {'Accept': 'application/json, text/plain, */*', 'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://kick.com/', 'Origin': 'https://kick.com'}
+    if token:
+        hdrs['Authorization'] = f'Bearer {token}'
+    try:
+        from curl_cffi import requests as _cr
+    except Exception:
+        _cr = None
+    if _cr is not None:
+        for target in ('chrome', 'chrome131', 'chrome124', 'chrome120'):
+            try:
+                r = _cr.get(url, headers=hdrs, impersonate=target, timeout=timeout)
+                return r.status_code, r.text
+            except Exception as e:
+                msg = str(e).lower()
+                if 'impersonat' in msg or 'not supported' in msg or 'unknown' in msg:
+                    continue      # this curl_cffi build does not know that target
+                break             # network / TLS problem - try plain requests
+    import requests as _rq
+    r = _rq.get(url, headers={**hdrs, 'User-Agent': _KICK_UA}, timeout=timeout)
+    return r.status_code, r.text
+
+
+def _kick_json(url, token=None, timeout=20):
+    """GET + parse JSON -> (status, parsed_or_None)."""
+    status, text = _kick_get(url, token, timeout)
+    try:
+        return status, json.loads(text)
+    except Exception:
+        return status, None
+
+
+def _kick_session_token(cookies_path):
+    """Kick's session_token (used as a Bearer token) from a Netscape cookies.txt, or None."""
+    try:
+        if not cookies_path or not Path(cookies_path).exists():
+            return None
+        import http.cookiejar as _cj, urllib.parse as _up
+        jar = _cj.MozillaCookieJar(str(cookies_path))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        for ck in jar:
+            if ck.name == 'session_token' and 'kick.com' in ck.domain:
+                return _up.unquote(ck.value)
+    except Exception:
+        pass
+    return None
+
+
+def _kick_secs(value, ms=False):
+    """Kick durations: seconds from the current web API, milliseconds from the legacy API."""
+    try:
+        v = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return int(v / 1000) if ms else int(v)
+
+
+def _kick_expired(iso):
+    """True if an ISO-8601 timestamp such as original_expires_at is already in the past."""
+    try:
+        import datetime as _dt
+        t = _dt.datetime.fromisoformat(str(iso).replace('Z', '+00:00'))
+        return t < _dt.datetime.now(_dt.timezone.utc)
+    except Exception:
+        return False
+
+
+def kick_resolve(url, token=None, log=None):
+    """Resolve a kick.com VOD or clip page URL into a direct HLS/MP4 URL.
+
+    Returns {'kind': 'vod'|'clip', 'id', 'stream_url', 'title', 'channel',
+    'duration' (seconds), 'is_live', 'expires'}. Raises KickError with an
+    actionable message when nothing works. `log(msg, color)` is optional."""
+    _log = log or (lambda *_a, **_k: None)
+    m = _KICK_CLIP_RE.search(url)
+    if m:
+        return _kick_resolve_clip(m.group('clip'), token, _log)
+    m = _KICK_VOD_RE.search(url)
+    if m:
+        return _kick_resolve_vod(m.group('slug'), m.group('vid').lower(), url, token, _log)
+    raise KickError('That does not look like a Kick VOD or clip link.\n'
+                    'Expected https://kick.com/<channel>/videos/<id> or .../clips/clip_<id>.')
+
+
+def _kick_resolve_clip(clip_id, token, log):
+    codes = []
+    for ep in (f'https://kick.com/api/v2/clips/{clip_id}/play', f'https://kick.com/api/v2/clips/{clip_id}'):
+        try:
+            st, d = _kick_json(ep, token)
+        except Exception as e:
+            codes.append(f'error {str(e)[:50]}')
+            continue
+        codes.append(str(st))
+        clip = d.get('clip') if isinstance(d, dict) and isinstance(d.get('clip'), dict) else (d if isinstance(d, dict) else {})
+        stream = clip.get('clip_url') or clip.get('video_url')
+        if st == 200 and stream:
+            ch = clip.get('channel') or {}
+            return {'kind': 'clip', 'id': clip_id, 'stream_url': stream, 'title': clip.get('title'),
+                    'channel': ch.get('slug') or ch.get('username'), 'duration': clip.get('duration'),
+                    'is_live': False, 'expires': None}
+    log(f'Kick clip lookup: HTTP {", ".join(codes)}', YELLOW)
+    if '403' in codes:
+        raise KickError('Kick blocked the request (HTTP 403 / Cloudflare).\n'
+                        'Add a cookies.txt exported from a logged-in kick.com session in the Downloader settings, '
+                        'or update curl-cffi via Settings -> Update All Packages.')
+    if '404' in codes:
+        raise KickError('Kick clip not found - it may have been deleted, or the link is wrong.')
+    raise KickError(f'Could not load the Kick clip (HTTP {", ".join(codes)}).')
+
+
+def _kick_resolve_vod(slug, vid, page_url, token, log):
+    notes = []                     # what each attempt returned - shown if everything fails
+    hints = {'private': False, 'expired': False}
+
+    def _result(data, stream, ms=False):
+        ch  = data.get('channel') or {}
+        ls  = data.get('livestream') or {}
+        lch = ls.get('channel') or {}
+        return {'kind': 'vod', 'id': vid, 'stream_url': stream,
+                'title': data.get('title') or data.get('session_title') or ls.get('session_title'),
+                'channel': ch.get('slug') or lch.get('slug') or slug,
+                'duration': _kick_secs(data.get('duration') or ls.get('duration'), ms),
+                'is_live': bool(data.get('is_live') or ls.get('is_live')),
+                'expires': data.get('original_expires_at')}
+
+    # 1) Current web API (UUIDv7 ids). Needs the numeric channel id, so look the slug up first.
+    chan_id = None
+    if slug:
+        try:
+            st, d = _kick_json(f'https://kick.com/api/v2/channels/{slug}', token)
+            notes.append(f'channel lookup HTTP {st}')
+            if st == 200 and isinstance(d, dict):
+                chan_id = d.get('id')
+            elif st == 404:
+                raise KickError(f'Kick channel "{slug}" was not found - check the link.')
+        except KickError:
+            raise
+        except Exception as e:
+            notes.append(f'channel lookup failed: {str(e)[:60]}')
+    if chan_id:
+        try:
+            st, d = _kick_json(f'https://web.kick.com/api/v1/channels/{chan_id}/videos/{vid}', token)
+            notes.append(f'web API HTTP {st}')
+            data = d.get('data') if isinstance(d, dict) else None
+            if st == 200 and isinstance(data, dict):
+                if data.get('recording_url'):
+                    return _result(data, data['recording_url'])
+                hints['private'] = data.get('status') not in (None, '', 'public')
+                hints['expired'] = _kick_expired(data.get('original_expires_at'))
+        except Exception as e:
+            notes.append(f'web API failed: {str(e)[:60]}')
+
+    # 2) Legacy id (UUIDv4 links, and old kick.com/video/<uuid> links).
+    try:
+        st, d = _kick_json(f'https://kick.com/api/v1/video/{vid}', token)
+        notes.append(f'legacy API HTTP {st}')
+        if st == 200 and isinstance(d, dict) and d.get('source'):
+            return _result(d, d['source'], ms=True)
+    except Exception as e:
+        notes.append(f'legacy API failed: {str(e)[:60]}')
+
+    # 3) Last resort: the page itself embeds the recording URL in its payload.
+    try:
+        st, html = _kick_get(page_url, token, 25)
+        notes.append(f'page HTTP {st}')
+        if st == 200:
+            t = html.replace('\\"', '"').replace('\\/', '/')
+            m = re.search(r'"recording_url":"(https?://[^"]+?\.m3u8[^"]*)"', t)
+            if m:
+                md = re.search(r'<meta name="description" content="([^"]*)"', html)
+                return {'kind': 'vod', 'id': vid, 'stream_url': m.group(1),
+                        'title': md.group(1) if md else None, 'channel': slug,
+                        'duration': 0, 'is_live': False, 'expires': None}
+    except Exception as e:
+        notes.append(f'page failed: {str(e)[:60]}')
+
+    log('Kick VOD lookup: ' + '; '.join(notes), YELLOW)
+    if hints['expired']:
+        raise KickError('This Kick VOD has expired - Kick removes VODs after about 30 days.')
+    if hints['private']:
+        raise KickError('This Kick VOD is not public (subscribers-only or private).\n'
+                        'Add a cookies.txt exported from a kick.com account that can watch it.')
+    if any('HTTP 403' in n for n in notes):
+        raise KickError('Kick blocked the request (HTTP 403 / Cloudflare).\n'
+                        'Add a cookies.txt exported from a logged-in kick.com session in the Downloader settings, '
+                        'or update curl-cffi via Settings -> Update All Packages.')
+    if any('HTTP 404' in n for n in notes) and not any('failed' in n for n in notes):
+        raise KickError('Kick VOD not found - it may have been deleted or expired, or the link is wrong.')
+    raise KickError('Could not get a stream URL for this Kick VOD (' + '; '.join(notes) + ').')
+
+
+def kick_list_vods(slug, token=None):
+    """A channel's recent VODs, newest first, as dicts for the VOD browser:
+    id, url, title, duration (seconds), created (YYYY-MM-DD), views, thumb, is_live."""
+    st, d = _kick_json(f'https://kick.com/api/v2/channels/{slug}', token)
+    if st == 404:
+        raise KickError(f'Kick channel "{slug}" was not found.')
+    if st != 200 or not isinstance(d, dict) or not d.get('id'):
+        raise KickError(f'Kick channel lookup failed (HTTP {st}).' +
+                        ('\nKick blocked the request - add a cookies.txt in Downloader settings.' if st == 403 else ''))
+    out = []
+    st, dd = _kick_json(f'https://web.kick.com/api/v1/channels/{d["id"]}/videos', token)
+    rows = dd.get('data') if st == 200 and isinstance(dd, dict) else None
+    for v in (rows if isinstance(rows, list) else []):
+        vid = v.get('id')
+        if not vid:
+            continue
+        thumb = v.get('thumbnail')
+        thumb = thumb.get('src', '') if isinstance(thumb, dict) else (thumb or '')
+        out.append({'id': vid, 'url': f'https://kick.com/{slug}/videos/{vid}',
+                    'title': v.get('title') or 'Untitled VOD', 'duration': _kick_secs(v.get('duration')),
+                    'created': (v.get('start_time') or '')[:10], 'views': int(v.get('viewer_count') or 0),
+                    'thumb': thumb, 'is_live': bool(v.get('is_live'))})
+    if not out:        # legacy list: UUIDv4 ids, millisecond durations
+        st, ld = _kick_json(f'https://kick.com/api/v2/channels/{slug}/videos', token)
+        for v in (ld if isinstance(ld, list) else []):
+            vid = (v.get('video') or {}).get('uuid')
+            if not vid:
+                continue
+            thumb = v.get('thumbnail')
+            thumb = thumb.get('src', '') if isinstance(thumb, dict) else (thumb or '')
+            out.append({'id': vid, 'url': f'https://kick.com/{slug}/videos/{vid}',
+                        'title': v.get('session_title') or 'Untitled VOD',
+                        'duration': _kick_secs(v.get('duration'), ms=True),
+                        'created': (v.get('start_time') or v.get('created_at') or '')[:10],
+                        'views': int(v.get('views') or 0), 'thumb': thumb, 'is_live': bool(v.get('is_live'))})
+    return out
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -2414,6 +2667,12 @@ class App(tk.Tk):
         self.v_cookies     = tk.StringVar(value=self.cfg.get('cookies_file', ''))
         self.v_cookies_browser = tk.StringVar(value=self.cfg.get('cookies_browser', ''))
         self.v_auto_load   = tk.BooleanVar(value=self.cfg.get('auto_load', True))
+        self.v_auto_transcribe = tk.BooleanVar(value=self.cfg.get('auto_transcribe', False))
+        # Auto-load and auto-transcribe are mutually exclusive (both off = just show the
+        # "Download complete" popup). Guard against a config that has both switched on.
+        if self.v_auto_load.get() and self.v_auto_transcribe.get():
+            self.v_auto_transcribe.set(False)
+        self._pending_transcribe = None   # file waiting for a download queue to finish
         self._last_dl_path = None
         self._dl_cancel_requested = False
         # Init censor words from config so clip-finder censor works before censor tab opens
@@ -2425,6 +2684,14 @@ class App(tk.Tk):
         self.v_cookies.trace_add('write', self._dl_autosave)
         self.v_dl_quality.trace_add('write', self._dl_autosave)
         self.v_auto_load.trace_add('write', self._dl_autosave)
+        self.v_auto_transcribe.trace_add('write', self._dl_autosave)
+        def _make_exclusive(changed, other):
+            def _cb(*_):
+                if changed.get() and other.get():
+                    other.set(False)
+            return _cb
+        self.v_auto_load.trace_add('write', _make_exclusive(self.v_auto_load, self.v_auto_transcribe))
+        self.v_auto_transcribe.trace_add('write', _make_exclusive(self.v_auto_transcribe, self.v_auto_load))
 
         # Apply scrollbar styling BEFORE any widgets are created
         self.option_add('*Scrollbar.background',        BG3)
@@ -4036,75 +4303,8 @@ class App(tk.Tk):
 
         def _fetch():
             try:
-                import json as _js
-                _data = None
-
-                # Try curl_cffi with full browser impersonation first
-                try:
-                    from curl_cffi import requests as _cffi
-                    _hdrs = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                        'Accept': 'application/json, text/plain, */*',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'Referer': 'https://kick.com/',
-                        'Origin': 'https://kick.com',
-                        'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124"',
-                        'sec-ch-ua-mobile': '?0',
-                        'sec-ch-ua-platform': '"Windows"',
-                        'sec-fetch-dest': 'empty',
-                        'sec-fetch-mode': 'cors',
-                        'sec-fetch-site': 'same-origin',
-                    }
-                    _kw = {'headers': _hdrs, 'impersonate': 'chrome124', 'timeout': 15}
-                    if cookies and Path(cookies).exists():
-                        _kw['cookies'] = cookies
-                    # First get channel info to confirm slug exists
-                    _ch_url = f'https://kick.com/api/v2/channels/{slug}'
-                    _ch = _cffi.get(_ch_url, **_kw)
-                    if _ch.status_code == 200:
-                        _vod_url = f'https://kick.com/api/v2/channels/{slug}/videos?page=1&limit=20'
-                        _resp = _cffi.get(_vod_url, **_kw)
-                        if _resp.status_code == 200:
-                            _data = _resp.json()
-                except Exception as _cffi_err:
-                    print(f'[Kick] curl_cffi failed: {_cffi_err}')
-
-                # Fallback: parse cookies.txt and use requests with full session
-                if _data is None:
-                    try:
-                        import urllib.request as _ur, json as _js, ssl as _ssl, http.cookiejar as _cj
-                        _url = f'https://kick.com/api/v2/channels/{slug}/videos?page=1&limit=20'
-                        _hdrs2 = {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                            'Accept': 'application/json, text/plain, */*',
-                            'Accept-Language': 'en-US,en;q=0.9',
-                            'Referer': 'https://kick.com/',
-                            'Origin': 'https://kick.com',
-                        }
-                        _req2 = _ur.Request(_url, headers=_hdrs2)
-                        # Load cookies if available
-                        if cookies and Path(cookies).exists():
-                            _jar = _cj.MozillaCookieJar(cookies)
-                            try:
-                                _jar.load(ignore_discard=True, ignore_expires=True)
-                                _opener = _ur.build_opener(_ur.HTTPCookieProcessor(_jar))
-                                with _opener.open(_req2, timeout=15) as _r:
-                                    _data = _js.loads(_r.read().decode())
-                            except Exception as _cj_err:
-                                print(f'[Kick] Cookie jar failed: {_cj_err}')
-                        if _data is None:
-                            _ctx2 = _ssl.create_default_context()
-                            with _ur.urlopen(_req2, timeout=15, context=_ctx2) as _r:
-                                _data = _js.loads(_r.read().decode())
-                    except Exception as _fb_err:
-                        raise Exception(
-                            f'Kick API blocked — try adding cookies.txt in Settings → Downloader.\n'
-                            f'Export cookies from kick.com using a browser extension like "Get cookies.txt LOCALLY".\n'
-                            f'(Error: {str(_fb_err)[:80]})'
-                        )
-
-                vods = _data if isinstance(_data, list) else _data.get('data', _data.get('videos', []))
+                _tok = _kick_session_token(cookies if _cookies_ok else '')
+                vods = kick_list_vods(slug, token=_tok)
                 self.after(0, lambda v=vods: self._kick_render_vods(v, slug))
             except Exception as e:
                 self.after(0, lambda err=e: self._kick_render_error(str(err)))
@@ -4122,16 +4322,17 @@ class App(tk.Tk):
         tk.Label(self._kick_list_frame,
                  text=msg, font=FONT_SMALL, fg=RED, bg=BG, wraplength=600,
                  justify='center').pack()
-        tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=40, pady=12)
-        tk.Label(self._kick_list_frame,
-                 text='💡  Fix: Add a Kick cookies.txt in Settings → Downloader',
-                 font=('Segoe UI', 9, 'bold'), fg=ACCENT, bg=BG).pack()
-        tk.Label(self._kick_list_frame,
-                 text='1. Install "Get cookies.txt LOCALLY" browser extension\n'
-                      '2. Go to kick.com and log in\n'
-                      '3. Export cookies.txt\n'
-                      '4. Add the file path in ClipFinder Settings → Downloader → Cookies',
-                 font=FONT_SMALL, fg=FG2, bg=BG, justify='left').pack(pady=(4,0))
+        if '403' in msg or 'blocked' in msg.lower():
+            tk.Frame(self._kick_list_frame, bg=BORDER, height=1).pack(fill='x', padx=40, pady=12)
+            tk.Label(self._kick_list_frame,
+                     text='💡  Fix: Add a Kick cookies.txt in Settings → Downloader',
+                     font=('Segoe UI', 9, 'bold'), fg=ACCENT, bg=BG).pack()
+            tk.Label(self._kick_list_frame,
+                     text='1. Install "Get cookies.txt LOCALLY" browser extension\n'
+                          '2. Go to kick.com and log in\n'
+                          '3. Export cookies.txt\n'
+                          '4. Add the file path in ClipFinder Settings → Downloader → Cookies',
+                     font=FONT_SMALL, fg=FG2, bg=BG, justify='left').pack(pady=(4,0))
         self._kick_bot_lbl.config(text='Error loading VODs')
 
     def _kick_render_vods(self, vods, slug):
@@ -4149,20 +4350,18 @@ class App(tk.Tk):
         self._kick_bot_lbl.config(text=f'{len(vods)} VODs found for @{slug}')
 
         for vod in vods:
-            # Parse fields — Kick API varies slightly
-            vid_id    = vod.get('id', '')
-            title     = vod.get('session_title') or vod.get('title') or 'Untitled VOD'
-            duration  = vod.get('duration', 0)  # seconds
-            created   = (vod.get('created_at') or vod.get('start_time') or '')[:10]
-            views     = vod.get('views', 0)
-            thumb_url = vod.get('thumbnail', {})
-            if isinstance(thumb_url, dict):
-                thumb_url = thumb_url.get('src', '')
-            vod_url   = vod.get('video_url') or f'https://kick.com/video/{vid_id}'
+            # Normalised by kick_list_vods(): id, url, title, duration (s), created, views, is_live
+            title     = vod.get('title') or 'Untitled VOD'
+            duration  = vod.get('duration', 0) or 0  # seconds
+            created   = vod.get('created', '')
+            views     = vod.get('views', 0) or 0
+            vod_url   = vod.get('url') or f'https://kick.com/{slug}/videos/{vod.get("id", "")}'
             # Duration string
             dur_h, dur_rem = divmod(int(duration), 3600)
             dur_m, dur_s   = divmod(dur_rem, 60)
             dur_str = f'{dur_h}h {dur_m}m' if dur_h else f'{dur_m}m {dur_s}s'
+            if vod.get('is_live'):
+                dur_str = '🔴 live now (recording)'
 
             # Card
             card = tk.Frame(self._kick_list_frame, bg=BG2, cursor='hand2')
@@ -5080,6 +5279,7 @@ class App(tk.Tk):
             'dl_folder':         self.v_dl_folder.get() if hasattr(self, 'v_dl_folder') else '',
             'dl_quality':        self.v_dl_quality.get() if hasattr(self, 'v_dl_quality') else 'best',
             'auto_load':         self.v_auto_load.get() if hasattr(self, 'v_auto_load') else True,
+            'auto_transcribe':   self.v_auto_transcribe.get() if hasattr(self, 'v_auto_transcribe') else False,
             'thumb_outdir':      self.thumb_outdir_var.get() if hasattr(self, 'thumb_outdir_var') else '',
             'studio_scan_dir':   self.v_scan_folder.get() if hasattr(self, 'studio_scan_dir') else '',
             'studio_upscale_out': self.v_up_out.get() if hasattr(self, 'studio_upscale_out') else '',
@@ -10274,6 +10474,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                        variable=self.v_auto_load, font=FONT_SMALL, fg=FG2, bg=BG,
                        selectcolor=BG3, activebackground=BG, relief='flat',
                        cursor='hand2').pack(side='left', padx=12)
+        # Mutually exclusive with auto-load (ticking one unticks the other)
+        tk.Checkbutton(dl_act_row, text='Auto-transcribe after download',
+                       variable=self.v_auto_transcribe, font=FONT_SMALL, fg=FG2, bg=BG,
+                       selectcolor=BG3, activebackground=BG, relief='flat',
+                       cursor='hand2').pack(side='left', padx=(0, 12))
         # Keep _dl_queue_btn as alias so existing code doesn't break
         self._dl_queue_btn = self._dl_go_btn
         div()
@@ -10448,6 +10653,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 self._dl_queue_status.config(
                     text=f'✅ {len(urls)} done' if not self._dl_queue_cancel else '⛔ Cancelled'),
                 self.set_progress('', pct=0),
+                self._dl_run_pending_transcribe(),   # auto-transcribe waits until the whole queue is done
             ))
         import threading
         threading.Thread(target=_run_queue, daemon=True).start()
@@ -10488,8 +10694,8 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             # ── VOD detection — manual toggle OR auto-detect ──────────────
             _manual_vod = getattr(self, 'v_vod_mode', None)
             _manual_vod = _manual_vod.get() if _manual_vod else False
-            _is_vod_url = _manual_vod or any(p in url.lower() for p in [
-                'twitch.tv/videos/', 'kick.com/video/',
+            _is_vod_url = _manual_vod or bool(_KICK_VOD_RE.search(url)) or any(p in url.lower() for p in [
+                'twitch.tv/videos/',
             ])
             # For YouTube/generic we detect after getting info
             _vod_folder = str(Path(folder) / 'vod')
@@ -10564,95 +10770,32 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             if ffmpeg_loc:
                 ydl_opts['ffmpeg_location'] = ffmpeg_loc
 
-            # Kick.com — direct API with session token + requests fallback
-            if 'kick.com' in url.lower():
-                video_url = None
-                clip_match = _re.search(r'clips/(clip_[A-Za-z0-9]+)', url)
-                vod_match  = _re.search(r'/videos/([a-f0-9-]{36})', url)
+            # Kick.com — resolve the VOD/clip to its public stream URL ourselves. yt-dlp's
+            # Kick extractor still calls an API that 404s for the new UUIDv7 VOD ids.
+            if _KICK_PAGE_RE.match(url):
+                _kick_kind = 'clip' if _KICK_CLIP_RE.search(url) else 'VOD'
+                _ck_early  = self.v_cookies.get().strip() if hasattr(self, 'v_cookies') else ''
+                self._dl_log_write(f'🔧  Kick {_kick_kind} — resolving stream (Chrome impersonation)...', FG2)
                 try:
-                    # Use requests (always available) with browser headers
-                    import requests as _kick_req
-                    class _cffi:
-                        @staticmethod
-                        def get(url, headers=None, timeout=15, **kw):
-                            return _kick_req.get(url, headers=headers, timeout=timeout)
-                    _hdrs = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                        'Referer': 'https://kick.com/',
-                        'Accept': 'application/json',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Origin': 'https://kick.com',
-                    }
-                    # Add session token if available
-                    _ck_early = self.v_cookies.get().strip() if hasattr(self, 'v_cookies') else ''
-                    _kw_early = {'headers': _hdrs, 'timeout': 15}
-                    if _ck_early and Path(_ck_early).exists():
-                        try:
-                            import http.cookiejar as _cj_e, urllib.parse as _up_e
-                            _jar_e = _cj_e.MozillaCookieJar(_ck_early)
-                            _jar_e.load(ignore_discard=True, ignore_expires=True)
-                            for _ck_e in _jar_e:
-                                if _ck_e.name == 'session_token' and 'kick.com' in _ck_e.domain:
-                                    _hdrs['Authorization'] = f'Bearer {_up_e.unquote(_ck_e.value)}'
-                                    break
-                        except Exception: pass
-                    _kick_title    = None
-                    _kick_streamer = None
-                    if clip_match:
-                        clip_id = clip_match.group(1)
-                        self._dl_log_write('🔧  Kick clip — Chrome impersonation...', FG2)
-                        # Try both endpoints
-                        for _ep_clip in [f'https://kick.com/api/v2/clips/{clip_id}/play',
-                                         f'https://kick.com/api/v2/clips/{clip_id}',
-                                         f'https://kick.com/api/v1/clips/{clip_id}']:
-                            try:
-                                _resp = _cffi.get(_ep_clip, **_kw_early)
-                                if _resp.status_code == 200:
-                                    cd = _resp.json()
-                                    video_url = (cd.get('clip_url') or
-                                                cd.get('video_url') or
-                                                (cd.get('clip') or {}).get('clip_url') or
-                                                (cd.get('clip') or {}).get('video_url'))
-                                    _kick_streamer = (cd.get('channel', {}).get('slug') or
-                                                     cd.get('broadcaster', {}).get('username'))
-                                    _kick_title = cd.get('title') or cd.get('clip_title')
-                                    if video_url: break
-                            except Exception: continue
-                    elif vod_match:
-                        vod_id = vod_match.group(1)
-                        self._dl_log_write('🔧  Kick VOD — Chrome impersonation...', FG2)
-                        for ep in [f'v1/video/{vod_id}', f'v2/videos/{vod_id}']:
-                            try:
-                                _resp = _cffi.get(f'https://kick.com/api/{ep}', **_kw_early)
-                                if _resp.status_code == 200:
-                                    vd = _resp.json()
-                                    video_url = (vd.get('source') or vd.get('playback_url') or
-                                                vd.get('hls_url') or vd.get('video_url') or
-                                                (vd.get('livestream') or {}).get('source'))
-                                    _kick_streamer = (vd.get('channel', {}).get('slug') or
-                                                     vd.get('user', {}).get('username'))
-                                    _kick_title = vd.get('session_title') or vd.get('title')
-                                    if video_url: break
-                            except Exception: continue
-                except Exception as ke:
-                    self._dl_log_write(f'⚠️  curl_cffi: {ke}', YELLOW)
-                if video_url:
-                    self._dl_log_write('✅  Got Kick URL', FG2)
-                    url = video_url
+                    _kr = kick_resolve(url, token=_kick_session_token(_ck_early), log=self._dl_log_write)
+                except KickError:
+                    raise          # message is already user-facing — shown as the download error
+                except Exception as _ke:
+                    _kr = None
+                    self._dl_log_write(f'⚠️  Kick resolver error: {str(_ke)[:120]} — trying yt-dlp directly', YELLOW)
+                if _kr:
+                    self._dl_log_write('✅  Got Kick stream URL', FG2)
+                    if _kr.get('is_live') and _kr['kind'] == 'vod':
+                        self._dl_log_write('ℹ️  This VOD belongs to a stream that is still live — you get everything recorded so far', FG2)
+                    url = _kr['stream_url']
                     ydl_opts['format'] = 'best'
-                    # Override outtmpl with clean Kick name
-                    if _kick_streamer or _kick_title:
-                        import re as _re_k
-                        _ks = _re_k.sub(r'[\/:*?"<>|]', '', _kick_streamer or 'Kick').strip()
-                        _kt = _re_k.sub(r'[\/:*?"<>|]', '', _kick_title or 'clip').strip()[:60]
-                        ydl_opts['outtmpl'] = str(Path(_out_folder) / f'_cftmp_{_dl_tmp_id}_{_ks} - {_kt}.%(ext)s')
-                        self._dl_log_write(f'📁  Name: {_ks} - {_kt} - ClipFinder', FG2)
-                else:
-                    self._dl_log_write('⚠️  Kick API failed — trying yt-dlp...', YELLOW)
-                ydl_opts['http_headers'] = {
-                    'Referer': 'https://kick.com/',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-                }
+                    # Clean "<channel> - <title>" file name (emoji and reserved characters removed)
+                    _ks = _re.sub(r'[^\w\s\-.,!&@#()\[\]+]', '', _kr.get('channel') or '').strip() or 'Kick'
+                    _kt = _re.sub(r'\s+', ' ', _re.sub(r'[^\w\s\-.,!&@#()\[\]+]', '', _kr.get('title') or '')).strip()[:60] \
+                          or ('clip' if _kr['kind'] == 'clip' else 'VOD')
+                    ydl_opts['outtmpl'] = str(Path(_out_folder) / f'_cftmp_{_dl_tmp_id}_{_ks} - {_kt}.%(ext)s')
+                    self._dl_log_write(f'📁  Name: {_ks} - {_kt} - ClipFinder', FG2)
+                ydl_opts['http_headers'] = {'Referer': 'https://kick.com/', 'User-Agent': _KICK_UA}
 
             # Cookies
             cookies = self.v_cookies.get().strip()
@@ -10773,108 +10916,20 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                     (None,                 'best[ext=mp4]/best'),
                 ]
 
-            # Kick-specific: use curl_cffi with Chrome impersonation + session token
-            # yt-dlp's Kick extractor fails with 403 even with cookies because it
-            # doesn't do Cloudflare challenge bypass — curl_cffi does
-            is_kick = 'kick.com' in url.lower()
+            # Kick: the resolver above already swapped a kick.com page URL for its public stream
+            # URL (stream./clips. CDN hosts are downloaded directly by yt-dlp). If the URL is
+            # STILL a kick.com page here, the resolver crashed - give yt-dlp's own extractor a go.
+            is_kick = bool(_KICK_PAGE_RE.match(url))
             _kick_direct_ok = False
             if is_kick:
-                _kick_token = None
-                _ck_path = ydl_opts.get('cookiefile', '')
-                if _ck_path and Path(_ck_path).exists():
-                    try:
-                        import http.cookiejar as _cj_kick, urllib.parse as _up_kick
-                        _jar_kick = _cj_kick.MozillaCookieJar(_ck_path)
-                        _jar_kick.load(ignore_discard=True, ignore_expires=True)
-                        for _ck in _jar_kick:
-                            if _ck.name == 'session_token' and 'kick.com' in _ck.domain:
-                                _kick_token = _up_kick.unquote(_ck.value)
-                                break
-                    except Exception as _kt_err:
-                        self._dl_log_write(f'⚠️  Could not read session_token: {_kt_err}', YELLOW)
-
-                # Try direct API download first using requests
-                _kick_direct_ok = False
-                try:
-                    import requests as _cffi_kick_req, re as _re_kick, json as _js_kick
-                    class _cffi_kick:
-                        @staticmethod
-                        def get(url, headers=None, timeout=15, **kw):
-                            return _cffi_kick_req.get(url, headers=headers, timeout=timeout)
-
-                    _hdrs_kick = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                        'Accept': 'application/json',
-                        'Referer': 'https://kick.com/',
-                        'Origin': 'https://kick.com',
-                    }
-                    if _kick_token:
-                        _hdrs_kick['Authorization'] = f'Bearer {_kick_token}'
-                        self._dl_log_write(f'🔑  Kick session_token found', GREEN)
-                    _kw_kick = {'headers': _hdrs_kick, 'timeout': 15}
-
-                    # Detect clip vs VOD
-                    _clip_match = _re_kick.search(r'/clips/(clip_[A-Z0-9]+)', url, _re_kick.I)
-                    _vod_match  = _re_kick.search(r'/videos/([a-f0-9-]{36})', url, _re_kick.I)
-
-                    _stream_url = None
-                    if _clip_match:
-                        _clip_id = _clip_match.group(1)
-                        self._dl_log_write(f'🎬  Fetching Kick clip: {_clip_id}', FG2)
-                        _r = _cffi_kick.get(f'https://kick.com/api/v2/clips/{_clip_id}/play',
-                                            **_kw_kick)
-                        if _r.status_code == 200:
-                            _data = _r.json()
-                            _stream_url = (_data.get('clip', {}).get('clip_url') or
-                                           _data.get('source') or _data.get('url'))
-                    elif _vod_match:
-                        _vod_id = _vod_match.group(1)
-                        self._dl_log_write(f'📼  Fetching Kick VOD: {_vod_id}', FG2)
-                        _r = _cffi_kick.get(f'https://kick.com/api/v1/video/{_vod_id}',
-                                            **_kw_kick)
-                        if _r.status_code == 200:
-                            _data = _r.json()
-                            _stream_url = (_data.get('source') or _data.get('playback_url') or
-                                           _data.get('hls_url'))
-
-                    if _stream_url:
-                        self._dl_log_write(f'✅  Got Kick stream URL — downloading with ffmpeg', GREEN)
-                        # Use ffmpeg to download the stream directly
-                        import subprocess as _sp_kick
-                        _out_name = _re_kick.sub(r'[^\w\-.]', '_', url.split('/')[-1][:60]) + '.mp4'
-                        _dest_folder = _vod_folder if _is_vod_url else _clip_folder
-                        Path(_dest_folder).mkdir(parents=True, exist_ok=True)
-                        _out_path = str(Path(_dest_folder) / _out_name)
-                        _ffmpeg = self.cfg.get('ffmpeg_path', 'ffmpeg')
-                        _ff_cmd = [_ffmpeg, '-y', '-i', _stream_url,
-                                   '-c', 'copy', '-movflags', '+faststart', _out_path]
-                        self._dl_log_write(f'⬇️  Saving to {_out_path}', FG2)
-                        _proc = _sp_kick.Popen(_ff_cmd, stdout=_sp_kick.PIPE, stderr=_sp_kick.PIPE)
-                        _proc.wait()
-                        if _proc.returncode == 0 and Path(_out_path).exists():
-                            self._dl_log_write(f'✅  Saved: {_out_name}', GREEN)
-                            _kick_direct_ok = True
-                        else:
-                            _err_out = _proc.stderr.read().decode(errors='ignore')[-200:]
-                            self._dl_log_write(f'⚠️  ffmpeg failed: {_err_out}', YELLOW)
-                    else:
-                        self._dl_log_write(f'⚠️  Kick API returned no stream URL — falling back to yt-dlp', YELLOW)
-                except Exception as _kick_err:
-                    self._dl_log_write(f'⚠️  Kick direct failed: {str(_kick_err)[:80]} — trying yt-dlp', YELLOW)
-
-                if _kick_direct_ok:
-                    info = {'title': url.split('/')[-1]}  # dummy info to skip yt-dlp loop
-                else:
-                    # yt-dlp fallback with auth headers
-                    if _kick_token:
-                        ydl_opts['http_headers'] = {
-                            'Authorization': f'Bearer {_kick_token}',
-                            'Referer': 'https://kick.com/',
-                        }
-                    client_attempts = [
-                        (None, 'best[ext=mp4]/best'),
-                        (None, 'best'),
-                    ]
+                _kick_token = _kick_session_token(ydl_opts.get('cookiefile', ''))
+                if _kick_token:
+                    ydl_opts['http_headers'] = {'Authorization': f'Bearer {_kick_token}',
+                                                'Referer': 'https://kick.com/'}
+                client_attempts = [
+                    (None, 'best[ext=mp4]/best'),
+                    (None, 'best'),
+                ]
             if not (is_youtube and quality != 'audio' and info) and not (is_kick and _kick_direct_ok):
               for _ci, (_clients, _fmt) in enumerate(client_attempts):
                 try:
@@ -10943,6 +10998,11 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                             'Or export a cookies.txt file manually using "Get cookies.txt LOCALLY" extension.')
                     continue
             if not info:
+                if is_twitch and last_err and 'does not exist' in str(last_err).lower():
+                    raise Exception(
+                        'Twitch says this video does not exist.\n\n'
+                        'The VOD was deleted or has expired - Twitch only keeps past broadcasts for 14-60 days '
+                        'depending on the channel. Check the link, or grab a newer VOD.')
                 if is_twitch and last_err and ('401' in str(last_err) or 'unauthorized' in str(last_err).lower()):
                     raise Exception(
                         'Twitch VOD download failed (HTTP 401 Unauthorized).\n\n'
@@ -11040,6 +11100,9 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                         self.after(50, lambda _p=p: self.v_video.set(_p))
                         self.after(60, lambda: self._video_entry.config(fg=FG) if hasattr(self, '_video_entry') else None)
                         self.log(f'✅ Loaded: {Path(p).name} — hit ▶ FIND CLIPS', GREEN)
+                    elif self.v_auto_transcribe.get():
+                        self._dl_log_write('📝  Sending to Transcribe...', ACCENT2)
+                        self._dl_auto_transcribe(p)
                     elif self.v_auto_load.get():
                         self._dl_log_write('📎  Loading into Clip Finder...', ACCENT2)
                         self._dl_auto_load()
@@ -11160,6 +11223,35 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         self.log(f'✅  Loaded into Clip Finder: {Path(p).name}', GREEN)
         self.log('Hit ▶ FIND CLIPS to analyze, or 📝 TRANSCRIBE ONLY for a quick tweet.', FG2)
 
+    def _dl_auto_transcribe(self, path=None):
+        """Send a downloaded file to the Transcript page and start transcribing it.
+
+        While a download queue is still running this only remembers the file - the end of
+        the queue hands it back (see _dl_run_pending_transcribe), so a transcription never
+        competes with the next download. With several URLs the last file wins, the same as
+        auto-load."""
+        p = path or self._last_dl_path
+        if not p or not Path(p).exists():
+            return
+        if getattr(self, '_in_queue', False):
+            self._pending_transcribe = p
+            return
+        self._pending_transcribe = None
+        self._switch_nb('transcript')       # builds the tab on first visit, so v_trans_file exists afterwards
+        self.v_trans_file.set(p)
+        if self.running:
+            self.log('⚠  Another job is running — the file is loaded on the Transcript page; '
+                     'click Transcribe when it finishes.', YELLOW)
+            return
+        self.log(f'📝  Auto-transcribing: {Path(p).name}', ACCENT)
+        self.after(200, self._transcribe_standalone)
+
+    def _dl_run_pending_transcribe(self):
+        """Called when a download queue ends: transcribe the file that was held back."""
+        p, self._pending_transcribe = self._pending_transcribe, None
+        if p and self.v_auto_transcribe.get():
+            self._dl_auto_transcribe(p)
+
     def _dl_autosave(self, *_):
         # Merge into self.cfg so nothing else gets lost
         self.cfg.update({
@@ -11167,6 +11259,7 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
             'cookies_file': self.v_cookies.get(),
             'dl_quality':   self.v_dl_quality.get(),
             'auto_load':    self.v_auto_load.get(),
+            'auto_transcribe': self.v_auto_transcribe.get(),
         })
         save_cfg(self.cfg)
 
@@ -11175,14 +11268,17 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         if getattr(self, '_in_queue', False):
             self._dl_log_write(f'✅  Saved: {Path(filepath).name}', GREEN)
             return
+        # The Toplevel was never created here (NameError on every finished download since v1.3.2)
+        dlg = tk.Toplevel(self)
         dlg.title('Download Complete')
         dlg.configure(bg=BG2)
         dlg.resizable(False, False)
+        dlg.transient(self)
         dlg.grab_set()
         self.update_idletasks()
-        x = self.winfo_x() + self.winfo_width()//2 - 180
+        x = self.winfo_x() + self.winfo_width()//2 - 235
         y = self.winfo_y() + self.winfo_height()//2 - 80
-        dlg.geometry(f'360x160+{x}+{y}')
+        dlg.geometry(f'470x160+{x}+{y}')
         tk.Label(dlg, text='✅  Download Complete', font=('Segoe UI', 11,'bold'),
                  fg=GREEN, bg=BG2).pack(pady=(18,4))
         tk.Label(dlg, text=Path(filepath).name, font=FONT_SMALL, fg=FG2, bg=BG2).pack()
@@ -11194,6 +11290,10 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
         tk.Button(br, text='▶  Play', font=FONT_SMALL, bg=BG3, fg=FG,
                   relief='flat', bd=0, cursor='hand2', padx=8, pady=5,
                   command=lambda: (os.startfile(filepath), dlg.destroy())
+                  ).pack(side='left', padx=4)
+        tk.Button(br, text='📝  Transcribe', font=FONT_SMALL, bg=BG3, fg=FG,
+                  relief='flat', bd=0, cursor='hand2', padx=8, pady=5,
+                  command=lambda: (dlg.destroy(), self._dl_auto_transcribe(filepath))
                   ).pack(side='left', padx=4)
         tk.Button(br, text='✂  Load in Clip Finder', font=FONT_SMALL,
                   bg=ACCENT, fg='#000', relief='flat', bd=0, cursor='hand2', padx=8, pady=5,
@@ -12027,6 +12127,27 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
     def _ed_load_source(self):
         src = self._ed_src.get().strip()
         if not src or src == 'Paste Kick/Twitch/YouTube URL or browse local file...': return
+        # A kick.com page is not playable/cuttable — resolve it to the public HLS stream first
+        if _KICK_PAGE_RE.match(src) and (_KICK_VOD_RE.search(src) or _KICK_CLIP_RE.search(src)):
+            if getattr(self, '_ed_resolving', False):
+                return
+            self._ed_resolving = True
+            self._ed_status_lbl.config(text='Resolving Kick stream...')
+            _ck = self.v_cookies.get().strip() if hasattr(self, 'v_cookies') else ''
+            def _resolve_kick():
+                try:
+                    _kr = kick_resolve(src, token=_kick_session_token(_ck))
+                    self.after(0, lambda: self._ed_finish_load(_kr['stream_url']))
+                except Exception as _e:
+                    _msg = str(_e).splitlines()[0][:140] if str(_e) else 'unknown error'
+                    self.after(0, lambda: self._ed_status_lbl.config(text=f'Kick: {_msg}'))
+                finally:
+                    self._ed_resolving = False
+            threading.Thread(target=_resolve_kick, daemon=True).start()
+            return
+        self._ed_finish_load(src)
+
+    def _ed_finish_load(self, src):
         self._ed_source_url = src
         self._ed_is_url = src.startswith('http')
         self._ed_status_lbl.config(text=f'Loading: {Path(src).name if not self._ed_is_url else src[:60]}...')
@@ -12241,8 +12362,12 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                            '-avoid_negative_ts', 'make_zero',
                            out_path]
                 try:
-                    _sp2.run(cmd, capture_output=True, timeout=300)
-                    results.append((clip['label'], out_path, True))
+                    _pr = _sp2.run(cmd, capture_output=True, timeout=300)
+                    if _pr.returncode == 0 and Path(out_path).exists():
+                        results.append((clip['label'], out_path, True))
+                    else:
+                        _tail = (_pr.stderr or b'').decode(errors='ignore').strip().splitlines()[-1:] or ['ffmpeg failed']
+                        results.append((clip['label'], _tail[0][:200], False))
                 except Exception as e:
                     results.append((clip['label'], str(e), False))
 
@@ -14774,94 +14899,6 @@ TAGS: {_name1 or 'streaming'}, [exact topic from transcript], drama, streaming, 
                 self.log(f'Auto-selected provider: {pname}', FG2)
                 return
 
-
-        """AI Music Removal using Demucs — strips background music, keeps vocals."""
-        tk.Label(p, text='🎵  AI MUSIC REMOVAL', font=('Segoe UI', 11, 'bold'),
-                fg=ACCENT, bg=BG).pack(anchor='w', padx=20, pady=(14,2))
-        tk.Label(p, text='Strip copyrighted background music from clips. Keeps vocals and speech.',
-                font=FONT_SMALL, fg=FG2, bg=BG).pack(anchor='w', padx=20, pady=(0,10))
-
-        sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
-        sec.pack(fill='x', padx=16, pady=(0,8))
-        inner = tk.Frame(sec, bg=BG2); inner.pack(fill='x', padx=12, pady=10)
-
-        # Video file
-        tk.Label(inner, text='Video:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
-        self.v_mr_video = tk.StringVar()
-        vf = tk.Frame(inner, bg=BG3); vf.pack(side='left', fill='x', expand=True)
-        tk.Entry(vf, textvariable=self.v_mr_video, font=FONT_SMALL,
-                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
-                ).pack(side='left', fill='x', expand=True)
-        tk.Button(vf, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
-                 relief='flat', bd=0, cursor='hand2', padx=6,
-                 command=lambda: self.v_mr_video.set(
-                     filedialog.askopenfilename(
-                         filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm'),('All','*.*')]
-                     ) or self.v_mr_video.get())
-                 ).pack(side='right')
-        tk.Button(inner, text='Use Clip Finder video', font=FONT_SMALL,
-                 bg=BG3, fg=ACCENT2, relief='flat', bd=0, cursor='hand2', padx=8,
-                 command=lambda: self.v_mr_video.set(self.v_video.get())
-                 ).pack(side='left', padx=8)
-
-        # Output folder
-        out_row = tk.Frame(sec, bg=BG2); out_row.pack(fill='x', padx=12, pady=(0,8))
-        tk.Label(out_row, text='Output:', font=FONT_SMALL, fg=FG2, bg=BG2, width=10, anchor='w').pack(side='left')
-        self.v_mr_out = tk.StringVar(value=self.cfg.get('outdir',''))
-        of = tk.Frame(out_row, bg=BG3); of.pack(side='left', fill='x', expand=True)
-        tk.Entry(of, textvariable=self.v_mr_out, font=FONT_SMALL,
-                bg=BG3, fg=FG, insertbackground=ACCENT, relief='flat', bd=4
-                ).pack(side='left', fill='x', expand=True)
-        tk.Button(of, text='📁', font=FONT_SMALL, bg=BG3, fg=FG2,
-                 relief='flat', bd=0, cursor='hand2', padx=6,
-                 command=lambda: self.v_mr_out.set(
-                     filedialog.askdirectory() or self.v_mr_out.get())
-                 ).pack(side='right')
-
-        # Options
-        opt_sec = tk.Frame(p, bg=BG2, highlightbackground=BORDER, highlightthickness=1)
-        opt_sec.pack(fill='x', padx=16, pady=(0,8))
-        opt_inner = tk.Frame(opt_sec, bg=BG2); opt_inner.pack(fill='x', padx=12, pady=10)
-
-        tk.Label(opt_inner, text='Model:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
-        self.v_mr_model = tk.StringVar(value='htdemucs')
-        for val, lbl, hint in [
-            ('htdemucs',    'HTDemucs',    'Best quality — recommended'),
-            ('mdx_extra',   'MDX Extra',   'Faster, good quality'),
-            ('htdemucs_ft', 'HTDemucs FT', 'Fine-tuned, slower'),
-        ]:
-            f = tk.Frame(opt_inner, bg=BG2); f.pack(side='left', padx=(12,0))
-            tk.Radiobutton(f, text=lbl, variable=self.v_mr_model, value=val,
-                          font=FONT_SMALL, fg=FG, bg=BG2,
-                          selectcolor=BG3, activebackground=BG2,
-                          cursor='hand2').pack(side='left')
-            tk.Label(f, text=hint, font=('Segoe UI',7), fg=FG3, bg=BG2).pack(side='left', padx=(2,0))
-
-        # Keep options
-        keep_row = tk.Frame(opt_sec, bg=BG2); keep_row.pack(fill='x', padx=12, pady=(0,10))
-        tk.Label(keep_row, text='Keep:', font=FONT_SMALL, fg=FG2, bg=BG2).pack(side='left')
-        self.v_mr_keep_vocals = tk.BooleanVar(value=True)
-        self.v_mr_keep_other  = tk.BooleanVar(value=False)
-        tk.Checkbutton(keep_row, text='Vocals', variable=self.v_mr_keep_vocals,
-                      font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
-                      activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
-        tk.Checkbutton(keep_row, text='Other (SFX/ambience)', variable=self.v_mr_keep_other,
-                      font=FONT_SMALL, fg=FG, bg=BG2, selectcolor=BG3,
-                      activebackground=BG2, cursor='hand2').pack(side='left', padx=(8,0))
-        tk.Label(keep_row, text='Music (drums/bass/etc) is always removed',
-                font=('Segoe UI',7), fg=FG3, bg=BG2).pack(side='left', padx=8)
-
-        # Run button
-        btn_row = tk.Frame(p, bg=BG); btn_row.pack(fill='x', padx=16, pady=8)
-        tk.Button(btn_row, text='🎵  REMOVE MUSIC',
-                 font=('Segoe UI',10,'bold'), bg=ACCENT, fg='#000',
-                 relief='flat', bd=0, cursor='hand2', padx=20, pady=8,
-                 command=self._run_music_removal).pack(side='left')
-        tk.Label(btn_row, text='Runs locally — no API needed. Requires Demucs (auto-installs).',
-                font=FONT_SMALL, fg=FG2, bg=BG).pack(side='left', padx=12)
-
-        self.mr_status_lbl = tk.Label(p, text='', font=FONT_SMALL, fg=FG2, bg=BG, anchor='w')
-        self.mr_status_lbl.pack(fill='x', padx=20, pady=4)
 
     def _run_music_removal(self):
         """Run Demucs on all queued videos."""
